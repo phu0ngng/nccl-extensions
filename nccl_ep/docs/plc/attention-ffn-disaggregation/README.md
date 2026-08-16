@@ -12,29 +12,34 @@ change are covered in the upstream RFC and are not repeated here:
 
 - [NVIDIA/nccl#2111 — [RFC] nccl-ep: support Attention-MoE disaggregation](https://github.com/NVIDIA/nccl/issues/2111)
 
-This document records the design actually chosen to implement that RFC in the LL
-path, and in particular the three places where the implementation diverges from
-the RFC's sketch:
+This document records the API and LL-path design chosen to implement that RFC.
 
-1. AFD is expressed as a **rank-index reinterpretation of the existing symmetric
-   all-to-all**, not a new asymmetric collective.
-2. Routing metadata needs **no new channel**; the existing LL dispatch header
-   already carries it (RFC "Option A", obtained for free).
-3. The public API is a set of **role-asserting wrappers** over the existing
-   entry points, not a distinct AFD communicator type.
+**API.** One existing EP group spans all ranks. A V3 config field partitions it:
+
+```c
+ncclEpGroupConfig_t::num_attn_ranks   // N_a; 0 = classic homogeneous EP
+```
+
+Callers create the group and handle with the normal EP APIs
+(`ncclEpCreateGroup` / `ncclEpCreateHandle`, Rank-Major). Optional
+`ncclEpAfDispatch` / `ncclEpAfRecv` / `ncclEpAfCombine` / `ncclEpAfReturn`
+wrappers assert A- vs F-side role at the call site; `ncclEpDispatch` /
+`ncclEpCombine` remain valid if the framework branches itself.
+
+**Runtime.** The dispatch/combine kernels stay the symmetric all-to-all. AFD is
+index remapping plus role gating on the existing collective. Routing metadata
+rides in the existing LL dispatch header (no sidecar). Transport setup is
+unchanged: every rank still allocates the same windows and QPs.
 
 The first release is deliberately narrow: LL algorithm, Rank-Major layout,
 square partition. See [Scope](#scope-and-limits).
 
 ## Core design: partition, do not fork
 
-The RFC frames AFD as two disjoint groups joined by a new collective. Implementing
-it that way would have meant a second dispatch/combine kernel family, a second
-transport setup path, and a second thing to keep correct for every future LL
-change.
-
-Instead, a single EP group still spans all `nRanks`, and one new config field
-partitions it:
+A single EP group still spans all `nRanks`. Forking a second asymmetric collective
+would have meant a second dispatch/combine kernel family, a second transport
+setup path, and a second thing to keep correct for every future LL change.
+Partitioning instead:
 
 ```c
 ncclEpGroupConfig_t::num_attn_ranks   // N_a; 0 = classic homogeneous EP
@@ -99,54 +104,78 @@ existing token-count plumbing rather than being special-cased.
 
 ## Routing metadata: no new channel
 
-The RFC lists this as an open question with two options — inline in the payload
-header (A), or a compact sidecar sent ahead of the payload (B) — and leans toward B
-as the better fit for the preprocessing/dispatch two-phase model.
+LL's dispatch message header already carries `token_id` plus one routing entry per
+top-k position, because the symmetric path already needs the receiver to
+demultiplex into per-expert buffers. The F-side reconstructs expert offsets from
+exactly the same header, by exactly the same code — no AFD-specific sidecar.
 
-For the LL path the question does not arise. LL's dispatch message header already
-carries `token_id` plus one routing entry per top-k position, because the symmetric
-path already needs the receiver to demultiplex into per-expert buffers. The F-side
-reconstructs expert offsets from exactly the same header, by exactly the same code.
-This is Option A, at zero cost.
-
-Option B remains the open question for the HT path, whose preprocessing phase does
-compute a routing map the A-side would have to ship. That is out of scope here.
+A compact routing sidecar ahead of the payload remains an open question for the HT
+path, whose preprocessing phase does compute a routing map the A-side would have to
+ship. That is out of scope here.
 
 ## Transport
 
-The RFC anticipates that pure-sender / pure-receiver roles "may require changes to
-how nccl-ep sets up RDMA QPs and manages credit/flow control."
-
-They do not, for this design. Because AFD is the same collective over the same
-group, every rank still creates the same windows, signals, and GIN contexts. An
-A-rank simply never has traffic on the dispatch-recv direction. Validated
+Because AFD is the same collective over the same group, every rank still creates
+the same windows, signals, and GIN contexts. An A-rank simply never has traffic on
+the dispatch-recv direction. No QP or credit-path fork is required. Validated
 inter-node in the source MR (see [Validation](#validation)).
 
 ## Public API
 
-The RFC sketches `ncclEpCommCreateAF(comm, numAttnRanks, attnRanks, numExpertRanks,
-expertRanks, ...)` with explicit rank lists. This design replaces the lists with the
-`num_attn_ranks` prefix rule, which is what the kernel index arithmetic requires
-anyway — an arbitrary rank set would force an indirection table on every
-expert->rank mapping, on the critical path, for no expressiveness the caller cannot
-get by ordering its communicator.
+### Lifecycle
 
-The AFD entry points are thin role-asserting wrappers over the existing tensor-based
-API. `ncclEpAfComm_t` / `ncclEpAfHandle_t` are opaque aliases of `ncclEpGroup_t` /
-`ncclEpHandle_t`:
+```c
+ncclEpGroupConfig_t config = NCCL_EP_GROUP_CONFIG_INIT;
+config.algorithm = NCCL_EP_ALGO_LOW_LATENCY;
+config.num_experts = /* ... */;
+config.num_attn_ranks = N_a;   // ranks [0, N_a) A-side; [N_a, nRanks) F-side
+// ... other group config fields as for classic LL EP ...
 
-| A-side | F-side | Forwards to |
+ncclEpGroup_t group;
+ncclEpCreateGroup(&group, nccl_comm, &config);
+
+// A-ranks: topk_idx [num_tokens, top_k] over [0, num_experts)
+// F-ranks: topk_idx [0, top_k] (no source tokens)
+ncclEpHandle_t handle;
+ncclEpCreateHandle(&handle, group, NCCL_EP_LAYOUT_RANK_MAJOR,
+                   topk_idx, /*layout_info=*/NULL, /*config=*/NULL, stream);
+
+// ... dispatch / combine (see below) ...
+
+ncclEpHandleDestroy(handle);
+ncclEpGroupDestroy(group);
+```
+
+`num_attn_ranks` is a prefix of the communicator order: there is no separate
+create-AF API and no explicit attn/expert rank lists. An arbitrary rank set would
+force an indirection table on every expert→rank mapping on the critical path, for
+no expressiveness the caller cannot get by ordering its communicator.
+
+Constraints enforced at create time:
+
+- `num_attn_ranks` in `[0, nRanks)`; `0` is classic homogeneous EP
+- `num_attn_ranks > 0` requires LL algorithm and Rank-Major layout
+- `num_experts` divisible by `nRanks - num_attn_ranks`
+
+### Collectives
+
+Every rank still participates in each collective call. Optional role-named
+wrappers assert the caller's side and forward to the existing entry points:
+
+| Role | API | Forwards to |
 |---|---|---|
-| `ncclEpAfDispatch` | `ncclEpAfRecv` | `ncclEpDispatch` |
-| `ncclEpAfCombine` | `ncclEpAfReturn` | `ncclEpCombine` |
+| A-side (rank `< N_a`) | `ncclEpAfDispatch` | `ncclEpDispatch` |
+| A-side | `ncclEpAfCombine` | `ncclEpCombine` |
+| F-side (rank `≥ N_a`) | `ncclEpAfRecv` | `ncclEpDispatch` |
+| F-side | `ncclEpAfReturn` | `ncclEpCombine` |
 
-plus `ncclEpAfCommCreate` / `ncclEpAfCommDestroy` and `ncclEpAfCreateHandle` /
-`ncclEpAfDestroyHandle`.
+The wrappers exist for call-site assertion, not for behavior. Frameworks that
+prefer to branch themselves can call `ncclEpDispatch` / `ncclEpCombine` directly
+with `num_attn_ranks` set.
 
-The wrappers exist for the call-site assertion, not for behavior: they name the
-caller's role and fail loudly when a rank calls the wrong side. Callers that prefer
-to branch themselves can keep using `ncclEpDispatch` / `ncclEpCombine` directly with
-`num_attn_ranks` set.
+Tensor I/O matches classic Rank-Major LL EP: A-side supplies tokens and receives
+combined results; F-side receives into a caller-allocated Rank-Major buffer and
+returns expert outputs.
 
 ## ABI
 
@@ -159,8 +188,7 @@ a frozen boundary marker by `NCCL_EP_GROUP_CONFIG_V2_LAST_FIELD` and by an
 silently redefine what a V2 size means. Appending instead lets V1/V2 callers decode
 `num_attn_ranks` as 0 — exactly the classic-EP default — through the existing
 size-guarded `epDecodeStruct` path, with no version-specific handling anywhere.
-
-`ncclEpAfCommCreate` validates and decodes the config through that same path before
+`ncclEpCreateGroup` validates and decodes the config through that same path before
 reading `num_attn_ranks`, so a short struct from an older caller cannot be read as
 garbage.
 
@@ -169,7 +197,8 @@ garbage.
 Supported in this design:
 
 - LL algorithm only. `num_attn_ranks > 0` with HT is rejected at group creation.
-- Rank-Major layout only, enforced by `ncclEpAfCreateHandle`.
+- Rank-Major layout only, enforced by `ncclEpCreateHandle` / `ncclEpInitHandle`
+  when `num_attn_ranks > 0`.
 - **Square partition**: `N_a == N_f`.
 
 The square-partition limit is the one worth being explicit about, because nothing
@@ -184,7 +213,7 @@ Follow-ups, in expected order:
 
 1. General `N_a:N_f` ratios (dispatch-recv / combine-send source-rank fan-out).
 2. Expert-Major layout.
-3. HT path, including the RFC's Option B routing sidecar.
+3. HT path, including a routing sidecar if preprocessing cannot reuse the LL header.
 4. Reject non-square partitions explicitly until (1) lands.
 
 ## Implementation notes
@@ -230,7 +259,6 @@ classic EP, so `ep_test` will not catch it. Mitigation: keep the world-rank / F-
 distinction named and commented at each conversion site, and run `af_test` in CI once
 a multi-rank AFD job is available.
 
-**API surface for a narrow feature.** Eight new entry points that forward to two
-existing ones is a real maintenance cost if AFD does not see uptake. Mitigation: they
-are pure wrappers with no state, so they can be deprecated without touching the
-kernels.
+**Optional role wrappers.** Four wrappers that forward to two existing entry points
+are a small maintenance cost if AFD does not see uptake. Mitigation: they are pure
+wrappers with no state, so they can be deprecated without touching the kernels.
