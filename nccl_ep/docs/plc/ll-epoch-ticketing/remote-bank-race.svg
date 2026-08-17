@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="550" viewBox="0 0 960 550" role="img" aria-labelledby="title desc">
+  <title id="title">Private handle parity allows a remote LL bank race</title>
+  <desc id="desc">Rank zero progresses from dispatch A to dispatch B while rank one is still in dispatch A. Rank zero reuses or cleans bank zero while rank one is remotely writing dispatch A data into rank zero bank zero.</desc>
+  <style>
+    text { font-family: Arial, sans-serif; fill: #1f2937; }
+    .title { font-size: 25px; font-weight: 700; }
+    .label { font-size: 16px; font-weight: 700; }
+    .small { font-size: 14px; }
+    .tiny { font-size: 12px; }
+    .box { stroke: #334155; stroke-width: 2; }
+    .timeline { stroke: #64748b; stroke-width: 2; }
+    .arrow { stroke: #dc2626; stroke-width: 3; fill: none; marker-end: url(#red-arrow); }
+  </style>
+  <defs>
+    <marker id="red-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3z" fill="#dc2626"/></marker>
+  </defs>
+
+  <rect width="960" height="550" fill="#f8fafc"/>
+  <text x="36" y="40" class="title">Private handle parity can race a lagging peer&apos;s remote write</text>
+  <text x="36" y="66" class="small">Local stream order is preserved on each rank; there is no cross-rank lockstep between asynchronous LL launches.</text>
+
+  <text x="62" y="120" class="label">rank 0 (fast)</text>
+  <line x1="205" y1="116" x2="895" y2="116" class="timeline"/>
+  <rect x="225" y="89" width="235" height="54" rx="8" fill="#dbeafe" class="box"/>
+  <text x="247" y="112" class="label">D(A)</text>
+  <text x="247" y="132" class="tiny">uses its private parity</text>
+  <rect x="515" y="89" width="300" height="54" rx="8" fill="#fee2e2" class="box"/>
+  <text x="537" y="112" class="label">D(B)</text>
+  <text x="537" y="132" class="tiny">private parity reuses / cleans bank 0</text>
+
+  <text x="62" y="220" class="label">rank 1 (lagging)</text>
+  <line x1="205" y1="216" x2="895" y2="216" class="timeline"/>
+  <rect x="225" y="189" width="420" height="54" rx="8" fill="#dcfce7" class="box"/>
+  <text x="247" y="212" class="label">D(A)</text>
+  <text x="247" y="232" class="tiny">still sending its D(A) payload and signal to rank 0</text>
+  <rect x="700" y="189" width="115" height="54" rx="8" fill="#e2e8f0" class="box"/>
+  <text x="728" y="221" class="label">D(B)</text>
+
+  <rect x="58" y="305" width="844" height="194" rx="12" fill="#ffffff" class="box"/>
+  <text x="82" y="338" class="label">rank 0 group-owned RDMA allocation</text>
+  <rect x="91" y="360" width="344" height="102" rx="10" fill="#fee2e2" class="box"/>
+  <text x="114" y="391" class="label">Bank 0 — conflicting access</text>
+  <text x="114" y="416" class="small">rank 0 D(B): clean / reuse</text>
+  <text x="114" y="440" class="small">rank 1 D(A): remote RDMA write</text>
+  <rect x="526" y="360" width="344" height="102" rx="10" fill="#dcfce7" class="box"/>
+  <text x="549" y="391" class="label">Bank 1</text>
+  <text x="549" y="416" class="small">unaffected in this example</text>
+
+  <path d="M603 143 C 610 222, 429 280, 289 356" class="arrow"/>
+  <text x="625" y="281" class="small" fill="#b91c1c">rank 0 begins D(B)</text>
+  <path d="M432 243 C 419 282, 343 304, 310 356" class="arrow"/>
+  <text x="110" y="528" class="small">Group-owned epoch selection gives every operation on every handle the same bank order, preventing this parity divergence.</text>
+</svg>

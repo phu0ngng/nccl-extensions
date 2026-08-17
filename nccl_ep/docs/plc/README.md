@@ -3,3 +3,7 @@
 This subtree contains internal NCCL EP PLC design material. It is explicitly
 excluded from the public filter by `PUBLIC_PATHS.txt`; do not remove that
 exclusion without an explicit review.
+
+## PLCs
+
+- [Low-latency epoch ticketing](ll-epoch-ticketing/README.md) — graph-safe LL two-bank resource selection.
