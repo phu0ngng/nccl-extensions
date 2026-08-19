@@ -51,11 +51,11 @@ build:nccl_m2n:
         NVCC_GENCODE="$NVCC_GENCODE" \
         GTEST_DIR="${CI_PROJECT_DIR}/.ci/googletest/googletest" \
         lib tests bench reshard
-      test -s nccl_m2n/build/lib/libnccl_m2n.so
-      test -s nccl_m2n/build/include/nccl_m2n.h
-      test -x nccl_m2n/build/bin/basic_api_test_local
-      test -x nccl_m2n/build/bin/basic_api_test_mpi
-      test -x nccl_m2n/build/bin/reshard_bench
+      test -s build/lib/libnccl_m2n.so
+      test -s build/include/nccl_m2n.h
+      test -x build/bin/basic_api_test_local
+      test -x build/bin/basic_api_test_mpi
+      test -x build/bin/reshard_bench
       # Every function declared in the public header must (a) carry
       # NCCL_M2N_API and (b) be an exported, defined text symbol. The CMake
       # build compiles hidden-by-default, so a missing annotation links here
@@ -67,7 +67,7 @@ build:nccl_m2n:
       # the expected set too, so the check passes while the hidden-by-default
       # CMake build stops exporting it.
       hdr=nccl_m2n/src/nccl_m2n.h
-      lib=nccl_m2n/build/lib/libnccl_m2n.so
+      lib=build/lib/libnccl_m2n.so
       work=$(mktemp -d)
       trap 'rm -rf "$work"' EXIT
       # Leading whitespace is allowed on purpose: deleting just the
@@ -99,9 +99,9 @@ build:nccl_m2n:
     name: "nccl-m2n-${CI_COMMIT_SHORT_SHA}"
     expire_in: 24 hours
     paths:
-      - nccl_m2n/build/include/
-      - nccl_m2n/build/lib/
-      - nccl_m2n/build/bin/
+      - build/include/
+      - build/lib/
+      - build/bin/
 
 build_pretyche:
   stage: build
@@ -193,11 +193,11 @@ setup_eos:
       rm -rf "${dst}"
       mkdir -p "${dst}/bin" "${dst}/include" "${dst}/lib"
       cp -a "${CI_PROJECT_DIR}/.ci/nccl/build/." "${dst}/"
-      cp -a "${CI_PROJECT_DIR}/nccl_m2n/build/lib/libnccl_m2n.so" "${dst}/lib/"
-      cp -a "${CI_PROJECT_DIR}/nccl_m2n/build/include/nccl_m2n.h" "${dst}/include/"
-      cp -a "${CI_PROJECT_DIR}/nccl_m2n/build/bin/basic_api_test_local" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/nccl_m2n/build/bin/basic_api_test_mpi" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/nccl_m2n/build/bin/reshard_bench" "${dst}/bin/"
+      cp -a "${CI_PROJECT_DIR}/build/lib/libnccl_m2n.so" "${dst}/lib/"
+      cp -a "${CI_PROJECT_DIR}/build/include/nccl_m2n.h" "${dst}/include/"
+      cp -a "${CI_PROJECT_DIR}/build/bin/basic_api_test_local" "${dst}/bin/"
+      cp -a "${CI_PROJECT_DIR}/build/bin/basic_api_test_mpi" "${dst}/bin/"
+      cp -a "${CI_PROJECT_DIR}/build/bin/reshard_bench" "${dst}/bin/"
 
 setup_pretyche:
   stage: setup
@@ -304,7 +304,7 @@ package:python_m2n:
         CUDA_HOME=/usr/local/cuda \
         NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl/build" \
         bash "${CI_PROJECT_DIR}/python/ci/verify_m2n_package.sh" \
-        "${CI_PROJECT_DIR}/nccl_m2n/build"
+        "${CI_PROJECT_DIR}/build"
   artifacts:
     name: "nccl-extensions-python-${CI_COMMIT_SHORT_SHA}"
     expire_in: 24 hours

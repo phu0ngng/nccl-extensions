@@ -9,12 +9,14 @@ nccl_ep
 nccl_m2n
 python
 third_party
+makefiles
 .clang-format
 .clang-format-ignore
 .gitignore
 .gitmodules
 CONTRIBUTING.md
 LICENSE.txt
+Makefile
 README.md
 
 [exclude]

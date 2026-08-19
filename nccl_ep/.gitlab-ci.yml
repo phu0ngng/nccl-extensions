@@ -82,7 +82,6 @@ build_ipp6:
         --container-image="${container_image}" \
         --container-mounts="${container_mounts}" \
         env NCCL_HOME=/nccl_install/build \
-        NCCL_EP_BUILDDIR=/nccl_install/build \
         MPI_HOME="${MPI_HOME}" \
         make -C /workspace/nccl_ep \
           MPI=1 \
@@ -101,7 +100,6 @@ build_ipp6:
         --container-image="${container_image}" \
         --container-mounts="${container_mounts}" \
         env NCCL_HOME=/nccl_install/build \
-        NCCL_EP_BUILDDIR=/nccl_install/build \
         make -C /workspace/nccl_ep/tests \
           BUILDDIR=/nccl_install/build \
           GTEST_DIR=/workspace/.ci/googletest/googletest \
@@ -174,7 +172,6 @@ build_pretyche:
         --container-image="${container_image}" \
         --container-mounts="${container_mounts}" \
         env NCCL_HOME=/nccl_install/build \
-        NCCL_EP_BUILDDIR=/nccl_install/build \
         MPI_HOME="${MPI_HOME}" \
         make -C /workspace/nccl_ep \
           MPI=1 \
@@ -194,7 +191,6 @@ build_pretyche:
         --container-image="${container_image}" \
         --container-mounts="${container_mounts}" \
         env NCCL_HOME=/nccl_install/build \
-        NCCL_EP_BUILDDIR=/nccl_install/build \
         make -C /workspace/nccl_ep/tests \
           BUILDDIR=/nccl_install/build \
           GTEST_DIR=/workspace/.ci/googletest/googletest \
