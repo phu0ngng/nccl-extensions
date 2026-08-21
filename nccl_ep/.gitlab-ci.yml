@@ -18,14 +18,16 @@ variables:
   GIT_DEPTH: "1"
   CI_JOB_SUBPATH: "${CI_PIPELINE_ID}/${CI_JOB_ID}"
 
-  EOS_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${PARENT_PIPELINE_ID}"
-  PRE_NYX_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${PARENT_PIPELINE_ID}"
-  PRE_TYCHE_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${PARENT_PIPELINE_ID}"
-  IPP6_INSTALL_DIR: "/storage/gitlab-runner/nccl/install/${PARENT_PIPELINE_ID}"
+  # Parent artifacts are read-only inputs. Mutable installs belong to this
+  # child pipeline; individual jobs add their ID before writing so retries
+  # cannot overwrite another attempt's files.
+  EOS_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/eos"
+  PRE_NYX_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-nyx"
+  PRE_TYCHE_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-tyche"
+  IPP6_INSTALL_DIR: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}"
 
   IPP6_SLURM_PARTITION: "a100-cicd"
   IPP6_CUDA_HOME: "/storage/toolkits/cuda-12.9"
-  NCCL_HOME: "${IPP6_INSTALL_DIR}/build"
   MPI_HOME: "/usr/local/openmpi"
 
   EOS_CUDA_HOME: "/lustre/fsw/coreai_libraries_nccl/toolkits/cuda-12.8.0"
@@ -55,7 +57,8 @@ build_ipp6:
       job: build:nccl
       artifacts: true
   variables:
-    NCCL_HOME: "${IPP6_INSTALL_DIR}/build"
+    IPP6_BUILD_INSTALL_DIR: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}/ipp6/${CI_JOB_ID}"
+    NCCL_HOME: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}/ipp6/${CI_JOB_ID}/build"
     MPI_HOME: "/usr/local/openmpi"
     NVIDIA_VISIBLE_DEVICES: "void"
     SLURM_PARTITION: ""
@@ -68,11 +71,11 @@ build_ipp6:
       build_image_version="$(get_build_image_version)"
       container_image="$(get_build_tools_image "${build_image_version}")"
 
-      rm -rf "${IPP6_INSTALL_DIR}/build"
-      mkdir -p "${IPP6_INSTALL_DIR}/build"
-      cp -a .ci/nccl/build/. "${IPP6_INSTALL_DIR}/build/"
+      rm -rf "${IPP6_BUILD_INSTALL_DIR}/build"
+      mkdir -p "${IPP6_BUILD_INSTALL_DIR}/build"
+      cp -a .ci/nccl/build/. "${IPP6_BUILD_INSTALL_DIR}/build/"
 
-      container_mounts="${current_dir}:/workspace,${current_dir}/.ci/nccl:/nccl,${IPP6_INSTALL_DIR}:/nccl_install"
+      container_mounts="${current_dir}:/workspace,${current_dir}/.ci/nccl:/nccl,${IPP6_BUILD_INSTALL_DIR}:/nccl_install"
       srun \
         -p cpuonly \
         -J nccl-ep:build \
@@ -117,9 +120,13 @@ build_ipp6:
           cp -a "${unit_test}" "${ART}/test/nccl_ep/"
         fi
       done
+      printf 'NCCL_HOME=%s\nNCCL_EP_HOME=%s\nNCCL_EP_BUILDDIR=%s\n' \
+        "${NCCL_HOME}" "${NCCL_HOME}" "${NCCL_HOME}" > nccl_ep_install.env
   artifacts:
     paths:
       - nccl_ep_install_artifact/
+    reports:
+      dotenv: nccl_ep_install.env
     expire_in: 48 hours
 
 build_pretyche:
@@ -132,8 +139,9 @@ build_pretyche:
       job: build:nccl
       artifacts: true
   variables:
+    PRE_TYCHE_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-tyche/build-${CI_JOB_ID}"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NCCL_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
+    NCCL_HOME: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-tyche/build-${CI_JOB_ID}/build"
     MPI_HOME: "/usr/local/openmpi"
     NVIDIA_VISIBLE_DEVICES: "void"
     SLURM_PARTITION: ""
@@ -208,9 +216,12 @@ build_pretyche:
           cp -a "${unit_test}" "${ART}/test/nccl_ep/"
         fi
       done
+      printf 'NCCL_EP_BASE_ARTIFACT_DIR=%s\n' "${NCCL_HOME}" > nccl_ep_install.env
   artifacts:
     paths:
       - nccl_ep_install_artifact/
+    reports:
+      dotenv: nccl_ep_install.env
     expire_in: 48 hours
 
 
@@ -233,10 +244,12 @@ build_pretyche:
     - |
       set -euxo pipefail
       ART="${NCCL_EP_ARTIFACT_DIR:-${CI_PROJECT_DIR}/nccl_ep_install_artifact}"
-      DST="${NCCL_EP_MERGE_TARGET}"
+      DST="${NCCL_EP_MERGE_TARGET:-${EOS_INSTALL_DIR}/${CI_JOB_ID}/build}"
+      INSTALL_ROOT="$(dirname "${DST}")"
+      BASE_ARTIFACT_DIR="${NCCL_EP_BASE_ARTIFACT_DIR:-${NCCL_BASE_ARTIFACT_DIR:-}}"
       mkdir -p "${DST}/lib" "${DST}/include" "${DST}/test/nccl_ep"
-      if [[ -n "${NCCL_BASE_ARTIFACT_DIR:-}" ]]; then
-        cp -a "${NCCL_BASE_ARTIFACT_DIR}/." "${DST}/"
+      if [[ -n "${BASE_ARTIFACT_DIR}" ]]; then
+        cp -a "${BASE_ARTIFACT_DIR}/." "${DST}/"
       fi
       if [[ -n "${NCCL_CLUSTER_CONFIG_SOURCE:-}" ]]; then
         cp -a "${NCCL_CLUSTER_CONFIG_SOURCE}" "${NCCL_CLUSTER_CONFIG_TARGET}"
@@ -250,13 +263,19 @@ build_pretyche:
           cp -a "${unit_test}" "${DST}/test/nccl_ep/"
         fi
       done
+      # Downstream jobs consume the setup producer's path through dotenv.
+      printf 'NCCL_HOME=%s\nNCCL_EP_HOME=%s\nNCCL_EP_BUILDDIR=%s\nNCCL_EP_INSTALL_ROOT=%s\n' \
+        "${DST}" "${DST}" "${DST}" "${INSTALL_ROOT}" > nccl_ep_install.env
+  artifacts:
+    reports:
+      dotenv: nccl_ep_install.env
+    expire_in: 48 hours
 
 setup_eos:
   extends: .setup_base
   tags:
     - nccl-eos
   variables:
-    NCCL_EP_MERGE_TARGET: "${EOS_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
 
 setup_prenyx:
@@ -266,10 +285,10 @@ setup_prenyx:
   tags:
     - prenyx
   variables:
-    NCCL_EP_MERGE_TARGET: "${PRE_NYX_INSTALL_DIR}/build"
+    NCCL_EP_MERGE_TARGET: "${PRE_NYX_INSTALL_DIR}/${CI_JOB_ID}/build"
     CI_BUILDS_DIR: "${PRE_NYX_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NCCL_CLUSTER_CONFIG_SOURCE: "${CI_PROJECT_DIR}/.gitlab/ci/clusters/pre-nyx-config.sh"
-    NCCL_CLUSTER_CONFIG_TARGET: "${PRE_NYX_INSTALL_DIR}/pre-nyx-config.sh"
+    NCCL_CLUSTER_CONFIG_TARGET: "${PRE_NYX_INSTALL_DIR}/${CI_JOB_ID}/pre-nyx-config.sh"
 
 setup_pretyche:
   extends: .setup_base
@@ -279,9 +298,10 @@ setup_pretyche:
   tags:
     - ptyche
   variables:
-    NCCL_EP_MERGE_TARGET: "${PRE_TYCHE_INSTALL_DIR}/build"
-    NCCL_BASE_ARTIFACT_DIR: ""
+    NCCL_EP_MERGE_TARGET: "${PRE_TYCHE_INSTALL_DIR}/${CI_JOB_ID}/build"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
+    NCCL_CLUSTER_CONFIG_SOURCE: "${CI_PROJECT_DIR}/.gitlab/ci/clusters/pre-tyche-config.sh"
+    NCCL_CLUSTER_CONFIG_TARGET: "${PRE_TYCHE_INSTALL_DIR}/${CI_JOB_ID}/pre-tyche-config.sh"
 
 
 ##
@@ -293,11 +313,9 @@ unit_test_eos:
   tags:
     - nccl-eos
   needs:
-    - setup_eos
+    - job: setup_eos
+      artifacts: true
   variables:
-    NCCL_HOME: "${EOS_INSTALL_DIR}/build"
-    NCCL_EP_HOME: "${EOS_INSTALL_DIR}/build"
-    NCCL_EP_BUILDDIR: "${EOS_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NNODES: "1"
     NP: "8"
@@ -324,11 +342,9 @@ unit_test_pretyche:
   tags:
     - ptyche
   needs:
-    - setup_pretyche
+    - job: setup_pretyche
+      artifacts: true
   variables:
-    NCCL_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
-    NCCL_EP_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
-    NCCL_EP_BUILDDIR: "${PRE_TYCHE_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NNODES: "1"
     NP: "4"
@@ -340,7 +356,8 @@ unit_test_pretyche:
   script:
     - |
       set -euxo pipefail
-      source "${PRE_TYCHE_INSTALL_DIR}/pre-tyche-config.sh"
+      : "${NCCL_EP_INSTALL_ROOT:?setup_pretyche did not publish an install root}"
+      source "${NCCL_EP_INSTALL_ROOT}/pre-tyche-config.sh"
       export CUDA_HOME="${PRE_TYCHE_CUDA_HOME}"
       export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${LD_LIBRARY_PATH:-}"
       salloc \
@@ -364,12 +381,10 @@ integration_test_ipp6:
     - when: never
   needs:
     - job: build_ipp6
-      artifacts: false
+      artifacts: true
   tags:
     - ipp6-nccl
   variables:
-    NCCL_HOME: "${IPP6_INSTALL_DIR}/build"
-    NCCL_EP_HOME: "${IPP6_INSTALL_DIR}/build"
     NNODES: "1"
     NP: "8"
     NGPUS: "8"
@@ -394,11 +409,10 @@ integration_test_eos:
   tags:
     - nccl-eos
   needs:
-    - setup_eos
+    - job: setup_eos
+      artifacts: true
     - unit_test_eos
   variables:
-    NCCL_HOME: "${EOS_INSTALL_DIR}/build"
-    NCCL_EP_HOME: "${EOS_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NNODES: "1"
     NP: "8"
@@ -431,10 +445,9 @@ integration_test_prenyx:
   tags:
     - prenyx
   needs:
-    - setup_prenyx
+    - job: setup_prenyx
+      artifacts: true
   variables:
-    NCCL_HOME: "${PRE_NYX_INSTALL_DIR}/build"
-    NCCL_EP_HOME: "${PRE_NYX_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${PRE_NYX_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NNODES: "1"
     NP: "8"
@@ -446,7 +459,8 @@ integration_test_prenyx:
   script:
     - |
       set -euxo pipefail
-      source "${PRE_NYX_INSTALL_DIR}/pre-nyx-config.sh"
+      : "${NCCL_EP_INSTALL_ROOT:?setup_prenyx did not publish an install root}"
+      source "${NCCL_EP_INSTALL_ROOT}/pre-nyx-config.sh"
       export CUDA_HOME="${PRE_NYX_CUDA_HOME}"
       export MPI_HOME="${PRE_NYX_MPI_HOME}"
       export PATH="${MPI_HOME}/bin:${PATH}"
@@ -466,11 +480,10 @@ integration_test_pretyche:
   tags:
     - ptyche
   needs:
-    - setup_pretyche
+    - job: setup_pretyche
+      artifacts: true
     - unit_test_pretyche
   variables:
-    NCCL_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
-    NCCL_EP_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NNODES: "1"
     NP: "4"
@@ -483,7 +496,8 @@ integration_test_pretyche:
   script:
     - |
       set -euxo pipefail
-      source "${PRE_TYCHE_INSTALL_DIR}/pre-tyche-config.sh"
+      : "${NCCL_EP_INSTALL_ROOT:?setup_pretyche did not publish an install root}"
+      source "${NCCL_EP_INSTALL_ROOT}/pre-tyche-config.sh"
       export CUDA_HOME="${PRE_TYCHE_CUDA_HOME}"
       export MPI_HOME="${PRE_TYCHE_MPI_HOME}"
       export PATH="${MPI_HOME}/bin:${PATH}"
