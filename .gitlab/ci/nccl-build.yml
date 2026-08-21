@@ -17,7 +17,7 @@ variables:
   FF_ENABLE_JOB_CLEANUP: "true"
   FF_TIMESTAMPS: "true"
   BUILD_CONTAINER_IMAGE: "/storage/toolkits/docker_sqsh/nccl_build_tools-2.1.1-c12.8.0-u20.04.sqsh"
-  NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100"
+  NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_100a,code=sm_100a"
 
 .ipp6-build:
   tags:
