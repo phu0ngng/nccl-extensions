@@ -55,6 +55,53 @@ the selected targets are regenerated. Output is written under
 
 See `generate_cython.py --help` for all options.
 
+## Building shared libraries
+
+`build_lib.py` accepts one or more `LIB[@VERSION]` selectors and stages only
+the selected libraries and their installed headers into a Python project:
+
+```bash
+uv run build_assets/build_lib.py \
+  nccl_ep@0.2.0 nccl_m2n@0.1.0 \
+  --output-dir /path/to/python-project
+```
+
+An unversioned target uses the current checkout; a versioned target uses its
+conventional release tag. When `NCCL_HOME` is set, every selected target builds
+against that NCCL installation. Otherwise, each source checkout builds and uses
+its own vendored NCCL revision in a temporary directory. Each target is staged
+after its build succeeds.
+
+The installed build layout is preserved below each target's package:
+
+```text
+build/lib/libnccl_ep.so   -> nccl/ep/lib/libnccl_ep.so
+build/include/**          -> nccl/ep/include/**
+build/lib/libnccl_m2n.so  -> nccl/m2n/lib/libnccl_m2n.so
+build/include/nccl_m2n.h  -> nccl/m2n/include/nccl_m2n.h
+```
+
+## Building wheels
+
+`build_wheels.sh` builds both current-checkout libraries by default. Optional
+selectors are forwarded to `build_lib.py`:
+
+```bash
+CUDA_HOME=/usr/local/cuda ./build_assets/build_wheels.sh
+CUDA_HOME=/usr/local/cuda ./build_assets/build_wheels.sh \
+  nccl_ep@0.2.0 nccl_m2n@0.1.0
+```
+
+The native libraries are built inside cibuildwheel's manylinux container and
+staged into cibuildwheel's temporary project copy before the Python extensions
+are compiled. Native build output is not written into the source checkout.
+Wheels are written to `<repo>/build/dist`; set `BUILDDIR` to choose another
+output root. Docker and `uv` must be available on the host.
+Production wheel builds set `NCCL_EXTENSIONS_REQUIRE_NATIVE_LIBS=1`, so every
+packaged native library must have been selected and staged. Direct developer
+builds default this variable to `0` and warn instead, allowing an external
+library to be supplied at runtime.
+
 ## Adding a library
 
 Add its target definition to `TARGETS` in `generate_cython.py`, then add the
