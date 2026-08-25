@@ -25,6 +25,10 @@ README.md
 
 .gitlab/
 **/.gitlab-ci.yml
+# Binding-generation tooling is internal. Public builds use the checked-in
+# generated Cython sources under python/nccl/_extensions/bindings/.
+python/build_assets/
+python/ci/
 PUBLIC_PATHS.txt
 
 # Internal NCCL EP PLC design documents are never part of the public export.
