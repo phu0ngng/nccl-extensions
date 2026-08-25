@@ -49,6 +49,10 @@
 #endif
 #include "test_helpers.h"
 
+#ifndef GTEST_SKIP
+#error "nccl_m2n tests require GoogleTest >= 1.10.0 (GTEST_SKIP support)"
+#endif
+
 /* ======================================================================
  * API path selector — both resharding APIs are exercised from the same
  * test matrix.
@@ -1287,35 +1291,6 @@ static void basicApiPrintCaseList(const std::vector<TestCase>& cases, const Basi
     if (mw > 0) printf("[%4zu] %4d %s\n", i, mw, tc.name.c_str());
     else printf("[%4zu]    - %s  // no feasible world\n", i, tc.name.c_str());
   }
-}
-
-static std::string basicApiCurrentGtestName() {
-  const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
-  if (info == nullptr) return "<unknown>";
-
-  std::string name = info->test_case_name();
-  name += ".";
-  name += info->name();
-  return name;
-}
-
-static void basicApiRecordFallbackSkip(int* skippedCases, const char* reason, bool shouldPrint) {
-  if (!shouldPrint) return;
-
-  const char* message = (reason != nullptr) ? reason : "skipped";
-  ++(*skippedCases);
-  ::testing::Test::RecordProperty("skipReason", message);
-  printf("[  SKIPPED ] %s (%s)\n", basicApiCurrentGtestName().c_str(), message);
-  fflush(stdout);
-}
-
-static void basicApiPrintFallbackSkipSummary(int skippedCases, bool shouldPrint) {
-  if (!shouldPrint || skippedCases == 0) return;
-
-  printf("[  SKIPPED ] %d basic_api case%s (vendored gtest reports "
-         "skips as OK)\n",
-         skippedCases, skippedCases == 1 ? "" : "s");
-  fflush(stdout);
 }
 
 static bool basicApiRunAllAlgorithms(const BasicApiCliArgs& cli) {
