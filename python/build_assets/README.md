@@ -98,13 +98,15 @@ CUDA12_HOME=/usr/local/cuda-12.8 CUDA13_HOME=/usr/local/cuda-13.0 \
   nccl_ep@0.2.0 nccl_m2n@0.1.0
 ```
 
+The script first builds a source-only sdist and passes it directly to
+cibuildwheel, preventing ignored host build artifacts from entering a wheel.
 The native libraries are built once with each Toolkit inside cibuildwheel's
 manylinux container and staged under each facade's `lib/cu12` and `lib/cu13`
 directories before the Python extensions are compiled. Headers from both builds
 must match, except for EP's generated `config.h`, and are stored once. Native
 build output is not written into the source checkout.
-Wheels are written to `<repo>/build/dist`; set `BUILDDIR` to choose another
-output root. Docker and `uv` must be available on the host.
+Wheels and the sdist are written to `<repo>/build/dist`; set `BUILDDIR` to choose
+another output root. Docker and `uv` must be available on the host.
 Production wheel builds set `NCCL_EXTENSIONS_REQUIRE_NATIVE_LIBS=1`, so every
 packaged native library must have been selected and staged. Direct developer
 builds default this variable to `0` and warn instead, allowing an external

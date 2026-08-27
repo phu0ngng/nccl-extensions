@@ -118,6 +118,8 @@ BUILDDIR="$(cd "$BUILDDIR" && pwd -P)"
 DIST_DIR="$BUILDDIR/dist"
 
 mkdir -p "$DIST_DIR"
+SDIST_DIR="$(mktemp -d)"
+trap 'rm -rf "$SDIST_DIR"' EXIT
 
 echo "========================================="
 echo "Building nccl-extensions wheels"
@@ -129,6 +131,19 @@ echo "Output directory: $DIST_DIR"
 echo ""
 
 cd "$PYTHON_DIR"
+
+# Build through the source distribution so ignored host artifacts do not enter
+# cibuildwheel's package tree.
+echo ">>> Building source distribution"
+uv build --sdist --out-dir "$SDIST_DIR" .
+
+SDISTS=("$SDIST_DIR"/*.tar.gz)
+if [ ${#SDISTS[@]} -ne 1 ] || [ ! -f "${SDISTS[0]}" ]; then
+    echo "Error: expected exactly one source distribution under $SDIST_DIR" >&2
+    exit 1
+fi
+SDIST="${SDISTS[0]}"
+echo ">>> Source distribution: $SDIST"
 
 # Build wheels using cibuildwheel. CUDA's libcuda stub satisfies the native
 # link; the real driver library is supplied at runtime. Runtime libraries are
@@ -181,8 +196,6 @@ export CIBW_BEFORE_ALL="git config --global --add safe.directory $QUOTED_REPO_RO
     diff -qr \
         \"\$NATIVE_STAGING/cu12/nccl/m2n/include\" \
         \"\$NATIVE_STAGING/cu13/nccl/m2n/include\" && \
-    rm -rf \"{package}/nccl/ep/lib\" \"{package}/nccl/ep/include\" \
-        \"{package}/nccl/m2n/lib\" \"{package}/nccl/m2n/include\" && \
     mkdir -p \"{package}/nccl/ep/lib/cu12\" \"{package}/nccl/ep/lib/cu13\" \
         \"{package}/nccl/m2n/lib/cu12\" \"{package}/nccl/m2n/lib/cu13\" && \
     cp \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so\" \
@@ -196,7 +209,8 @@ export CIBW_BEFORE_ALL="git config --global --add safe.directory $QUOTED_REPO_RO
     cp -a \"\$NATIVE_STAGING/cu12/nccl/ep/include\" \"{package}/nccl/ep/\" && \
     cp -a \"\$NATIVE_STAGING/cu12/nccl/m2n/include\" \"{package}/nccl/m2n/\""
 
-uv tool run cibuildwheel --output-dir "$DIST_DIR" --platform linux .
+uv tool run cibuildwheel --output-dir "$DIST_DIR" --platform linux "$SDIST"
+cp "$SDIST" "$DIST_DIR/"
 
 echo ""
 echo "========================================="
@@ -206,5 +220,5 @@ echo "CUDA12_HOME: $CUDA12_HOME"
 echo "CUDA13_HOME: $CUDA13_HOME"
 echo "Output directory: $DIST_DIR"
 echo ""
-echo "Built packages:"
-find "$DIST_DIR" -type f -name "*.whl" | sort
+echo "Built distributions:"
+find "$DIST_DIR" -maxdepth 1 -type f \( -name "*.whl" -o -name "*.tar.gz" \) | sort

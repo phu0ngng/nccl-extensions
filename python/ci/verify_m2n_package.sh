@@ -103,7 +103,10 @@ with zipfile.ZipFile(sys.argv[1]) as wheel:
         raise SystemExit("wheel metadata is missing the bench extra")
 PY
 tar -tzf "${SDIST}" | grep -E '/nccl/_extensions/bindings/(nccl_m2n|cynccl_m2n)\.pyx$'
-tar -tzf "${SDIST}" | grep -E '/nccl/m2n/include/nccl_m2n\.h$'
+if tar -tzf "${SDIST}" | grep -E '/nccl/(ep|m2n)/include/'; then
+    echo "ERROR: the source distribution contains staged native headers" >&2
+    exit 1
+fi
 if tar -tzf "${SDIST}" | grep -E '\.so$'; then
     echo "ERROR: the source distribution contains a shared library" >&2
     exit 1
