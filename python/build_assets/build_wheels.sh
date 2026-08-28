@@ -16,7 +16,7 @@
 # built. A version selects that library's release tag; without one the current
 # checkout is used. Defaults to every library the wheel packages.
 #
-# Requires: CUDA_HOME environment variable set
+# Requires: CUDA12_HOME and CUDA13_HOME environment variables set
 
 set -euo pipefail
 
@@ -29,6 +29,21 @@ else
     TARGETS=("${DEFAULT_TARGETS[@]}")
 fi
 
+# A production wheel always carries both libraries. Selectors may choose each
+# library's version independently, but neither library may be omitted.
+for required_target in "${DEFAULT_TARGETS[@]}"; do
+    count=0
+    for selection in "${TARGETS[@]}"; do
+        if [ "${selection%%@*}" = "$required_target" ]; then
+            count=$((count + 1))
+        fi
+    done
+    if [ "$count" -ne 1 ]; then
+        echo "Error: specify $required_target exactly once" >&2
+        exit 1
+    fi
+done
+
 # Quote each selector for cibuildwheel's shell command. build_lib.py remains
 # the single source of truth for selector validation.
 TARGET_ARGUMENTS=()
@@ -38,21 +53,49 @@ for target in "${TARGETS[@]}"; do
 done
 TARGET_COMMAND="${TARGET_ARGUMENTS[*]}"
 
-# Check CUDA_HOME is set
-if [ -z "${CUDA_HOME:-}" ]; then
-    echo "Error: CUDA_HOME is not set" >&2
-    exit 1
-fi
-if [ "$CUDA_HOME" = "~" ]; then
-    CUDA_HOME="$HOME"
-elif [[ "$CUDA_HOME" = "~/"* ]]; then
-    CUDA_HOME="$HOME/${CUDA_HOME:2}"
-fi
-if ! CUDA_HOME="$(cd "$CUDA_HOME" 2>/dev/null && pwd -P)"; then
-    echo "Error: CUDA_HOME is not a directory: $CUDA_HOME" >&2
-    exit 1
-fi
-export CUDA_HOME
+resolve_cuda_home() {
+    local variable=$1
+    local value=${!variable:-}
+    if [ -z "$value" ]; then
+        echo "Error: $variable is not set" >&2
+        return 1
+    fi
+    if [ "$value" = "~" ]; then
+        value="$HOME"
+    elif [[ "$value" = "~/"* ]]; then
+        value="$HOME/${value:2}"
+    fi
+    if ! value="$(cd "$value" 2>/dev/null && pwd -P)"; then
+        echo "Error: $variable is not a directory: $value" >&2
+        return 1
+    fi
+    if [ ! -x "$value/bin/nvcc" ]; then
+        echo "Error: $variable/bin/nvcc is not executable" >&2
+        return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+validate_cuda_major() {
+    local cuda_home=$1
+    local expected_major=$2
+    local nvcc_version
+    if ! nvcc_version="$("$cuda_home/bin/nvcc" --version 2>&1)"; then
+        echo "Error: failed to run $cuda_home/bin/nvcc" >&2
+        return 1
+    fi
+    if ! grep -Eq "release ${expected_major}\\." <<<"$nvcc_version"; then
+        echo "Error: expected CUDA $expected_major at $cuda_home" >&2
+        echo "$nvcc_version" >&2
+        return 1
+    fi
+}
+
+CUDA12_HOME="$(resolve_cuda_home CUDA12_HOME)"
+CUDA13_HOME="$(resolve_cuda_home CUDA13_HOME)"
+validate_cuda_major "$CUDA12_HOME" 12
+validate_cuda_major "$CUDA13_HOME" 13
+export CUDA12_HOME CUDA13_HOME
 
 # Check uv is installed
 if ! command -v uv &> /dev/null; then
@@ -79,7 +122,8 @@ mkdir -p "$DIST_DIR"
 echo "========================================="
 echo "Building nccl-extensions wheels"
 echo "========================================="
-echo "CUDA_HOME: $CUDA_HOME"
+echo "CUDA12_HOME: $CUDA12_HOME"
+echo "CUDA13_HOME: $CUDA13_HOME"
 echo "Targets: ${TARGETS[*]}"
 echo "Output directory: $DIST_DIR"
 echo ""
@@ -89,19 +133,23 @@ cd "$PYTHON_DIR"
 # Build wheels using cibuildwheel. CUDA's libcuda stub satisfies the native
 # link; the real driver library is supplied at runtime. Runtime libraries are
 # excluded from auditwheel repair via pyproject.toml's repair-wheel-command.
-printf -v QUOTED_CUDA_HOME '%q' "$CUDA_HOME"
-export CIBW_ENVIRONMENT="CUDA_HOME=$QUOTED_CUDA_HOME NCCL_EXTENSIONS_REQUIRE_NATIVE_LIBS=1"
+printf -v QUOTED_CUDA12_HOME '%q' "$CUDA12_HOME"
+printf -v QUOTED_CUDA13_HOME '%q' "$CUDA13_HOME"
+export CIBW_ENVIRONMENT="CUDA_HOME=$QUOTED_CUDA12_HOME CUDA12_HOME=$QUOTED_CUDA12_HOME CUDA13_HOME=$QUOTED_CUDA13_HOME NCCL_EXTENSIONS_REQUIRE_NATIVE_LIBS=1"
 
 # The repository is mounted because cibuildwheel copies only the Python package
 # into the container, while build_lib.py needs the native sources next to it.
-printf -v CUDA_MOUNT '%q' "$CUDA_HOME:$CUDA_HOME:ro"
+printf -v CUDA12_MOUNT '%q' "$CUDA12_HOME:$CUDA12_HOME:ro"
+printf -v CUDA13_MOUNT '%q' "$CUDA13_HOME:$CUDA13_HOME:ro"
 printf -v REPO_MOUNT '%q' "$REPO_ROOT:$REPO_ROOT"
-export CIBW_CONTAINER_ENGINE="docker; create_args: -v $CUDA_MOUNT -v $REPO_MOUNT"
+export CIBW_CONTAINER_ENGINE="docker; create_args: -v $CUDA12_MOUNT -v $CUDA13_MOUNT -v $REPO_MOUNT"
 
 # Build the native libraries inside the manylinux container and stage each .so
 # and its owned headers into the package cibuildwheel is about to build. The
 # libraries ship in the wheel, so building them on the host would tie the wheel
 # to the host glibc and fail auditwheel's manylinux check.
+# EP config.h records build-toolkit paths; runtime environment variables
+# override those defaults, so only EP's other installed headers must match.
 # The container runs as root, so git rejects the mounted checkout as
 # dubiously owned; a LIB@VERSION target needs git to create its worktree.
 CONTAINER_PYTHON=/opt/python/cp312-cp312/bin/python
@@ -109,8 +157,44 @@ printf -v QUOTED_REPO_ROOT '%q' "$REPO_ROOT"
 printf -v QUOTED_BUILD_SCRIPT '%q' "$SCRIPT_DIR/build_lib.py"
 export CIBW_BEFORE_ALL="git config --global --add safe.directory $QUOTED_REPO_ROOT && \
     $CONTAINER_PYTHON -m pip install -q packaging && \
+    NATIVE_STAGING=\$(mktemp -d) && \
+    echo \">>> Starting native build with CUDA 12: \$CUDA12_HOME\" && \
     $CONTAINER_PYTHON $QUOTED_BUILD_SCRIPT $TARGET_COMMAND \
-    --cuda-home \"\$CUDA_HOME\" --output-dir \"{package}\""
+        --cuda-home \"\$CUDA12_HOME\" --output-dir \"\$NATIVE_STAGING/cu12\" && \
+    echo \">>> Finished native build with CUDA 12: \$CUDA12_HOME\" && \
+    echo \">>> Starting native build with CUDA 13: \$CUDA13_HOME\" && \
+    $CONTAINER_PYTHON $QUOTED_BUILD_SCRIPT $TARGET_COMMAND \
+        --cuda-home \"\$CUDA13_HOME\" --output-dir \"\$NATIVE_STAGING/cu13\" && \
+    echo \">>> Finished native build with CUDA 13: \$CUDA13_HOME\" && \
+    if readelf -d \
+        \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so\" \
+        \"\$NATIVE_STAGING/cu12/nccl/m2n/lib/cu12/libnccl_m2n.so\" \
+        \"\$NATIVE_STAGING/cu13/nccl/ep/lib/cu13/libnccl_ep.so\" \
+        \"\$NATIVE_STAGING/cu13/nccl/m2n/lib/cu13/libnccl_m2n.so\" | \
+        grep -q 'libcudart\\.so'; then \
+        echo 'Error: native libraries must not dynamically link libcudart' >&2; \
+        exit 1; \
+    fi && \
+    diff -qr --exclude=config.h \
+        \"\$NATIVE_STAGING/cu12/nccl/ep/include\" \
+        \"\$NATIVE_STAGING/cu13/nccl/ep/include\" && \
+    diff -qr \
+        \"\$NATIVE_STAGING/cu12/nccl/m2n/include\" \
+        \"\$NATIVE_STAGING/cu13/nccl/m2n/include\" && \
+    rm -rf \"{package}/nccl/ep/lib\" \"{package}/nccl/ep/include\" \
+        \"{package}/nccl/m2n/lib\" \"{package}/nccl/m2n/include\" && \
+    mkdir -p \"{package}/nccl/ep/lib/cu12\" \"{package}/nccl/ep/lib/cu13\" \
+        \"{package}/nccl/m2n/lib/cu12\" \"{package}/nccl/m2n/lib/cu13\" && \
+    cp \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so\" \
+        \"{package}/nccl/ep/lib/cu12/libnccl_ep.so\" && \
+    cp \"\$NATIVE_STAGING/cu13/nccl/ep/lib/cu13/libnccl_ep.so\" \
+        \"{package}/nccl/ep/lib/cu13/libnccl_ep.so\" && \
+    cp \"\$NATIVE_STAGING/cu12/nccl/m2n/lib/cu12/libnccl_m2n.so\" \
+        \"{package}/nccl/m2n/lib/cu12/libnccl_m2n.so\" && \
+    cp \"\$NATIVE_STAGING/cu13/nccl/m2n/lib/cu13/libnccl_m2n.so\" \
+        \"{package}/nccl/m2n/lib/cu13/libnccl_m2n.so\" && \
+    cp -a \"\$NATIVE_STAGING/cu12/nccl/ep/include\" \"{package}/nccl/ep/\" && \
+    cp -a \"\$NATIVE_STAGING/cu12/nccl/m2n/include\" \"{package}/nccl/m2n/\""
 
 uv tool run cibuildwheel --output-dir "$DIST_DIR" --platform linux .
 
@@ -118,6 +202,8 @@ echo ""
 echo "========================================="
 echo "Build completed successfully!"
 echo "========================================="
+echo "CUDA12_HOME: $CUDA12_HOME"
+echo "CUDA13_HOME: $CUDA13_HOME"
 echo "Output directory: $DIST_DIR"
 echo ""
 echo "Built packages:"

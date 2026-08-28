@@ -43,6 +43,7 @@ REPO_ROOT = PYTHON_SOURCE_ROOT.parent
 
 logger = logging.getLogger(__name__)
 _TARGET_VERSION_RE = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+_NVCC_RELEASE_RE = re.compile(r"\brelease\s+(\d+)\.")
 
 
 @dataclass(frozen=True)
@@ -170,11 +171,13 @@ class Target:
             headers.extend(matches)
         return tuple(dict.fromkeys(headers))
 
-    def copy_artifacts(self, output_dir: Path) -> None:
+    def copy_artifacts(self, output_dir: Path, cuda_major: int) -> None:
         """Copy this target's owned artifacts into its Python package."""
         headers = self.installed_headers()
         package_dir = output_dir / self.spec.package_relpath
-        library_destination = package_dir / "lib" / self.spec.library
+        library_destination = (
+            package_dir / "lib" / f"cu{cuda_major}" / self.spec.library
+        )
         library_destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.library, library_destination, follow_symlinks=True)
 
@@ -233,6 +236,25 @@ def _validate_selections(items: list[str]) -> None:
         )
         if result.returncode != 0:
             raise RuntimeError(f"Tag not found: {tag}")
+
+
+def _cuda_major(cuda_home: Path) -> int:
+    """Return the CUDA Toolkit major reported by ``cuda_home/bin/nvcc``."""
+    nvcc = cuda_home / "bin" / "nvcc"
+    if not nvcc.is_file() or not os.access(nvcc, os.X_OK):
+        raise RuntimeError(f"CUDA compiler is not executable: {nvcc}")
+    result = subprocess.run(
+        [str(nvcc), "--version"], check=False, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to run {nvcc}: {result.stderr.strip()}")
+    match = _NVCC_RELEASE_RE.search(result.stdout + result.stderr)
+    if match is None:
+        raise RuntimeError(f"Cannot determine CUDA version from {nvcc} --version")
+    major = int(match.group(1))
+    if major not in {12, 13}:
+        raise RuntimeError(f"CUDA {major} is not supported; expected CUDA 12 or 13")
+    return major
 
 
 @contextmanager
@@ -341,6 +363,7 @@ def main() -> int:
         raise RuntimeError(
             "Provide --cuda-home or set CUDA_PATH or CUDA_HOME to a directory"
         )
+    cuda_major = _cuda_major(cuda_home)
     configured_nccl_home = os.environ.get("NCCL_HOME")
     external_nccl_home = (
         Path(configured_nccl_home).expanduser().resolve()
@@ -381,7 +404,7 @@ def main() -> int:
                 else:
                     nccl_home = prepared_nccl_homes[source_root]
                 target.build(source_root, nccl_home, cuda_home)
-            target.copy_artifacts(output_dir)
+            target.copy_artifacts(output_dir, cuda_major)
             targets.append(target)
 
     logger.info(f"Artifacts location: {output_dir}")
