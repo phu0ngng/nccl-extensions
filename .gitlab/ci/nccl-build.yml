@@ -16,16 +16,18 @@ variables:
   FF_USE_FASTZIP: "true"
   FF_ENABLE_JOB_CLEANUP: "true"
   FF_TIMESTAMPS: "true"
-  BUILD_CONTAINER_IMAGE: "/storage/toolkits/docker_sqsh/nccl_build_tools-2.1.1-c12.8.0-u20.04.sqsh"
   NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_100a,code=sm_100a"
 
 .ipp6-build:
+  image: gitlab-master.nvidia.com:5005/nccl/nccl-images/ci:2.32-c12.9.0
   tags:
-    - ipp6-nccl
+    - ipp6-k8s
   variables:
-    NVIDIA_VISIBLE_DEVICES: "void"
-    SLURM_PARTITION: ""
-    GIT_CLONE_PATH: "${CI_BUILDS_DIR}/${CI_JOB_ID}/${CI_PROJECT_PATH}"
+    KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
+    KUBERNETES_CPU_REQUEST: 14
+    KUBERNETES_CPU_LIMIT: 32
+    KUBERNETES_MEMORY_REQUEST: 64Gi
+    KUBERNETES_MEMORY_LIMIT: 128Gi
 
 .build-nccl:
   extends: .ipp6-build
@@ -36,20 +38,10 @@ variables:
   script:
     - |
       set -euxo pipefail
-      current_dir="$(realpath .)"
       NCCL_COMMIT="$(git -C third_party/nccl rev-parse HEAD)"
       echo "Building public NCCL at ${NCCL_COMMIT}"
       test -f third_party/googletest/googletest/src/gtest-all.cc
-      srun \
-        -p cpuonly \
-        -J nccl-extensions:nccl \
-        -t 00:45:00 \
-        -n 1 \
-        --exclusive \
-        --container-image="${BUILD_CONTAINER_IMAGE}" \
-        --container-mounts="${current_dir}:${current_dir}" \
-        env NVCC_GENCODE="${NVCC_GENCODE}" \
-        make -C "${current_dir}/third_party/nccl" -j"$(nproc)" src.build
+      make -C third_party/nccl -j"$(nproc)" NVCC_GENCODE="${NVCC_GENCODE}" src.build
       mkdir -p .ci
       cp -a third_party/nccl .ci/nccl
       cp -a third_party/googletest .ci/googletest
