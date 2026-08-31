@@ -48,64 +48,49 @@ workflow:
 ##
 
 build_ipp6:
+  extends: .ipp6-build
+  # Ubuntu 22.04 provides std::filesystem in the standard libstdc++ runtime.
+  # This avoids linking the legacy libstdc++fs archive, which produced an
+  # incompatible libnccl_ep.so that segfaulted when loaded on EOS.
+  image: nvidia/cuda:12.8.1-devel-ubuntu22.04
   stage: build
-  tags:
-    - ipp6-nccl
   timeout: 2h
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
       job: build:nccl
       artifacts: true
   variables:
-    IPP6_BUILD_INSTALL_DIR: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}/ipp6/${CI_JOB_ID}"
-    NCCL_HOME: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}/ipp6/${CI_JOB_ID}/build"
-    MPI_HOME: "/usr/local/openmpi"
-    NVIDIA_VISIBLE_DEVICES: "void"
-    SLURM_PARTITION: ""
-    GIT_CLONE_PATH: "${CI_BUILDS_DIR}/${CI_JOB_ID}/${CI_PROJECT_PATH}"
+    NCCL_HOME: "${CI_PROJECT_DIR}/build"
+    MPI_HOME: "/usr/lib/x86_64-linux-gnu/openmpi"
+    LIBRARY_PATH: "/usr/local/cuda/lib64/stubs"
+  before_script:
+    - apt-get update
+    - >
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+      build-essential
+      libopenmpi-dev
+      openmpi-bin
   script:
     - |
       set -euxo pipefail
-      source "${CI_PROJECT_DIR}/.gitlab/ci/clusters/ipp6-slurm-config.sh"
-      current_dir="$(realpath .)"
-      build_image_version="$(get_build_image_version)"
-      container_image="$(get_build_tools_image "${build_image_version}")"
+      rm -rf "${NCCL_HOME}"
+      mkdir -p "${NCCL_HOME}"
+      cp -a "${CI_PROJECT_DIR}/.ci/nccl/build/." "${NCCL_HOME}/"
 
-      rm -rf "${IPP6_BUILD_INSTALL_DIR}/build"
-      mkdir -p "${IPP6_BUILD_INSTALL_DIR}/build"
-      cp -a .ci/nccl/build/. "${IPP6_BUILD_INSTALL_DIR}/build/"
-
-      container_mounts="${current_dir}:/workspace,${current_dir}/.ci/nccl:/nccl,${IPP6_BUILD_INSTALL_DIR}:/nccl_install"
-      srun \
-        -p cpuonly \
-        -J nccl-ep:build \
-        -t 01:00:00 \
-        -n 1 \
-        --exclusive \
-        --container-image="${container_image}" \
-        --container-mounts="${container_mounts}" \
-        env NCCL_HOME=/nccl_install/build \
+      env NCCL_HOME="${NCCL_HOME}" \
         MPI_HOME="${MPI_HOME}" \
-        make -C /workspace/nccl_ep \
+        make -C "${CI_PROJECT_DIR}/nccl_ep" \
           MPI=1 \
           MPI_HOME="${MPI_HOME}" \
-          NCCL_SUBMODULE_HOME=/nccl \
-          BUILDDIR=/nccl_install/build \
+          NCCL_SUBMODULE_HOME="${CI_PROJECT_DIR}/.ci/nccl" \
+          BUILDDIR="${NCCL_HOME}" \
           NVCC_GENCODE="${NVCC_GENCODE}" \
           ep_test ep_bench
 
-      srun \
-        -p cpuonly \
-        -J nccl-ep:unit-build \
-        -t 01:00:00 \
-        -n 1 \
-        --exclusive \
-        --container-image="${container_image}" \
-        --container-mounts="${container_mounts}" \
-        env NCCL_HOME=/nccl_install/build \
-        make -C /workspace/nccl_ep/tests \
-          BUILDDIR=/nccl_install/build \
-          GTEST_DIR=/workspace/.ci/googletest/googletest \
+      env NCCL_HOME="${NCCL_HOME}" \
+        make -C "${CI_PROJECT_DIR}/nccl_ep/tests" \
+          BUILDDIR="${NCCL_HOME}" \
+          GTEST_DIR="${CI_PROJECT_DIR}/.ci/googletest/googletest" \
           NVCC_GENCODE="${NVCC_GENCODE}"
 
       ART="${NCCL_EP_ARTIFACT_STAGING:-nccl_ep_install_artifact}"
@@ -120,13 +105,9 @@ build_ipp6:
           cp -a "${unit_test}" "${ART}/test/nccl_ep/"
         fi
       done
-      printf 'NCCL_HOME=%s\nNCCL_EP_HOME=%s\nNCCL_EP_BUILDDIR=%s\n' \
-        "${NCCL_HOME}" "${NCCL_HOME}" "${NCCL_HOME}" > nccl_ep_install.env
   artifacts:
     paths:
       - nccl_ep_install_artifact/
-    reports:
-      dotenv: nccl_ep_install.env
     expire_in: 48 hours
 
 build_pretyche:
