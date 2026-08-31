@@ -22,7 +22,6 @@ PACKAGE_DIR="${ROOT}/python"
 M2N_PACKAGE_DIR="${PACKAGE_DIR}/nccl/m2n"
 DIST_DIR="${PACKAGE_DIR}/dist"
 VENV_DIR="${PACKAGE_DIR}/.ci-m2n-wheel-venv"
-BOOTSTRAP_DIR="${PACKAGE_DIR}/.ci-m2n-bootstrap"
 TOOLS_VENV_DIR="${PACKAGE_DIR}/.ci-m2n-tools"
 UV_CACHE_DIR="${PACKAGE_DIR}/.ci-m2n-uv-cache"
 UV_PYTHON_INSTALL_DIR="${PACKAGE_DIR}/.ci-m2n-uv-python"
@@ -35,8 +34,7 @@ test -d "${NCCL_HOME}/lib"
 
 cleanup() {
     rm -rf "${M2N_PACKAGE_DIR}/lib" "${M2N_PACKAGE_DIR}/include" "${VENV_DIR}" \
-        "${BOOTSTRAP_DIR}" "${TOOLS_VENV_DIR}" "${UV_CACHE_DIR}" \
-        "${UV_PYTHON_INSTALL_DIR}"
+        "${TOOLS_VENV_DIR}" "${UV_CACHE_DIR}" "${UV_PYTHON_INSTALL_DIR}"
 }
 trap cleanup EXIT
 rm -rf "${DIST_DIR}"
@@ -49,13 +47,12 @@ cp "${HEADER}" "${M2N_PACKAGE_DIR}/include/nccl_m2n.h"
 # The wheel build below Cython-compiles the checked-in generated sources for
 # both EP and M2N. Regeneration is intentionally out of scope for this package
 # gate: it needs private cybind source access unavailable in the build image.
-# The build-tools image has Python 3.8 and a read-only home directory, while
-# this package requires Python 3.10+. Bootstrap uv into the writable checkout,
-# then let it provision an isolated supported interpreter and tool environment.
-python3 -m pip install --disable-pip-version-check --target "${BOOTSTRAP_DIR}" uv
+# The CI image provides uv in /usr/local/bin. Use it to provision an isolated
+# supported interpreter and tool environment in the writable checkout.
+command -v uv
 export UV_CACHE_DIR UV_PYTHON_INSTALL_DIR
-PYTHONPATH="${BOOTSTRAP_DIR}" python3 -m uv venv --python 3.12 --seed "${TOOLS_VENV_DIR}"
-"${TOOLS_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check build uv
+uv venv --python 3.12 --seed "${TOOLS_VENV_DIR}"
+"${TOOLS_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check build
 export PATH="${TOOLS_VENV_DIR}/bin:${PATH}"
 PYTHON="${TOOLS_VENV_DIR}/bin/python"
 
