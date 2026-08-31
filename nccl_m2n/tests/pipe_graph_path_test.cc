@@ -20,6 +20,7 @@
 #include "reshard_internal.h"
 #include "staging_buffer.h"
 #include "staging_types.h"
+#include "test_helpers.h"
 
 namespace {
 
@@ -172,6 +173,7 @@ protected:
     ASSERT_EQ(MPI_SUCCESS, MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
 
     ASSERT_EQ(ncclSuccess, ncclCommInitRank(comm, world_, id, rank_));
+    ASSERT_EQ(ncclSuccess, testWaitCommReady(*comm));
   }
 
   void preparePipeParams(ncclComm_t comm, const size_t (&tensorDims)[2], ncclDistTensor_t* src,
