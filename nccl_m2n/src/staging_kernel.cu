@@ -20,6 +20,7 @@
 #include "cuda_runtime.h"
 
 #include "m2n_checks.h"
+#include "reshard_internal.h"
 #include "staging_types.h"
 #include "staging_primitives.cuh"
 
@@ -67,6 +68,10 @@ bool pipeLaunchCompletionEventSupported() {
       cudaDriverGetVersion(&driverVersion) == cudaSuccess && driverVersion >= kPipeLaunchCompletionMinDriverVersion;
   });
   return supported;
+}
+
+bool pipeLaunchOrderingEnabled() {
+  return reshardUsePipeLaunchOrder() && pipeLaunchCompletionEventSupported();
 }
 
 PipeLaunchOrderState* getPipeLaunchOrderState(int cudaDev) {
@@ -1624,7 +1629,7 @@ static ncclResult_t launchPipeGeneratorSpecialized(const StagingKernelParams* ho
                            cudaFuncAttributeMaxDynamicSharedMemorySize, dynamic_smem_bytes));
   }
 #if NCCLM2N_PIPE_HAS_LAUNCH_COMPLETION_EVENT
-  if (pipeLaunchCompletionEventSupported()) {
+  if (pipeLaunchOrderingEnabled()) {
     NCCL_M2N_CHECK(
       (launchPipeKernelOrdered(dim3(grid), dim3(PIPE_GENERATOR_THREADS), dynamic_smem_bytes, stream,
                                StagingReshardKernel_PipeGenerator<TmaTileSize, DoRdmaSources, DoRingForward,
@@ -1710,7 +1715,7 @@ ncclResult_t launchStagingReshardPipeSplit(const StagingKernelParams* hostParams
 
   if (launch_trainer && trainer_grid > 0) {
 #if NCCLM2N_PIPE_HAS_LAUNCH_COMPLETION_EVENT
-    if (pipeLaunchCompletionEventSupported()) {
+    if (pipeLaunchOrderingEnabled()) {
       NCCL_M2N_CHECK((launchPipeKernelOrdered(dim3(trainer_grid), dim3(PIPE_TRAINER_THREADS), 0, stream,
                                             StagingReshardKernel_PipeTrainer, devParams, devPipePlan, *call, *devCommA,
                                             *devCommB)));

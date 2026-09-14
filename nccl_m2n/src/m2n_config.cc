@@ -161,6 +161,7 @@ void resetReshardRuntimeConfig() {
   gReshardGinContextCount = DEFAULT_GIN_CONTEXT_COUNT;
   gReshardPipeGinPeersPerSlot = STAGING_PIPE_GIN_PEERS_PER_SLOT;
   gReshardPipeGinChannelsPerPeer = STAGING_PIPE_GIN_CHANNELS_PER_PEER;
+  gReshardPipeLaunchOrder = true;
   gReshardUseInternalStreams = true;
   gReshardChunkSizeBytes = 0;
   for (int i = 0; i < kMaxStagingBuckets; i++) {
@@ -317,6 +318,11 @@ void applyReshardEnv() {
   bool useInternalStreams;
   if (parseBoolEnv(getenv("NCCL_RESHARD_USE_INTERNAL_STREAMS"), &useInternalStreams)) {
     gReshardUseInternalStreams = useInternalStreams;
+  }
+
+  bool pipeLaunchOrder;
+  if (parseBoolEnv(getenv("NCCL_RESHARD_PIPE_LAUNCH_ORDER"), &pipeLaunchOrder)) {
+    gReshardPipeLaunchOrder = pipeLaunchOrder;
   }
 
   bool splitComm;

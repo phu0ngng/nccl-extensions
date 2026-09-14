@@ -196,6 +196,7 @@ inline int gReshardGinContextCount = DEFAULT_GIN_CONTEXT_COUNT;
  * Local LSA fanout uses staging-buffer cursors and does not consume GIN space. */
 inline int gReshardPipeGinPeersPerSlot = STAGING_PIPE_GIN_PEERS_PER_SLOT;
 inline int gReshardPipeGinChannelsPerPeer = STAGING_PIPE_GIN_CHANNELS_PER_PEER;
+inline bool gReshardPipeLaunchOrder = true;
 /* Stream execution mode populated at first ncclM2nInit from
  * NCCL_RESHARD_USE_INTERNAL_STREAMS. Internal streams are the default; false
  * keeps work on caller streams with ordered DevComm reuse. */
@@ -346,6 +347,9 @@ ReshardCopyAlgorithm reshardGetLastCompletedCopyAlgorithmForTest();
 #endif
 inline bool reshardUseInternalStreams() {
   return gReshardUseInternalStreams;
+}
+inline bool reshardUsePipeLaunchOrder() {
+  return gReshardPipeLaunchOrder;
 }
 /* ======================================================================
  * m2n_config.cc — configuration appliers
