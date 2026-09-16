@@ -1520,9 +1520,9 @@ __global__ __launch_bounds__(PIPE_GENERATOR_THREADS, 1) void StagingReshardKerne
               pipe_plan->lsaSourceLayouts[channel_id][source.copyLayoutIndex];
             pipe_unpack_chunk(user_dst, tile_src, source_layout, cur_desc.byte_start, cur_desc.bytes,
                               PIPE_GENERATOR_UNPACK_THREADS, unpack_thread);
+            const int last_tile = cur_desc.last_tile;
             /* Keep the tile queued until the full unpack group has consumed it. */
             barrier_sync_subset(PIPE_GENERATOR_UNPACK_BARRIER_ID, PIPE_GENERATOR_UNPACK_THREADS);
-            const int last_tile = cur_desc.last_tile;
             tiles_done++;
             if (last_tile) {
               chunks_done++;
