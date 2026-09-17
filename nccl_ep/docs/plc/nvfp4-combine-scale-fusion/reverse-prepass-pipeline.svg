@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="760" viewBox="0 0 1100 760" role="img" aria-labelledby="title desc">
+  <title id="title">Reverse NVFP4 amax prepass and shared forward pipeline</title>
+  <desc id="desc">A seven-chunk token is scanned from chunk six to chunk zero. The three-stage shared-memory ring ends with chunks zero through two resident, which the forward quantize-and-send pipeline consumes before resuming ordinary TMA loads at chunk three.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3z" fill="#2563eb"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3z" fill="#15803d"/></marker>
+    <style>text{font-family:Arial,sans-serif;fill:#1f2937}.title{font-size:25px;font-weight:bold}.heading{font-size:17px;font-weight:bold}.label{font-size:14px}.small{font-size:12px}.box{stroke:#334155;stroke-width:2}.blue-arrow{stroke:#2563eb;stroke-width:3;fill:none;marker-end:url(#arrow-blue)}.green-arrow{stroke:#15803d;stroke-width:3;fill:none;marker-end:url(#arrow-green)}</style>
+  </defs>
+  <rect width="1100" height="760" fill="#f8fafc"/>
+  <text x="40" y="42" class="title">Fused NVFP4 scale: reverse prepass preserves the forward pipeline head</text>
+  <text x="40" y="72" class="label">Example: hidden 7168 = seven 1024-element BF16 TMA chunks; three SMEM stages per warp</text>
+
+  <text x="42" y="118" class="heading">1. Token in global memory</text>
+  <g transform="translate(42,136)">
+    <rect x="0" y="0" width="130" height="52" rx="6" fill="#dbeafe" class="box"/><text x="53" y="32" class="heading">C0</text>
+    <rect x="138" y="0" width="130" height="52" rx="6" fill="#dbeafe" class="box"/><text x="191" y="32" class="heading">C1</text>
+    <rect x="276" y="0" width="130" height="52" rx="6" fill="#dbeafe" class="box"/><text x="329" y="32" class="heading">C2</text>
+    <rect x="414" y="0" width="130" height="52" rx="6" fill="#e2e8f0" class="box"/><text x="467" y="32" class="heading">C3</text>
+    <rect x="552" y="0" width="130" height="52" rx="6" fill="#e2e8f0" class="box"/><text x="605" y="32" class="heading">C4</text>
+    <rect x="690" y="0" width="130" height="52" rx="6" fill="#e2e8f0" class="box"/><text x="743" y="32" class="heading">C5</text>
+    <rect x="828" y="0" width="130" height="52" rx="6" fill="#e2e8f0" class="box"/><text x="881" y="32" class="heading">C6</text>
+  </g>
+
+  <path d="M965 200 C965 235,800 235,800 270" class="blue-arrow"/>
+  <text x="555" y="226" class="heading">Reverse TMA amax scan: C6, C5, C4, C3, C2, C1, C0</text>
+  <text x="613" y="248" class="label">Order is free because max reduction is order-independent</text>
+
+  <text x="42" y="294" class="heading">2. State when amax becomes known</text>
+  <rect x="42" y="314" width="590" height="142" rx="12" fill="#fef3c7" class="box"/>
+  <text x="64" y="342" class="heading">Three-stage per-warp SMEM ring</text>
+  <rect x="66" y="362" width="160" height="62" rx="7" fill="#bfdbfe" class="box"/><text x="91" y="387" class="label">stage 0</text><text x="162" y="408" class="heading">C0</text>
+  <rect x="256" y="362" width="160" height="62" rx="7" fill="#bfdbfe" class="box"/><text x="281" y="387" class="label">stage 1</text><text x="352" y="408" class="heading">C1</text>
+  <rect x="446" y="362" width="160" height="62" rx="7" fill="#bfdbfe" class="box"/><text x="471" y="387" class="label">stage 2</text><text x="542" y="408" class="heading">C2</text>
+  <text x="68" y="446" class="small">Final arrivals are the token head, so no initial forward reload is needed.</text>
+
+  <rect x="674" y="314" width="384" height="142" rx="12" fill="#dcfce7" class="box"/>
+  <text x="696" y="342" class="heading">Small live register state</text>
+  <text x="700" y="374" class="label">per-lane amax</text><path d="M805 369H856" class="green-arrow"/><text x="870" y="374" class="label">warp max</text>
+  <text x="700" y="408" class="heading">global scale = 2688 / amax</text>
+  <text x="700" y="434" class="small">No full-token register buffer; no scale GMEM handoff.</text>
+
+  <path d="M333 472V506" class="green-arrow"/><path d="M866 472V506" class="green-arrow"/>
+  <text x="42" y="532" class="heading">3. Existing forward quantize-and-send pipeline</text>
+  <g transform="translate(42,550)">
+    <rect x="0" y="0" width="140" height="94" rx="8" fill="#dcfce7" class="box"/><text x="52" y="27" class="heading">C0</text><text x="20" y="52" class="label">reuse stage 0</text><text x="20" y="76" class="small">quantize + send</text>
+    <rect x="148" y="0" width="140" height="94" rx="8" fill="#dcfce7" class="box"/><text x="200" y="27" class="heading">C1</text><text x="168" y="52" class="label">reuse stage 1</text><text x="168" y="76" class="small">quantize + send</text>
+    <rect x="296" y="0" width="140" height="94" rx="8" fill="#dcfce7" class="box"/><text x="348" y="27" class="heading">C2</text><text x="316" y="52" class="label">reuse stage 2</text><text x="316" y="76" class="small">quantize + send</text>
+    <rect x="444" y="0" width="140" height="94" rx="8" fill="#dbeafe" class="box"/><text x="496" y="27" class="heading">C3</text><text x="463" y="52" class="label">resume TMA</text><text x="464" y="76" class="small">quantize + send</text>
+    <rect x="592" y="0" width="140" height="94" rx="8" fill="#dbeafe" class="box"/><text x="644" y="27" class="heading">C4</text><text x="613" y="52" class="label">normal prefetch</text><text x="612" y="76" class="small">quantize + send</text>
+    <rect x="740" y="0" width="140" height="94" rx="8" fill="#dbeafe" class="box"/><text x="792" y="27" class="heading">C5</text><text x="761" y="52" class="label">normal prefetch</text><text x="760" y="76" class="small">quantize + send</text>
+    <rect x="888" y="0" width="140" height="94" rx="8" fill="#dbeafe" class="box"/><text x="940" y="27" class="heading">C6</text><text x="909" y="52" class="label">normal prefetch</text><text x="908" y="76" class="small">quantize + send</text>
+  </g>
+
+  <path d="M180 666H918" class="green-arrow"/>
+  <text x="42" y="700" class="label">Head chunks: one GMEM read total</text>
+  <text x="450" y="700" class="label">Evicted chunks: reverse-prepass read plus forward reload</text>
+  <rect x="42" y="718" width="1016" height="28" rx="6" fill="#e0f2fe"/>
+  <text x="62" y="738" class="label">Reverse loading aligns finite SMEM retention with forward consumption; three stages is a physical ring size, not a tuned magic number.</text>
+</svg>
