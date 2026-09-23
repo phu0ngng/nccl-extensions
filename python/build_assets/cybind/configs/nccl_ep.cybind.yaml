@@ -113,7 +113,7 @@ nccl_ep:
               self._ptr[0].size = sizeof(ncclEpGroupConfig_t)
               self._ptr[0].magic = 0xC00FFFEE
               # = NCCL_EP_API_VERSION; bump with the header.
-              self._ptr[0].version = 2
+              self._ptr[0].version = 3
     ncclEpLayoutInfo_t:
       AUTO_LOWPP_CLASS:
         __config__:
