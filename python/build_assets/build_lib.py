@@ -73,6 +73,7 @@ TARGETS: dict[str, TargetSpec] = {
             "nccl_ep/*.h",
             "nccl_ep/*.hpp",
             "nccl_ep/device/*.cuh",
+            "nccl_ep/device/ll/*.cuh",
         ),
         package_relpath="nccl/ep",
     ),
