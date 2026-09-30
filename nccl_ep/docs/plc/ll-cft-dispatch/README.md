@@ -394,7 +394,11 @@ flag words".
 The count scan deduplicates each token's destinations in the same way as the
 sender. It batches routing loads and accumulates per-rank counts across the
 warp, so count generation can overlap transmission. Early publication is safe
-because the count no longer acts as the payload completion signal.
+because the count no longer acts as the payload completion signal. Because the
+early publish puts the scan on the receiver's critical path, the CFT path uses
+the pipelined `countTokensPerRankCft` scan, selected by `if constexpr (kCft)` at the
+counting-warp site; the store path keeps `countTokensPerRank_mask`. See
+[Counting-warp scan of the top-k table (CFT path)](../ll-count-scan/README.md).
 
 ### Three synchronization purposes
 
