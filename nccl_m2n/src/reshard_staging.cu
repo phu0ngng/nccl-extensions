@@ -51,7 +51,7 @@
 #include "staging_profile.h"
 #include "staging_types.h"
 
-/* Advances the persistent flow-control generation for each reshard call. */
+/* Assigns each reshard call a unique trace epoch. */
 static std::atomic<uint64_t> gStagingEpoch{0};
 
 #ifdef NCCL_M2N_TESTING
