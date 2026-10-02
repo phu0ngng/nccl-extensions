@@ -2241,7 +2241,6 @@ __global__ void dispatch_copy_epilogue_kernel(
     dispatch_copy_segment(scale_src, scale_dst, static_cast<size_t>(count) * scale_row_bytes);
 }
 
-#ifndef DISABLE_SM90_FEATURES
 constexpr int kDispatchCopyStages = 8;
 constexpr size_t kDispatchCopyTileBytes = 16384;
 
@@ -2299,10 +2298,8 @@ __global__ void dispatch_copy_epilogue_tma_kernel(
     dispatch_copy_segment_tma(token_src, token_dst, static_cast<size_t>(count) * token_row_bytes, tiles, barriers);
     dispatch_copy_segment_tma(scale_src, scale_dst, static_cast<size_t>(count) * scale_row_bytes, tiles, barriers);
 }
-#endif
 
 ncclResult_t configure_dispatch_copy_tma() {
-#ifndef DISABLE_SM90_FEATURES
     const cudaError_t status = cudaFuncSetAttribute(
         dispatch_copy_epilogue_tma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
         kDispatchCopyStages * kDispatchCopyTileBytes);
@@ -2311,9 +2308,6 @@ ncclResult_t configure_dispatch_copy_tma() {
         return ncclInvalidUsage;
     }
     return status == cudaSuccess ? ncclSuccess : ncclUnhandledCudaError;
-#else
-    return ncclInvalidUsage;
-#endif
 }
 
 void launch_dispatch_copy_epilogue(
@@ -2330,14 +2324,12 @@ void launch_dispatch_copy_epilogue(
     assert(token_src == nullptr || token_row_bytes <= SIZE_MAX / capacity);
     assert(scale_src == nullptr || scale_row_bytes <= SIZE_MAX / capacity);
     assert(copy_sms > 0 && mode != DispatchCopyMode::kCe);
-#ifndef DISABLE_SM90_FEATURES
     if (mode == DispatchCopyMode::kTma) {
         dispatch_copy_epilogue_tma_kernel<<<copy_sms, 32, kDispatchCopyStages * kDispatchCopyTileBytes, stream>>>(
             flat_count, em_count, capacity, staging_capacity,
             token_src, token_dst, token_row_bytes, scale_src, scale_dst, scale_row_bytes);
         return;
     }
-#endif
     dispatch_copy_epilogue_kernel<<<copy_sms, 1024, 0, stream>>>(
         flat_count, em_count, capacity, staging_capacity,
         token_src, token_dst, token_row_bytes, scale_src, scale_dst, scale_row_bytes);

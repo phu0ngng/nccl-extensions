@@ -885,8 +885,6 @@ get_channel_task_range(int num_tokens, int num_sms, int sm_id, int& token_start_
 // SM90-Specific Features (TMA, Mbarriers)
 //==============================================================================
 
-#ifndef DISABLE_SM90_FEATURES
-
 __device__ __forceinline__ uint32_t elect_one_sync() {
     uint32_t pred = 0;
     asm volatile("{\n"
@@ -1029,7 +1027,5 @@ template <int N = 0>
 __device__ __forceinline__ void tma_store_wait_complete() {
     asm volatile("cp.async.bulk.wait_group %0;" ::"n"(N) : "memory");
 }
-
-#endif // DISABLE_SM90_FEATURES
 
 } // namespace nccl_ep
