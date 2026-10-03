@@ -24,6 +24,17 @@ This PLC covers dispatch within one NVLink domain. Combine keeps its transport
 and its flags; its flag wait gains the zero store described in "Self-cleaning
 count and flag words".
 
+The host selects separate STORE and CFT JIT specializations of the shared
+dispatch implementation. `if constexpr (kCft)` removes the unused transport
+code, and the JIT cache distinguishes the two variants. Rank-major STORE
+continues to select the specialized LSA kernel when eligible. Launch geometry
+is unchanged.
+
+CFT group creation requires all ranks to belong to one NCCL LSA team because
+token counts still use P2P stores. The team may span multiple physical nodes.
+Teardown releases CFT endpoints and buffers after the existing LL cross-rank
+barrier; it adds no synchronization.
+
 ### Code layout
 
 - `nccl_ep/device/cft.cuh`: the fabric transport, namespace `nccl_ep::cft`:
@@ -374,8 +385,7 @@ Receiver:           count tells HOW MANY; the byte counter tells WHEN READY
                     self rank: the grid barrier tells WHEN READY
 ```
 
-`rankDone` has no writer and no reader in the CFT send phase; the only access
-left is the receive phase's reset to zero, which runs on both paths. Remote
+The CFT specialization does not read, update or reset `rankDone`. Remote
 destinations gate on the byte counter. The self destination gates on the grid
 barrier, described in "The self-rank destination". The next-bank cleanup is
 replaced by self-cleaning count words, described in "Self-cleaning count and
@@ -1025,7 +1035,7 @@ compare the elapsed `clock64()` against the budget. On expiry:
 CFT and `enable_mask` are rejected together at `ncclEpCreateGroup`: the
 collective vote returns `ncclInvalidUsage` on every rank. A CFT group
 therefore has `rankMask == nullptr` and `asyncErrorFlag == nullptr`, and the
-kernel's `cft_enabled` gate additionally requires `rankMask == nullptr`. Every
+host selects the CFT JIT variant only when `rankMask == nullptr`. Every
 bounded wait on this path ends the same way when it expires:
 
 ```text
@@ -1169,11 +1179,11 @@ re-admission, and tile quarantine.
   are described in [CFT API design](../README.md#cft-api-design).
 - The enabled CFT path supports unquantized, 2-byte token elements
   (`QUANT_NONE`). Quantized recipes and fp32 tokens do not use it: the
-  kernel's `cft_enabled` gate is false for those template variants, so they
-  take the store path silently while the group still initializes CFT (see
-  the table below).
-- Remote CFT transfers require one NVLink domain. Cross-domain CFT dispatch is
-  not supported; group-creation validation for that case still needs hardening.
+  host selects a STORE specialization for those recipes and types while the
+  group still initializes CFT (see the table below).
+- Remote CFT transfers require one NVLink domain and one NCCL LSA team.
+  Group creation collectively rejects multiple LSA teams before creating
+  CFT endpoints, since the token-count channel requires P2P mappings.
 - Both expert-major and rank-major dispatch are covered without zero-copy.
   The zero-copy extension above remains separate work.
 - The CFT parity copy currently advances on the host. CUDA graph replay
@@ -1182,9 +1192,8 @@ re-admission, and tile quarantine.
 - Qualification covers four ranks on one node and eight ranks on two nodes of
   one NVLink domain, both layouts, on NVL72 sm_107 nodes (CUDA 13.4, driver
   620) and GB200 sm_100 nodes (CUDA 13.4, driver 615).
-- Under CFT, `rankDone` has no writer and no reader in the send phase (the
-  receive phase's reset to zero remains on both paths) and the dispatch's
-  next-bank clear does not run. Consumers zero their count and flag words on
+- Under CFT, `rankDone` is unused and the dispatch's next-bank clear does not
+  run. Consumers zero their count and flag words on
   both paths; the store path also keeps its clear and ledger, and the combine
   kernel keeps its own clear on both paths.
 - Enablement is explicit through `NCCL_EP_LL_CFT=1`; there is no automatic
@@ -1217,5 +1226,5 @@ row; shapes are `experts/top-k/tokens`. Numbers live in the MR description.
 | Fault handling: `enable_mask` | Rejected at `ncclEpCreateGroup` after the collective vote | Loud `ncclInvalidUsage` on every rank, message names the ranks that asked | from code; negative cell (`ep_bench --mask-test` under CFT) rejected with the documented message at 4 and 8 ranks | n/a |
 | Fault handling: timeouts | Every CFT wait bounded by the group budget; expiry prints a warning and traps; no mask, no async flag | Loud and fatal | No expiry cell in the suites; the count-word trap under CFT was observed during bring-up (a harness fault, cross-node); the byte-counter expiry has not been observed | n/a |
 | Cross-node, 8 ranks on 2 nodes, one NVLink domain | Implemented: the pair predicate claims every non-self pair; endpoints imported over the fabric | none needed | MR 60 validation rows: 8-rank shapes both layouts, the two-node matrix with per-shape validation, ledger-removal 8-rank cells | Presented: 8-rank rows, top-k 8 at 64/128/256 experts, top-k 2 at 128 experts |
-| Cross-domain (two NVLink domains) | Not supported | Loud: endpoint import fails, collective `ncclInvalidUsage` at `ncclEpCreateGroup`; the store path over two domains runs | Observed on two racks (learnings) | n/a |
+| Multiple NCCL LSA teams | Not supported: the token-count channel requires P2P mappings | Collective `ncclInvalidUsage` at `ncclEpCreateGroup`, before CFT endpoint setup; STORE keeps its existing topology support | Rejection requires a multi-LSA test configuration | n/a |
 | Split-phase (`send_only`) and CUDA graph | Split-phase implemented: the kernel boundary replaces the grid barrier. Graph capture works; replay reuses the captured parity | Silent for replay: no check | `ep_test -a ll -s ...` cells; `-g` launches the captured graph once, so replay is not exercised | n/a |
