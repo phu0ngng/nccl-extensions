@@ -7,6 +7,7 @@ exclusion without an explicit review.
 ## PLCs
 
 - [271: Low latency LSA FP8 dispatch optimization](271-ll-lsa-fp8-dispatch/README.md) — shared quantization reuse, compact block geometry, vector stores, and capacity fallback.
+- [285: LL TMA dispatch for LSA-only cases](285-ll-tma-dispatch/README.md) — warp-0 TMA stage-ring pipeline for the SEND phase, concurrent idle-warp sentinel/recv-count-buffer clear; default for LSA-eligible, unquantized, rank-major dispatch.
 - [Low-latency epoch ticketing](ll-epoch-ticketing/README.md) — graph-safe LL two-bank resource selection.
 - [HT EM pull dispatch + push combine](ht-em-pull-push/README.md) — local `recv_x_em`, fused local permute, sparse weights end-to-end.
 - [Relative rank slot addressing for the LL dispatch staging buffer](ll-relative-rank-slot/README.md) — spreads per-rank write offsets to avoid receive-side camping.
