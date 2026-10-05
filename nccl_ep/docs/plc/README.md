@@ -14,6 +14,7 @@ exclusion without an explicit review.
 - [MXFP8 combine](mxfp8-combine/README.md) — FP8 E4M3 + E8M0 block scales fused into the local permute reduce; packed NVLink row, BF16 RDMA hop.
 - [HT EM dispatch push count-exchange](ht-em-dispatch-push-count-exchange/README.md) — count-row exchange replaces per-token bitmap AllGather + global scan; receiver s2d/LERM rebuilt inside dispatch.
 - [HT EM dispatch pull count-exchange](ht-em-dispatch-pull-count-exchange/README.md) — same count-exchange idea ported to pull-push: CTA 0 pushes count+top-k to peer inboxes, MAP warps rebuild receiver maps locally instead of a scan.
+- [MR171: HT compact top-k weights and IDs](mr171-ht-compact-prob-wire/README.md) — automatic compact push dispatch with original-order weights and inline expert IDs, compact FP32 gradients for backward combine; pull-push keeps its existing sparse-direct path.
 - [Low-latency dispatch over CFT](ll-cft-dispatch/README.md) — single-warp counted-fabric-write payload path (`NCCL_EP_LL_CFT`); see [CFT API design](#cft-api-design) for the comparison with NCCL.
 - [Counting-warp scan of the top-k table (CFT path)](ll-count-scan/README.md) — pipelined, branch-free per-destination token counting, selected only under `NCCL_EP_LL_CFT`; the store path keeps its scan.
 

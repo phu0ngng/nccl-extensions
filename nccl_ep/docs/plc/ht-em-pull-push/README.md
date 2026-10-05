@@ -272,7 +272,7 @@ combine swaps them. No extra allocation.
 | `expert_input_token` (combine staging) | peer-visible                                             | peer-visible push destination            | Row stride padded by up to 512B                    |
 | `expert_output_prob` (IPC scratch)     | `max_output_slots * num_local_experts * lsa_ranks * f32` | `per_rank_tokens * MAX_NUM_TOPK * f32`   | Now sparse pull source for topk_weights            |
 | `expert_input_prob`                    | allocated                                                | not allocated                            | Weights ride the token row pad instead             |
-| `dense_prob_buffer` (per-handle)       | `num_tokens * num_experts * f32`                         | not allocated                            | Sparse->dense conversion dropped                   |
+| `prob_buffer` (per-handle)             | `num_tokens * num_experts * f32`                         | not allocated                            | Wire-row conversion dropped                       |
 | `global_routing_map` (bitmap)          | allocated                                                | not allocated                            | Replaced by `global_topk_idx` (uint16)             |
 | `sparse_to_dense_map`                  | allocated + memset                                       | not allocated                            | Pull never reads it                                |
 
@@ -292,7 +292,7 @@ persistent host staging.
   all skipped; the scan feeds off `global_topk_idx`. This is the primary
   source of the `UpdateHandle` speedup below.
 - **Sparse `topk_weights` end-to-end** (`nccl_ep.cc:2541-2559, 1037-1064`).
-  `dense_prob_buffer` is not allocated (`L.sz_prob = 0`); `expert_output_prob`
+  `prob_buffer` is not allocated (`L.sz_prob = 0`); `expert_output_prob`
   is resized to `per_rank_tokens * MAX_NUM_TOPK * f32` (~`num_experts /
   num_topk`x smaller: 32x DS.v3, 51x Nemotron). `sparse_to_dense_prob_kernel`
   and its `cudaMemsetAsync` are skipped; dispatch pulls `[num_topk]` at the
