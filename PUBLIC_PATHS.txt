@@ -7,6 +7,7 @@
 
 nccl_ep
 nccl_m2n
+nccl_nd
 python
 third_party
 makefiles
