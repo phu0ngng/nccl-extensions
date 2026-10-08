@@ -10,6 +10,7 @@ stages:
 include:
   - local: .gitlab/ci/nccl-build.yml
   - local: .gitlab/cluster-paths.yml
+  - local: nccl_ep/ci/cft-ci.yml
 
 variables:
   FF_USE_FASTZIP: "true"
