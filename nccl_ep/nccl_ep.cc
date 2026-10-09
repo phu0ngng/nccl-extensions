@@ -2757,17 +2757,23 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
             struct CftVote {
                 uint8_t want_cft;
                 uint8_t enable_mask;
-                uint8_t pad_[6];
+                uint8_t zero_copy;
+                uint8_t pad_[5];
                 ncclEpCftPlatformFacts facts;
                 ncclEpCftPlatformFloors floors;
             };
             std::vector<CftVote> vote(ep_group->nRanks, CftVote{});
             vote[ep_group->rank].want_cft = nccl_ep_env_flag_on(ep_group->env.ll_cft) ? 1 : 0;
             vote[ep_group->rank].enable_mask = ep_group->config.enable_mask ? 1 : 0;
+            vote[ep_group->rank].zero_copy = ep_group->config.zero_copy == NCCL_EP_ZERO_COPY_ON;
             vote[ep_group->rank].facts = cft_facts;
             vote[ep_group->rank].floors = cft_floors;
             ncclAllGatherHost(vote.data(), sizeof(CftVote), ep_group->rank, ep_group->nRanks, comm, stream);
             for (int r = 1; r < ep_group->nRanks; ++r) {
+                if (vote[0].want_cft && vote[r].zero_copy != vote[0].zero_copy) {
+                    fprintf(stderr, "NCCL EP: CFT requires zero_copy=ON on all ranks or none\n");
+                    return reject_group(ncclInvalidUsage);
+                }
                 if (vote[r].want_cft != vote[0].want_cft) {
                     fprintf(stderr,
                             "NCCL EP: %s must be set identically on every rank "
@@ -2880,6 +2886,7 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
                 ep_group->num_local_experts,
                 ep_group->config.max_dispatch_tokens_per_rank,
                 ep_group->config.max_token_bytes,
+                ep_group->config.zero_copy == NCCL_EP_ZERO_COPY_ON,
                 ep_group->env.ll_cft.name,
                 nccl_ep_env_flag_on(ep_group->env.debug),
                 stream);
@@ -4834,6 +4841,97 @@ ll::LlCombineKernel resolve_combine_enforced_kernel(const ncclEpEnvConfig& env) 
     }
 }
 
+
+size_t ll_cft_output_tensor_bytes(const ncclEpTensor_t& output, bool have_window) {
+    size_t bytes = have_window ? ncclTypeSize(output.datatype) : 0;
+    for (int d = 0; d < 3 && bytes != 0; ++d) {
+        if (output.sizes[d] > SIZE_MAX / bytes) {
+            return SIZE_MAX;
+        }
+        bytes *= output.sizes[d];
+    }
+    return bytes;
+}
+
+ncclResult_t bind_ll_cft_output(
+    ncclEpGroup* group, const ncclEpTensor_t& output, bool geometry_ok, cudaStream_t stream) {
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    CUDA_CHECK(cudaStreamIsCapturing(stream, &capture));
+    if (capture != cudaStreamCaptureStatusNone) {
+        fprintf(stderr,
+                "NCCL EP: CFT output binding cannot run inside CUDA graph capture; "
+                "run one zero-copy dispatch eagerly first\n");
+        return ncclInvalidUsage;
+    }
+    auto& buffers = group->ll_cft_buffers;
+    const bool have_window = geometry_ok && output.win_hdl != ncclWindow_t{} && output.data != nullptr;
+    NCCLCHECK(nccl_ep_cft_bind_output(
+        &buffers, group->comm, group->rank, group->nRanks, group->cuda_device_id, have_window,
+        have_window ? output.data : nullptr, ll_cft_output_tensor_bytes(output, have_window),
+        nccl_ep_env_flag_on(group->env.debug), stream));
+    buffers.zc_bound_win = output.win_hdl;
+    buffers.zc_bound_data = output.data;
+    for (int d = 0; d < 3; ++d) {
+        buffers.zc_bound_shape[d] = output.sizes[d];
+    }
+    buffers.zc_bound_datatype = output.datatype;
+    return ncclSuccess;
+}
+
+ncclResult_t prepare_ll_cft_output(
+    ncclEpHandle* handle, const ncclEpTensor_t& output, ncclEpDispQuant_t recipe,
+    int hidden, ncclDataType_t token_dtype, cudaStream_t stream) {
+    auto* group = handle->group;
+    auto& buffers = group->ll_cft_buffers;
+    const bool nvlink_only = group->lsa_team_size == group->nRanks;
+    const bool active = buffers.initialized;
+    const bool geometry_ok = nvlink_only && handle->layout == NCCL_EP_LAYOUT_RANK_MAJOR &&
+        recipe == NCCL_EP_DISP_QUANT_NONE && (token_dtype == ncclBfloat16 || token_dtype == ncclFloat16) &&
+        (!active || ll::ll_cft_zero_copy_supported(
+            nvlink_only, recipe, handle->layout, resolve_dispatch_lsa_mode(group->env), hidden, token_dtype));
+    const bool wanted = active && group->config.zero_copy == NCCL_EP_ZERO_COPY_ON;
+    if (wanted && !geometry_ok) {
+        fprintf(stderr,
+                "NCCL EP: CFT zero-copy requires the LSA dispatch kernel; general CFT zero-copy "
+                "is unsupported (including NCCL_EP_LL_CFT_LSA=0, universal mode, or partial tiles)\n");
+    }
+    // First-bind rejection must be collective even when local geometry is ineligible.
+    if (wanted && !buffers.zc_active) {
+        NCCLCHECK(bind_ll_cft_output(group, output, geometry_ok, stream));
+    }
+    if (active && buffers.zc_active) {
+        bool same = geometry_ok && output.win_hdl == buffers.zc_bound_win &&
+            output.data == buffers.zc_bound_data && output.datatype == buffers.zc_bound_datatype;
+        for (int d = 0; d < 3; ++d) {
+            same = same && output.sizes[d] == buffers.zc_bound_shape[d];
+        }
+        if (!same) {
+            fprintf(stderr,
+                    "NCCL EP: CFT zero-copy requires unquantized rank-major dispatch with the "
+                    "same output window, pointer, shape and datatype used for the first dispatch\n");
+            return ncclInvalidUsage;
+        }
+    }
+    return ncclSuccess;
+}
+
+const char* ll_dispatch_zero_copy_reason(
+    bool nvlink_only, ncclEpLayout_t layout, bool recipe_ok, bool cft_active) {
+    if (!nvlink_only) {
+        return "requires nvlink-only topology (lsa_team_size == nRanks)";
+    }
+    if (layout != NCCL_EP_LAYOUT_RANK_MAJOR) {
+        return "requires NCCL_EP_LAYOUT_RANK_MAJOR";
+    }
+    if (!recipe_ok) {
+        return "is unsupported by this LL dispatch recipe";
+    }
+    if (cft_active) {
+        return "requires zero_copy=ON and a compatible output window on every CFT rank";
+    }
+    return "requires outputs->tokens or outputs->scales to be backed by an NCCL window";
+}
+
 } // namespace
 
 ncclResult_t ncclEpDispatch(
@@ -5000,7 +5098,6 @@ ncclResult_t ncclEpDispatch(
         // and the store-path epoch ring. The intervening combine round trip
         // prevents a fast rank from overwriting data a peer is still reading.
         const int cft_parity = group->ll_cft_buffers.dispatch_parity;
-        group->ll_cft_buffers.dispatch_parity ^= 1;
         const auto& buffer = handle->ll.layout.buffer;
 
         unsigned signal_base = 0;
@@ -5009,14 +5106,14 @@ ncclResult_t ncclEpDispatch(
         const bool recipe_zcopy_ok =
             recipe == NCCL_EP_DISP_QUANT_NONE || recipe == NCCL_EP_DISP_QUANT_FWD ||
             recipe == NCCL_EP_DISP_QUANT_DS_FP8E3M4;
-        // Disable zero-copy group-wide under CFT: output-window availability
-        // can differ by rank, but the kernel's transport choice must agree.
         const bool cft_active = group->ll_cft_buffers.initialized;
+        NCCLCHECK(prepare_ll_cft_output(handle, *recv_x, recipe, hidden, x->datatype, stream));
+        const bool cft_zc_live = cft_active && group->ll_cft_buffers.zc_active;
         const bool zcopy_ok =
             nvlink_only &&
             handle->layout == NCCL_EP_LAYOUT_RANK_MAJOR &&
             recipe_zcopy_ok &&
-            !cft_active;
+            (!cft_active || cft_zc_live);
         const bool tma_quant = nvlink_only && !cft_active && hidden > 0 &&
             hidden % (32 * sizeof(int4) / ncclTypeSize(x->datatype)) == 0 &&
             handle->layout == NCCL_EP_LAYOUT_RANK_MAJOR &&
@@ -5038,12 +5135,8 @@ ncclResult_t ncclEpDispatch(
             zcopy_ok && (recipe == NCCL_EP_DISP_QUANT_FWD || recipe == NCCL_EP_DISP_QUANT_DS_FP8E3M4) &&
             scales != nullptr && scales->win_hdl != ncclWindow_t{};
         const bool zcopy_any = zcopy_rcv_x || zcopy_rcv_scales;
-        const char* zcopy_reason =
-            !nvlink_only ? "requires nvlink-only topology (lsa_team_size == nRanks)" :
-            handle->layout != NCCL_EP_LAYOUT_RANK_MAJOR ? "requires NCCL_EP_LAYOUT_RANK_MAJOR" :
-            !recipe_zcopy_ok ? "is unsupported by this LL dispatch recipe" :
-            cft_active ? "is mutually exclusive with NCCL_EP_LL_CFT (counted fabric transport)" :
-            "requires outputs->tokens or outputs->scales to be backed by an NCCL window";
+        const char* zcopy_reason = ll_dispatch_zero_copy_reason(
+            nvlink_only, handle->layout, recipe_zcopy_ok, cft_active);
         const char* zcopy_detail = zcopy_reason;
         if (zcopy_rcv_x) {
             zcopy_detail = zcopy_rcv_scales ? "token and scale windows selected" : "token window selected";
@@ -5114,20 +5207,22 @@ ncclResult_t ncclEpDispatch(
         // never clear it).
         const bool max_tokens_below_threshold =
             static_cast<int>(group->config.max_dispatch_tokens_per_rank) <= combine_lsa_threshold;
-        handle->ll.dispatch_1sided_disqualified = max_tokens_below_threshold;
+        handle->ll.dispatch_1sided_disqualified = max_tokens_below_threshold || cft_active;
         // In auto mode a call already disqualified from 1-sided (seeded just above) can never go
         // 1-sided, so dispatch must not record dstInfo or publish want-1-sided for a combine that
-        // will never read them. A forced "1sided" request still records.
+        // will never read them. A forced "1sided" request still records for STORE only.
         const bool want_1sided_combine =
             ((combine_enforced_kernel == ll::LlCombineKernel::kNone &&
               !handle->ll.dispatch_1sided_disqualified) ||
              combine_enforced_kernel == ll::LlCombineKernel::k1SidedRmLsa) &&
-            dispatch_lsa_mode != ll::NcclEpDispatchLsaMode::kUniversal;
+            dispatch_lsa_mode != ll::NcclEpDispatchLsaMode::kUniversal && !cft_active;
+        // Window resolution can use stack descriptors; the receive continuation
+        // must retain their data pointers rather than the descriptors themselves.
+        void* const recv_x_data = recv_x->data;
+        void* const scales_data = scales ? scales->data : nullptr;
         auto dispatch_fn = [=](int phases) -> ncclResult_t {
             void* const rdma_buf = group->rdma_buffer;
             // Prepare data pointers
-            auto* recv_x_data = recv_x->data;
-            auto* scales_data = scales ? scales->data : nullptr;
             auto* expert_recv_source_indices_data = static_cast<int*>(handle->ll.expert_recv_source_indices.data);
             auto* dispatch_dst_info_data = want_1sided_combine ? handle->ll.dispatch_dst_info : nullptr;
             auto* dispatch_want_1sided_data = want_1sided_combine ? handle->ll.dispatch_want_1sided : nullptr;
@@ -5200,6 +5295,8 @@ ncclResult_t ncclEpDispatch(
                 params.rankArrivedCnt = group->ws_dispatch_rankArrivedCnt;
                 params.rankDone = group->ws_dispatch_rankDone;
                 params.numDeviceSms = group->dispatch_num_sms;
+                params.deviceSm = group->device_sm;
+                params.deviceSmCount = group->device_sm_count;
                 params.rankMask = group->mask_buffer;
                 params.asyncErrorFlag = group->async_error_flag;
                 params.timeoutCycles = group->timeout_cycles;
@@ -5239,6 +5336,9 @@ ncclResult_t ncclEpDispatch(
                     const size_t cumul_off =
                         static_cast<size_t>(cft_parity) * lb.cumul_slots_per_parity;
                     params.cftCumulByteExpect = lb.cumul_byte_expect_dev + cumul_off;
+                    // All ranks select the same JIT specialization.
+                    params.cftZeroCopy = cft_zc_live;
+                    params.cftOutputOffset = lb.zc_data_off;
                 }
                 params.lsaMode = dispatch_lsa_mode;
                 if (tma_quant && group->env.ll_tma_quant_warps.is_set) {
@@ -5286,6 +5386,7 @@ ncclResult_t ncclEpDispatch(
         const int dispatch_phases =
             send_only ? LOW_LATENCY_SEND_PHASE : (LOW_LATENCY_SEND_PHASE | LOW_LATENCY_RECV_PHASE);
         NCCLCHECK(dispatch_fn(dispatch_phases));
+        group->ll_cft_buffers.dispatch_parity ^= 1;
 
         if (send_only) {
             handle->ll.continue_fn = dispatch_fn;
@@ -6692,6 +6793,7 @@ ncclResult_t ncclEpCombine(
                 params.groupZeroCopyOn = handle->group->config.zero_copy == NCCL_EP_ZERO_COPY_ON;
                 params.dispatch1SidedDisqualified = handle->ll.dispatch_1sided_disqualified;
                 params.cftEnabled = handle->group->ll_cft_buffers.initialized;
+                params.lsaMode = resolve_dispatch_lsa_mode(handle->group->env);
                 return nccl_ep::ll::call_combine(
                     params, stream, nccl_ep_env_flag_on(handle->group->env.nucs));
             };

@@ -4102,6 +4102,8 @@ struct BenchResult {
     double avg_ms;
     double min_ms;
     double max_ms;
+    double p50_ms = 0;   // nearest-rank percentiles over the timed iterations (first one trimmed)
+    double p99_ms = 0;
     double throughput_gbps;
 };
 
@@ -4302,6 +4304,20 @@ PairedBenchResult runPairedBenchmark(
             result.avg_ms = std::accumulate(times_trimmed.begin(), times_trimmed.end(), 0.0) / times_trimmed.size();
             result.min_ms = *std::min_element(times_trimmed.begin(), times_trimmed.end());
             result.max_ms = *std::max_element(times_trimmed.begin(), times_trimmed.end());
+            std::vector<float> sorted(times_trimmed);
+            std::sort(sorted.begin(), sorted.end());
+            auto pct = [&](double q) {
+                size_t k = static_cast<size_t>(std::ceil(q * sorted.size()));
+                if (k == 0) {
+                    k = 1;
+                }
+                if (k > sorted.size()) {
+                    k = sorted.size();
+                }
+                return static_cast<double>(sorted[k - 1]);
+            };
+            result.p50_ms = pct(0.50);
+            result.p99_ms = pct(0.99);
             result.throughput_gbps = data_bytes == 0 || result.avg_ms <= 0
                 ? 0
                 : (data_bytes / 1e9) / (result.avg_ms / 1000.0);
@@ -4618,6 +4634,14 @@ void printLowLatencyResults(
     double global_dispatch_avg, global_dispatch_min, global_dispatch_max;
     double global_combine_avg, global_combine_min, global_combine_max;
     double global_total_avg, global_total_min, global_total_max;
+    // Percentiles: mean over ranks of each rank's per-iteration percentile.
+    double local_pct[6] = {dispatch_result.p50_ms, dispatch_result.p99_ms, combine_result.p50_ms,
+                           combine_result.p99_ms, combined_result.p50_ms, combined_result.p99_ms};
+    double global_pct[6] = {0, 0, 0, 0, 0, 0};
+    MPI_Reduce(local_pct, global_pct, 6, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    for (double& v : global_pct) {
+        v /= nRanks;
+    }
 
     MPI_Reduce(&local_dispatch_avg, &global_dispatch_avg, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&local_dispatch_min, &global_dispatch_min, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
@@ -4727,8 +4751,8 @@ void printLowLatencyResults(
 
         printf("\n--- Host-observed performance ---\n");
 
-        printf("Dispatch:  avg=%.2f us, min=%.2f us, max=%.2f us\n", global_dispatch_avg * 1000,
-               global_dispatch_min * 1000, global_dispatch_max * 1000);
+        printf("Dispatch:  avg=%.2f us, min=%.2f us, max=%.2f us, p50=%.2f us, p99=%.2f us\n", global_dispatch_avg * 1000,
+               global_dispatch_min * 1000, global_dispatch_max * 1000, global_pct[0] * 1000, global_pct[1] * 1000);
         printf("          bus bandwidth (excl. protocol headers): avg=%.2f GB/s, min=%.2f GB/s (rank %d), max=%.2f GB/s (rank %d)\n",
                avg_dispatch_tp, global_dispatch_tp_min.value, global_dispatch_tp_min.rank, global_dispatch_tp_max.value,
                global_dispatch_tp_max.rank);
@@ -4736,16 +4760,16 @@ void printLowLatencyResults(
                avg_dispatch_tp * dispatch_algorithm_factor, global_dispatch_tp_min.value * dispatch_algorithm_factor,
                global_dispatch_tp_max.value * dispatch_algorithm_factor);
         if (!dispatch_only) {
-            printf("Combine:   avg=%.2f us, min=%.2f us, max=%.2f us\n", global_combine_avg * 1000,
-                   global_combine_min * 1000, global_combine_max * 1000);
+            printf("Combine:   avg=%.2f us, min=%.2f us, max=%.2f us, p50=%.2f us, p99=%.2f us\n", global_combine_avg * 1000,
+                   global_combine_min * 1000, global_combine_max * 1000, global_pct[2] * 1000, global_pct[3] * 1000);
             printf("          bus bandwidth (excl. protocol headers): avg=%.2f GB/s, min=%.2f GB/s (rank %d), max=%.2f GB/s (rank %d)\n",
                    avg_combine_tp, global_combine_tp_min.value, global_combine_tp_min.rank,
                    global_combine_tp_max.value, global_combine_tp_max.rank);
             printf("          algorithm bandwidth: avg=%.2f GB/s, min=%.2f GB/s, max=%.2f GB/s\n",
                    avg_combine_tp * combine_algorithm_factor, global_combine_tp_min.value * combine_algorithm_factor,
                    global_combine_tp_max.value * combine_algorithm_factor);
-            printf("Total (D+C):      avg=%.2f us, min=%.2f us, max=%.2f us\n", global_total_avg * 1000,
-                   global_total_min * 1000, global_total_max * 1000);
+            printf("Total (D+C):      avg=%.2f us, min=%.2f us, max=%.2f us, p50=%.2f us, p99=%.2f us\n", global_total_avg * 1000,
+                   global_total_min * 1000, global_total_max * 1000, global_pct[4] * 1000, global_pct[5] * 1000);
             printf("          bus bandwidth (excl. protocol headers): avg=%.2f GB/s, min=%.2f GB/s (rank %d), max=%.2f GB/s (rank %d)\n",
                    avg_total_tp, global_total_tp_min.value, global_total_tp_min.rank,
                    global_total_tp_max.value, global_total_tp_max.rank);
@@ -7366,19 +7390,6 @@ int main(int argc, char* argv[]) {
         epFreeTensor(&dispatch_outputs.scales);
     }
 
-    // Cleanup (order matters: tensors -> handle -> group -> comm)
-    cleanupBenchmarkTensors(
-        alloc,
-        dispatch_inputs,
-        dispatch_outputs,
-        dispatch_layout_info,
-        combine_inputs,
-        combine_outputs,
-        topk_weights,
-        topk_idx,
-        is_ll_mode);
-    delete[] topk_idx_host; // Now safe to delete after validation
-
     NCCLCHECK(ncclEpHandleDestroy(ep_handle));
 
     if (handle_mem_tensor != nullptr) epFreeTensor(&handle_mem_tensor);
@@ -7393,6 +7404,20 @@ int main(int argc, char* argv[]) {
     }
 
     NCCLCHECK(ncclEpGroupDestroy(ep_group));
+
+    // Keep registered outputs alive until group destruction unbinds CFT memory.
+    cleanupBenchmarkTensors(
+        alloc,
+        dispatch_inputs,
+        dispatch_outputs,
+        dispatch_layout_info,
+        combine_inputs,
+        combine_outputs,
+        topk_weights,
+        topk_idx,
+        is_ll_mode);
+    delete[] topk_idx_host;
+
     ncclCommDestroy(comm);
 
     CUDACHECK(cudaStreamDestroy(stream));

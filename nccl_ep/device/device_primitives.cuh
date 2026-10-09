@@ -51,6 +51,25 @@ namespace nccl_ep {
 constexpr int kWarpSize = 32; // CUDA hardware warp width.
 constexpr int kBf16PerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
 
+// Compiler ordering only; does not emit a hardware fence.
+__device__ __forceinline__ void compiler_fence() {
+    asm volatile("" ::: "memory");
+}
+
+template <typename T>
+__device__ __forceinline__ T ld_read_only_global(const T* ptr) {
+    return __ldg(ptr);
+}
+
+__device__ __forceinline__ int atomic_add_relaxed_global(int* ptr, int value) {
+    return atomicAdd(ptr, value);
+}
+
+__device__ __forceinline__ unsigned long long atomic_or_relaxed_shared(
+    unsigned long long* ptr, unsigned long long value) {
+    return atomicOr(ptr, value);
+}
+
 //==============================================================================
 // Type Traits and Helper Types
 //==============================================================================
