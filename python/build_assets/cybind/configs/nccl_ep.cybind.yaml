@@ -52,6 +52,9 @@ nccl_ep:
     ncclEpInitHandle:
       return: handle
       except?: 0
+    ncclEpImportHandle:
+      return: handle
+      except?: 0
     ncclEpHandleDestroy: {}
     ncclEpHandleMemSize:
       return: size_out
@@ -155,6 +158,13 @@ nccl_ep:
           __init__:
             post_alloc: |-
               self._ptr[0].size = sizeof(ncclEpHandleConfig_t)
+              self._ptr[0].magic = 0xC00FFFEE
+    ncclEpHandleState_t:
+      AUTO_LOWPP_CLASS:
+        __config__:
+          __init__:
+            post_alloc: |-
+              self._ptr[0].size = sizeof(ncclEpHandleState_t)
               self._ptr[0].magic = 0xC00FFFEE
     ncclEpDispatchConfig_t:
       AUTO_LOWPP_CLASS:
