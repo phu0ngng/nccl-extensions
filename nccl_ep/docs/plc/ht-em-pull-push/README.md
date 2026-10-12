@@ -52,7 +52,7 @@ together.
 
 ### Pull dispatch
 
-`dispatch_pull` (`ht_ep.cuh:5497`) uses one warp per recv slot per wave. Each
+`dispatch_pull` (`ht_ep.cuh:5533`) uses one warp per recv slot per wave. Each
 pull warp keeps exactly one remote row in flight through a per-warp
 `PullTmaStage<kRowBytes>` (`ht_ep.cuh:65`): one 16B-aligned smem row buffer and
 one `mbarrier`. `issue()` starts `cp.async.bulk` from
@@ -127,15 +127,16 @@ source ranks, spreading NVLink read bandwidth.
 
 ### Push combine
 
-`combine_push` (`ht_ep.cuh:5887`) is one warp per recv slot. The warp
+`combine_push` (`ht_ep.cuh:5943`) is one warp per recv slot. The warp
 ballot-compacts `flat2em_slot_map[slot,*]` to get the `n <= top_k` valid EM
 copies, decodes `(dst_rank, t)` from `recv_slot_to_src[slot]`, and reduces
 the `n` rows into an FP32 accumulator tiled by `kHiddenVec int4` lanes. The
-tile pipeline software-prefetches copy 0 of the next tile while the current
-tile's NVLink stores drain, then `int4`-stores the row to
-`peer_staging_ptrs[dst_rank] + (t*team_size + my_lsa_rank) * stride`. In the
-backward pass the pushed row carries a co-located pad: after the row store,
-`prob_dst[srcpos[k]] = topk_weights_em[k]`.
+row can be split into chunks of `kChunkSize` int4 (a whole number of tiles of
+`kHiddenVec * 32` int4, `combine_push_buf_int4`), each reduced into the *same*
+per-warp smem buffer and pushed with its own TMA store, so the buffer only
+holds one chunk, not the whole row (see "Chunking" below). In the
+backward pass the pushed row carries a co-located pad: after the full row is
+pushed, `prob_dst[srcpos[k]] = topk_weights_em[k]`.
 
 ```text
 Per warp (one recv slot per wave, n <= top_k valid EM copies)
@@ -154,24 +155,62 @@ Per warp (one recv slot per wave, n <= top_k valid EM copies)
                                |
                                v
   +----------------------------------------------------------------------+
-  | [3] reduce n rows -> FP32 acc, tiled by kHiddenVec int4 lanes        |
-  |     software-pipelined: copy 0 prefetched into pf_nxt while the      |
-  |     current tile's NVLink stores drain                               |
-  +----------------------------+-----------------------------------------+
-                               |
-                               v
-  +----------------------------------------------------------------------+
-  | [4] push: int4 store  row_buf -> s_dst   (NVLink write to peer)      |
+  | [3] for tile in [0, kNTiles):    one chunk per tile (whole row if    |
+  |                                   chunking is pinned off)            |
+  |       tile>0: tma_store_wait<0> -- block until the prior tile's      |
+  |             TMA store has drained row_buf, so it's safe to reuse     |
+  |       reduce n copies -> FP32 acc for this tile (k = 0..n-1),        |
+  |             copy loads issued in batches before they are summed      |
+  |       acc -> row_buf                 (same smem buffer every tile)   |
+  |       tma_store_fence; tma_store_1d row_buf -> s_dst[tile's bytes]   |
   +----------------------------+-----------------------------------------+
                                |
                                v  (BWD only)
   +----------------------------------------------------------------------+
-  | [5] BWD: prob_dst = s_dst + row_bytes  (co-located pad)              |
+  | [4] BWD: prob_dst = s_dst + row_bytes  (co-located pad)              |
   |          for each copy:  prob_dst[srcpos[k]] = topk_weights_em[k]    |
   +----------------------------------------------------------------------+
 ```
 
-`combine_reduce` (`ht_ep.cuh:6100`) is one attn token per 128-thread sub-warp.
+**Chunking.** The chunk width is set with `NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE`,
+in hidden elements. Unset uses the auto default: one tile (128 int4, 2KB, i.e.
+1024 BF16 elements, once a row has at least 97 int4) for EP < 16, and the whole
+row for EP >= 16 (see the EP sweep below); `0` forces the whole row as one chunk.
+Other values are rounded up to whole tiles and clamped to the row,
+and the chunk count is `ceil(hidden / chunk_size)`. A one-tile chunk gives a
+2KB per-warp buffer, so the block keeps all `kCombinePushMaxSlots = 24` warps
+(`combine_push_slots_per_block`) at any hidden size. The chunk body has a
+compile-time copy bound and loads `8 / kHiddenVec` copies per batch before
+summing them, and the next recv slot's routing metadata is loaded one wave
+ahead and decoded with a multiply-high divide. The chunk size (`kChunkSize`) is
+a compile-time template parameter of `combine_push`, so each value is its own
+JIT binary, keyed by the `_c<int4>` suffix of the variant name. A whole-row
+chunk that does not fit the shared memory cap is rejected with a message asking
+for a smaller `NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE`; this only applies to an
+explicit `0` or a very wide row.
+
+Benchmarked (DSv3 k8, EP=4, combine total in us, `ep_bench -a ht -L em`), one
+tile per chunk against the whole row. Intermediate sizes were uneven: at hidden
+7168, 2 or 3 tiles per chunk were slower than the whole row.
+
+| Hidden (elems) | Row  | Whole row (`CHUNK_SIZE=0`) | Default / `CHUNK_SIZE=1024` |
+| -------------: | ---: | ----------------: | ----------------: |
+|           2048 |  4KB |               255 |               220 |
+|           4096 |  8KB |               495 |               366 |
+|           7168 | 14KB |               719 |               600 |
+
+One tile per chunk wins at every measured size, including rows that fit the
+smem budget whole, because the 24-warp block and the batched gather no longer
+depend on the row width.
+
+Across EP sizes (GB300 MNNVL, 8 nodes, 32 comm SMs, 4096 tokens/rank) one tile
+per chunk is clearly faster at EP 4 and 8 (DSv3 -24%/-3%, Nemotron -30%/-12%), a
+wash at EP 16, and neutral-to-slower and run-to-run unstable at EP 32 (DSv3 up to
++37%) -- from EP 16 up the combine already runs at the NVLink bandwidth plateau
+with no gather latency left to hide. The auto default therefore chunks one tile
+for EP < 16 and pushes the whole row for EP >= 16.
+
+`combine_reduce` (`ht_ep.cuh:6292`) is one attn token per 128-thread sub-warp.
 It derives which `(t, R)` partials exist from this rank's own `topk_idx` — no
 `(t, R)` valid flag rides the NVLink push and no staging zero-init runs:
 
@@ -221,8 +260,10 @@ Per attn token t (one 128-thread sub-warp)
   +----------------------------------------------------------------------+
 ```
 
-**CTA layouts.** `combine_push`: `kCombinePushThreads = 512` (16 warps),
-`kSlotsPerBlock = 16`, grid = `comm_num_sms`. `combine_reduce`:
+**CTA layouts.** `combine_push`: `kCombinePushMaxSlots = 24` warps is the
+`__launch_bounds__` upper bound; the actual block is sized down from that by
+`combine_push_slots_per_block` to fit the per-warp smem buffer (see
+one-tile chunking above), grid = `comm_num_sms`. `combine_reduce`:
 `kThreadsPerSlot = 128`, `kSlotsPerBlock = 8`, `kBlockDim = 1024`, grid =
 `shuffle_sms` (`NCCL_EP_SHUFFLE_SMS`).
 
@@ -237,7 +278,7 @@ sums peers in the ascending order that `bl & (bl-1)` peels from
 `present_ranks`, again independent of arrival order.
 
 **Anti-camping staging stride.** `comb_stage_stride_bytes(row_bytes,
-reserve_prob)` (`ht_ep.cuh:5838`) pads row strides to miss the 768-byte HBM
+reserve_prob)` (`ht_ep.cuh:5871`) pads row strides to miss the 768-byte HBM
 camping period that concurrent NVLink writes collide on. Forward:
 `row_bytes + 256` iff `row_bytes % 768 == 0`, else unchanged. Backward:
 `row_bytes + 256` baseline (holds up to 64 prob floats), bumped to `+512` if
@@ -248,7 +289,7 @@ writer, reader, and staging allocation; allocation reserves
 ### Intra-LSA head/tail sync
 
 Both kernels bracket the body with matched sync primitives
-(`ht_ep.cuh:5388-5410`):
+(`ht_ep.cuh:5424-5461`):
 
 - `lsa_grid_head_gate`: block 0 warp 0 does an `ncclLsaBarrierSession`
   rendezvous, block 0 thread 0 releases `head_sync_flag`, other blocks spin
@@ -390,7 +431,7 @@ pass delivered.
   the actual row; very large rows should chunk through a register-tile loop
   (load tile -> scatter -> advance) to bound register pressure.
 - **Sync mechanism.** `ncclLsaBarrierSession` today; TODO
-  (`ht_ep.cuh:5386-5387`) to swap for a peer-ptr + atomic-flag sync (as EM
+  (`ht_ep.cuh:5422-5423`) to swap for a peer-ptr + atomic-flag sync (as EM
   local-permute uses) and measure.
 - **Recipe coverage.** Dispatch: `NONE` and `QUANT_FWD` (`static_assert` at
-  `ht_ep.cuh:5521`). Push-combine: `NONE` only, forward and backward.
+  `ht_ep.cuh:5557`). Push-combine: `NONE` only, forward and backward.
