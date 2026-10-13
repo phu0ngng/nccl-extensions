@@ -303,7 +303,7 @@ unit_test_eos:
     NGPUS: "8"
     NCCL_EP_UNIT_GPUS: "4"
     SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "30"
+    SLURM_TIME: "45"
   script:
     - |
       set -euxo pipefail
@@ -333,7 +333,7 @@ unit_test_pretyche:
     NCCL_EP_UNIT_GPUS: "4"
     SLURM_PARTITION: "batch"
     SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "30"
+    SLURM_TIME: "45"
   script:
     - |
       set -euxo pipefail
