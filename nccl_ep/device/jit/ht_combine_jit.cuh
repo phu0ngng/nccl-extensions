@@ -681,7 +681,7 @@ inline ncclResult_t launch_combine_reduce_stage(
         std::ostringstream src;
         src << "#include \"device/ht_ep.cuh\"\n"
             << "\n"
-            << "extern \"C\" __launch_bounds__(" << ::ht_ep::kLocalPermuteReduceThreads << ", 1)\n"
+            << "extern \"C\" __launch_bounds__(" << ::ht_ep::kCombineReduceThreads << ", 1)\n"
             << "__global__ void " << kCombineReduceJitEntryName << "(\n"
             << "    const __grid_constant__ ::ht_ep::combine_reduce_param_t p) {\n"
             << "  ::ht_ep::combine_reduce<" << hidden_int4 << ", " << token_dtype_literal << ", "
@@ -710,7 +710,7 @@ inline ncclResult_t launch_combine_reduce_stage(
     variant.runtime_key = (static_cast<std::uint64_t>(backward) << 63) |
         (static_cast<std::uint64_t>(token_dtype) << 48) | static_cast<std::uint64_t>(hidden_int4);
     variant.num_blocks = num_blocks;
-    variant.block_dim = ::ht_ep::kLocalPermuteReduceThreads;
+    variant.block_dim = ::ht_ep::kCombineReduceThreads;
     variant.dynamic_smem_bytes = 0;
 
     std::string error;
