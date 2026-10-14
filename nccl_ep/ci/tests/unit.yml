@@ -105,6 +105,11 @@ tests:
       - name_suffix: count_unfused
         env:
           NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push_import
+        args_append: "--gtest_filter=LifecycleTest.ImportsRelocatedPreparedHandleMem:LifecycleTest.ImportedHandleSelectsDispatchChunkFromNumTokens"
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
 
   - name: test_public_struct_abi
     binary: "@bash"
@@ -165,6 +170,23 @@ tests:
       - name_suffix: count_unfused
         env:
           NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+
+  - name: test_ht_compact_prob
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_compact_prob"
+    matrix:
+      - name_suffix: default
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
 
   - name: test_ht_combine_pp_interleave
     binary: "@bash"
@@ -329,7 +351,7 @@ tests:
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_ht_overflow_drop"
-      --gtest_filter=HtOverflowDropTest.EmLocalPermuteAlignedDropNoOob:HtOverflowDropTest.EmLocalPermuteDeepFlatOverflowPhantomRowsZeroed
+      --gtest_filter=HtOverflowDropTest.DispatchCombineContinueOnOverflow:HtOverflowDropTest.EmLocalPermuteAlignedDropNoOob:HtOverflowDropTest.EmLocalPermuteDeepFlatOverflowPhantomRowsZeroed
     env:
       NCCL_EP_HT_EM_PULL_PUSH: "1"
       NCCL_LSA_TEAM_SIZE: "4"

@@ -125,6 +125,7 @@ tests:
     labels: [high_throughput, pull_push]
     matrix:
       - {name_suffix: bf16}
+      - {name_suffix: flat_bf16, args: "--algorithm high-throughput --layout fl --tokens 4096 ${common}"}
       - {name_suffix: mxfp8, args_append: "--dispatch-only --mxfp8"}
 
   - name: ep_bench_high_throughput_fp32
