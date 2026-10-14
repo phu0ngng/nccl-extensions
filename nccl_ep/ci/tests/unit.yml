@@ -20,8 +20,8 @@ env:
   # Reset mode selectors so the baseline is independent of the runner's env.
   NCCL_EP_HT_EM_LOCAL_DUP: "0"
   NCCL_EP_HT_EM_NVLINK_DUP: "0"
-  NCCL_EP_HT_EM_AG_SCAN_MODE: "0"
-  NCCL_EP_HT_EM_COUNT_UNFUSED: "0"
+  NCCL_EP_HT_AG_SCAN_MODE: "0"
+  NCCL_EP_HT_COUNT_UNFUSED: "0"
   NCCL_EP_HT_PULL_PUSH: "0"
   NCCL_EP_HT_UNFUSED_SYNC: "0"
 
@@ -35,7 +35,7 @@ tests:
       - name_suffix: default
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_output_layout
     binary: "@bash"
@@ -52,10 +52,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
       - name_suffix: pull_push
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -64,7 +64,7 @@ tests:
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: pull_push_unfused_sync
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -86,10 +86,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_lifecycle
     binary: "@bash"
@@ -106,10 +106,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
       - name_suffix: pull_push_import
         args_append: "--gtest_filter=LifecycleTest.ImportsRelocatedPreparedHandleMem:LifecycleTest.ImportedHandleSelectsDispatchChunkFromNumTokens"
         env:
@@ -137,10 +137,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
       - name_suffix: pull_push
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -149,7 +149,7 @@ tests:
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: pull_push_unfused_sync
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -171,10 +171,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_ht_compact_prob
     binary: "@bash"
@@ -194,10 +194,10 @@ tests:
           NCCL_EP_HT_UNFUSED_SYNC: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_ht_combine_pp_interleave
     binary: "@bash"
@@ -214,10 +214,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
       - name_suffix: pull_push
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -226,7 +226,7 @@ tests:
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: pull_push_unfused_sync
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -248,10 +248,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
       - name_suffix: pull_push
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -260,7 +260,7 @@ tests:
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: pull_push_unfused_sync
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -276,10 +276,10 @@ tests:
       - name_suffix: default
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_tensor_create
     binary: "@bash"
@@ -302,10 +302,10 @@ tests:
           NCCL_EP_HT_EM_NVLINK_DUP: "1"
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
       - name_suffix: pull_push
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -314,7 +314,7 @@ tests:
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: pull_push_unfused_sync
         env:
           NCCL_EP_HT_PULL_PUSH: "1"
@@ -342,10 +342,10 @@ tests:
       - name_suffix: default
       - name_suffix: scan
         env:
-          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
       - name_suffix: count_unfused
         env:
-          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_mxfp8_combine
     binary: "@bash"
