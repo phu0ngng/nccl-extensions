@@ -5199,6 +5199,7 @@ void printUsage(const char* programName, int myRank) {
             "                             Ignored in LL mode.\n");
         printf("  --zcopy                 Use ncclMemAlloc buffers + windows for supported direct token/scale paths\n");
         printf("  --overflow-drop          HT: NCCL_EP_OVERFLOW_DROP instead of trapping on overflow\n");
+        printf("  --meta-exchange-policy <p>  HT: metadata exchange policy: auto (default) | require-fused | force-scan\n");
         printf("  --max-num-sms <N>       Shared dispatch/combine SM fallback (0 = auto, default: 0)\n");
         printf("  --dispatch-num-sms <N>  Dispatch SM budget (0 = inherit shared budget)\n");
         printf("  --combine-num-sms <N>   Combine SM budget (0 = inherit shared budget)\n");
@@ -5275,6 +5276,7 @@ int main(int argc, char* argv[]) {
     size_t expert_major_alignment = 0;  // 0 = no padding; >1 aligns each expert zone
     unsigned int max_recv_tokens_per_rank = UINT_MAX;  // HT only; UINT_MAX = unset -> bench auto; 0 = lib auto (worst case)
     bool overflow_drop = false;  // HT only; NCCL_EP_OVERFLOW_DROP instead of the library default (trap)
+    ncclEpMetaExchangePolicy_t meta_exchange_policy = NCCL_EP_META_EXCHANGE_AUTO;  // HT only; --meta-exchange-policy
     bool zcopy = false;  // Use ncclMemAlloc + windows for supported direct token/scale paths
     unsigned int max_num_sms = NCCL_EP_AUTO;  // Automatic SM assignment for different EP stages
     unsigned int dispatch_num_sms = NCCL_EP_AUTO;
@@ -5344,6 +5346,7 @@ int main(int argc, char* argv[]) {
         {"fused-meta-dispatch", no_argument, 0, 1005},
         {"backward", no_argument, 0, 'B'},
         {"overflow-drop", no_argument, 0, 1008},
+        {"meta-exchange-policy", required_argument, 0, 1010},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -5583,6 +5586,21 @@ int main(int argc, char* argv[]) {
             break;
         case 1008:  // --overflow-drop
             overflow_drop = true;
+            break;
+        case 1010:  // --meta-exchange-policy
+            if (strcmp(optarg, "auto") == 0) {
+                meta_exchange_policy = NCCL_EP_META_EXCHANGE_AUTO;
+            } else if (strcmp(optarg, "require-fused") == 0) {
+                meta_exchange_policy = NCCL_EP_META_EXCHANGE_REQUIRE_FUSED;
+            } else if (strcmp(optarg, "force-scan") == 0) {
+                meta_exchange_policy = NCCL_EP_META_EXCHANGE_FORCE_SCAN;
+            } else {
+                if (myRank == 0) {
+                    printf("Error: Invalid --meta-exchange-policy '%s'. Use 'auto', 'require-fused', or 'force-scan'\n", optarg);
+                }
+                MPI_Finalize();
+                return 1;
+            }
             break;
         case 1005:  // --fused-meta-dispatch
             fused_meta_dispatch = true;
@@ -5899,6 +5917,9 @@ int main(int argc, char* argv[]) {
         printf("  Profile mode:    %s\n", profile_mode ? "enabled" : "disabled");
         printf("  NVLink:          %s\n", disable_nvlink ? "disabled (force RDMA intranode, LL only)" : "enabled");
         printf("  Validate mode:   %s\n", validate_data ? "enabled" : "disabled");
+        printf("  Meta exchange:   %s\n",
+               meta_exchange_policy == NCCL_EP_META_EXCHANGE_REQUIRE_FUSED ? "require-fused" :
+               meta_exchange_policy == NCCL_EP_META_EXCHANGE_FORCE_SCAN    ? "force-scan" : "auto");
         printf("  Dynamic tokens:  %s\n", dynamic_tokens ? "enabled (NCCL_EP_AUTO)" : "disabled");
 #ifdef HAVE_CUPTI
         printf("  CUPTI:           enabled (kernel-level GPU timing available)\n");
@@ -6016,6 +6037,7 @@ int main(int argc, char* argv[]) {
     }
     config.max_recv_tokens_per_rank = max_recv_tokens_per_rank;
     if (overflow_drop) config.overflow_policy = NCCL_EP_OVERFLOW_DROP;
+    config.meta_exchange_policy = meta_exchange_policy;
     config.max_num_sms = max_num_sms;
     config.zero_copy = zcopy ? NCCL_EP_ZERO_COPY_ON : NCCL_EP_ZERO_COPY_AUTO;
     if (ht_em_local_dup) {

@@ -1090,9 +1090,13 @@ struct dispatch_push_count_kparams_t {
     const uint64_t* token_dst_rank_bitmap = nullptr;        // [max_tokens] per-token global dest-rank bitmap
     uint8_t* const* recv_tables_ptrs = nullptr;             // [lsa_team_size] peer count-table regions
     int recv_max_slots = 0;                                 // slots per sub-table in the peer region
-    // When set, the fused meta build clamps published per-expert offsets/counts to
+    // When set, the fused meta build clamps published EM per-expert offsets/counts to
     // recv_max_slots so over-budget tokens drop; the pre-drop total stays in num_recv_out.
     bool allow_overflow_drop = false;
+    // Flat layout: no EM zones. The publish writes only num_recv_out and caller_recv_total
+    // (rank-level dedup count); per-expert caller counts come from the post-dispatch LERM
+    // recount (launch_lerm_flat_copy) and caller_offsets are not written.
+    bool is_flat = false;
     // Receiver EM tables published by block 0 (zone offsets, unpadded counts, caller outputs).
     int64_t* expert_token_offsets_out = nullptr;            // [experts_per_rank + 1]
     int32_t* per_expert_counts_out = nullptr;               // [experts_per_rank] unpadded counts
@@ -4508,6 +4512,7 @@ struct dispatch_push_map_publish_ctx_t {
     void* caller_recv_total;
     bool caller_out_is_int64;
     int em_alignment;
+    bool is_flat;
 };
 
 // Warp-uniform FLAT slot base per dest rank for one (stream, chunk): the stream
@@ -4694,7 +4699,7 @@ __device__ __forceinline__ void dispatch_push_map_build_s2d(
                         // be consuming earlier-published chunks concurrently) to hit it blind as a
                         // raw assert with no actionable message.
                         if (!ctx.allow_overflow_drop && slot_overflows(slot, ctx.recv_max_slots)) {
-                            printf("ncclEp HT EM count dispatch: recv slot %d exceeds "
+                            printf("ncclEp HT count dispatch: recv slot %d exceeds "
                                    "max_recv_tokens_per_rank %d; increase "
                                    "ncclEpGroupConfig_t::max_recv_tokens_per_rank or set "
                                    "NCCL_EP_OVERFLOW_DROP\n", slot, ctx.recv_max_slots);
@@ -4839,6 +4844,7 @@ __device__ __forceinline__ void dispatch_push_map_publish_outputs(
     void* caller_counts = pub.caller_counts;
     void* caller_recv_total = pub.caller_recv_total;
     const bool caller_out_is_int64 = pub.caller_out_is_int64;
+    const bool is_flat = pub.is_flat;
     auto cnt_rank_row = [&](int s) -> const int32_t* {
         return ctx.count_rows + (size_t)s * count_row_ints;
     };
@@ -4853,9 +4859,9 @@ __device__ __forceinline__ void dispatch_push_map_publish_outputs(
             // TRAP: over-budget recv count under a non-DROP overflow policy aborts here with an
             // actionable message before the permute reads the FLAT/LERM buffers (scan-mode parity).
             if (!ctx.allow_overflow_drop && tot > ctx.recv_max_slots) {
-                printf("ncclEp HT EM count dispatch: recv tokens %d exceed max_recv_tokens_per_rank "
+                printf("ncclEp HT count dispatch: recv tokens %d exceed max_recv_tokens_per_rank "
                        "%d; increase ncclEpGroupConfig_t::max_recv_tokens_per_rank or set "
-                       "NCCL_EP_OVERFLOW_DROP\n", tot, (int)ctx.recv_max_slots);
+                       "overflow_policy = NCCL_EP_OVERFLOW_DROP\n", tot, static_cast<int>(ctx.recv_max_slots));
                 __trap();
             }
             // DROP: this FLAT recv count drives the permute's per-slot loop over the
@@ -4864,8 +4870,19 @@ __device__ __forceinline__ void dispatch_push_map_publish_outputs(
             if (num_recv_out)
                 *num_recv_out =
                     (ctx.allow_overflow_drop && tot > ctx.recv_max_slots) ? ctx.recv_max_slots : tot;
+            // Flat: recv total is the rank-level dedup count (pre-drop; see is_flat in
+            // dispatch_push_count_kparams_t), not the per-expert sum below.
+            if (caller_recv_total && is_flat) {
+                if (caller_out_is_int64) {
+                    *static_cast<int64_t*>(caller_recv_total) = tot;
+                } else {
+                    *static_cast<int32_t*>(caller_recv_total) = tot;
+                }
+            }
         }
-        if (expert_token_offsets_out) {
+        // EM per-expert zone publish (padded prefix offsets, counts, caller outputs). Flat has
+        // no zones: its per-expert counts are recounted from the LERM after dispatch.
+        if (!is_flat && (expert_token_offsets_out || caller_offsets || caller_counts)) {
             __shared__ int64_t s_pub_off[64 * MASK_WORDS + 1];
             __shared__ int32_t s_raw_cnt[64 * MASK_WORDS];
             const int em_align = (em_alignment > 1) ? em_alignment : 1;
@@ -4892,7 +4909,8 @@ __device__ __forceinline__ void dispatch_push_map_publish_outputs(
                 }
                 s_pub_off[experts_per_rank] = cum;
                 // TRAP: padded EM total over budget under a non-DROP policy (may overflow via
-                // alignment padding even when the FLAT count fits) aborts with scan-mode parity.
+                // alignment padding even when the per-rank count fits) aborts with scan-mode
+                // parity.
                 if (!drop && cum > cap) {
                     printf("ncclEp HT EM count dispatch: padded recv tokens %lld exceed "
                            "max_recv_tokens_per_rank %lld; increase "
@@ -4900,12 +4918,18 @@ __device__ __forceinline__ void dispatch_push_map_publish_outputs(
                            (long long)cum, (long long)cap);
                     __trap();
                 }
-                expert_token_offsets_out[experts_per_rank] = (drop && cum > cap) ? cap : cum;
-                // recv_total_counter reports the pre-drop padded total (unclamped cum);
-                // equals the unpadded FLAT recv total when em_alignment == 1.
-                if (caller_recv_total) {
-                    if (caller_out_is_int64) *static_cast<int64_t*>(caller_recv_total) = cum;
-                    else *static_cast<int32_t*>(caller_recv_total) = (int32_t)cum;
+                if (expert_token_offsets_out) {
+                    expert_token_offsets_out[experts_per_rank] = (drop && cum > cap) ? cap : cum;
+                    // recv_total_counter reports the pre-drop padded EM total (unclamped cum),
+                    // one slot per (token, local-expert) hit. Flat's caller_recv_total is
+                    // written from the rank-level tot above instead -- see that comment.
+                    if (caller_recv_total) {
+                        if (caller_out_is_int64) {
+                            *static_cast<int64_t*>(caller_recv_total) = cum;
+                        } else {
+                            *static_cast<int32_t*>(caller_recv_total) = static_cast<int32_t>(cum);
+                        }
+                    }
                 }
             }
             __syncwarp();
@@ -4918,8 +4942,12 @@ __device__ __forceinline__ void dispatch_push_map_publish_outputs(
                 const int32_t out_actual = drop ? (int32_t)((int64_t)s_raw_cnt[e] < room ? s_raw_cnt[e] : room)
                                                 : s_raw_cnt[e];
                 const int64_t out_padded = drop ? (padded < room ? padded : room) : padded;
-                expert_token_offsets_out[e] = expert_pub_off;
-                if (per_expert_counts_out) per_expert_counts_out[e] = out_actual;
+                if (expert_token_offsets_out) {
+                    expert_token_offsets_out[e] = expert_pub_off;
+                    if (per_expert_counts_out) {
+                        per_expert_counts_out[e] = out_actual;
+                    }
+                }
                 if (caller_offsets) {
                     if (caller_out_is_int64) static_cast<int64_t*>(caller_offsets)[e] = expert_pub_off;
                     else static_cast<int32_t*>(caller_offsets)[e] = (int32_t)expert_pub_off;
@@ -5021,6 +5049,7 @@ __device__ __forceinline__ void dispatch_push_map_warp(
     pub.caller_recv_total = p.caller_recv_total;
     pub.caller_out_is_int64 = p.caller_out_is_int64;
     pub.em_alignment = p.em_alignment;
+    pub.is_flat = p.is_flat;
     dispatch_push_map_publish_outputs<EXPERTS_PER_RANK>(ctx, pub, map_warp);
 }
 

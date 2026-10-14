@@ -414,11 +414,16 @@ typedef struct {
     ncclEpTensor_t* expert_counters;     // 1D [num_local_experts] int32 (or int64 for HT EM)
                                          //   HT (handle time): per-expert recv counts. Flat: unpadded int32.
                                          //                     EM: padded counts (sum equals output slot count).
+  //   HT Flat: number of received slots whose recv_topk_idx row names the local expert (a
+  //   token routed to several local experts counts once in each). Under
+  //   NCCL_EP_OVERFLOW_DROP the handle-time value is pre-drop; the dispatch-time value
+  //   (layout_info passed to ncclEpDispatch) is the delivered, post-drop count.
   //   LL/expert-major layout: per-expert received token counts (dispatch time).
     ncclEpTensor_t* src_rank_counters; // 1D [num_ranks] int32
   //   LL/rank-major layout only: per-source-rank token counts (dispatch time).
     ncclEpTensor_t* expert_offsets; // 1D [num_local_experts] int32 or int64
   //   HT (Handle time), expert-major layout only: prefix sum of padded per-expert counts.
+  //   Ignored for the Flat layout (no per-expert zones), at handle and dispatch time alike.
     ncclEpTensor_t* recv_total_counter; // 1D [1] int32 or int64
   //   HT (Handle time): scalar total recv token count.
   //     * Flat layout: unpadded.
@@ -684,10 +689,12 @@ ncclResult_t ncclEpInitHandle(
 // For forward dispatch: handle_mem may be snapshotted any time after
 // ncclEpUpdateHandle completes on the source stream.
 //
-// For expert-major backward dispatch: handle_mem must be snapshotted after the
-// matching forward ncclEpDispatch has completed, with the copy ordered after
-// that work. ncclEpUpdateHandle alone does not write the per-token maps that
-// backward dispatch reads.
+// For backward dispatch or combine in count mode (expert-major local-permute
+// and Flat; see ncclEpDispatch's layout_info notes): handle_mem must be
+// snapshotted after the matching forward ncclEpDispatch has completed, with
+// the copy ordered after that work. ncclEpUpdateHandle alone does not write
+// the per-token maps that backward dispatch and combine read. Outside count
+// mode the per-token maps are complete after ncclEpUpdateHandle.
 //
 // Arguments:
 //   handle     - [OUT] Newly imported handle
@@ -976,9 +983,15 @@ NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchConfig_t, NCCL_EP_DISPAT
 //                                layout_info->src_rank_counters[`r`] (see below).
 //   layout_info   - [IN,OUT] Named local tensors for layout-specific counters (see ncclEpLayoutInfo_t).
 //                              * For HT mode normally NULL: the counter information is available through
-//                                ncclEpUpdateHandle. Exception: HT expert-major count mode may instead
-//                                pass expert_counters and recv_total_counter here, published by dispatch
-//                                itself rather than ncclEpUpdateHandle.
+//                                ncclEpUpdateHandle. Exception: HT count mode (expert-major local-permute
+//                                and Flat) may instead pass expert_counters and recv_total_counter here,
+//                                published by dispatch itself rather than ncclEpUpdateHandle. Supplying
+//                                any of these to ncclEpUpdateHandle selects the unfused count exchange
+//                                (they are then written there, before dispatch); omitting them keeps
+//                                the fused exchange, in which the recv count is known only after the
+//                                first forward dispatch. Outside count mode (multiple LSA teams,
+//                                NCCL_EP_HT_EM_AG_SCAN_MODE, EM duplication modes) dispatch leaves
+//                                these tensors untouched; request them from ncclEpUpdateHandle there.
 //                              * For LL mode, layout-specific counter tensors must be provided (see ncclEpLayoutInfo_t doc).
 //                                * Expert-major layout: expert_counters tensor is required.
 //                                * Rank-major layout: src_rank_counters is optional; when provided,

@@ -66,6 +66,7 @@ static ncclResult_t ll_resize_rdma_buffer(ncclEpGroup_t ep_group, size_t new_siz
 static bool is_internode_available(ncclEpGroup_t ep_group);
 static inline bool dispatch_push_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout);
 static inline bool dispatch_pull_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout);
+static inline bool flat_push_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout);
 
 // Define NCCL_CHECK_RESULT macro for NCCL error checking
 #ifndef NCCL_CHECK_RESULT
@@ -1056,14 +1057,16 @@ static inline ncclResult_t validate_required_fused_exchange(
         return ncclSuccess;
 
     const char* reason = nullptr;
-    if (layout != NCCL_EP_LAYOUT_EXPERT_MAJOR)
-        reason = "only expert-major layout supports fused metadata exchange";
+    if (layout != NCCL_EP_LAYOUT_EXPERT_MAJOR && layout != NCCL_EP_LAYOUT_FLAT)
+        reason = "only expert-major and flat layouts support fused metadata exchange";
     else if (group->eager_mode)
         reason = "eager sizing needs the recv count before dispatch";
     else if (group->rdma_team_size > 1)
         reason = "fused metadata exchange is single-LSA-team only";
     else if (num_topk > MAX_NUM_TOPK)
         reason = "num_topk exceeds the fused metadata limit";
+    else if (layout == NCCL_EP_LAYOUT_FLAT && !flat_push_count_capable(group, layout))
+        reason = "flat fused metadata requires the push-pull local-permute flow";
     else if (group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush &&
              group->config.num_experts > kTopkIdxInvalid)
         reason = "pull-push fused metadata requires num_experts <= 65535";
@@ -3379,6 +3382,9 @@ struct ncclEpHandle {
                 // in place of the fused fan-out. fused_meta_dispatch=false marks it populated this round.
                 int32_t*  cached_cnt_rows;            // [nRanks * (nRanks + num_experts)]
                 bool      fused_meta_dispatch;
+                // Count mode builds s2d/LERM/recv count only in a forward dispatch; false from
+                // UpdateHandle until that dispatch runs. Backward dispatch and combine need it.
+                bool      fwd_maps_built;
             } dispatch_push_count;
 
             // EM local-fanout dup-groups (allocated iff mode == kLocalDup). Written by EM
@@ -3446,12 +3452,35 @@ static inline bool em_local_permute_enabled(ncclEpGroup_t group, ncclEpHandle_t 
 }
 
 /**
+ * Test whether the Flat layout can fuse push-count metadata exchange with dispatch.
+ *
+ * Same device-side histogram/fan-out mechanism as EM local-permute's push-count
+ * path below. ht_em_mode is not a Flat concept, but it is a group-wide staging
+ * choice: the EM duplication modes (LOCAL_DUP/NVLINK_DUP) index the shared
+ * token/prob staging by EM slot and pull-push uses its own staging, so only the
+ * default local-permute staging matches the flat rank-major slots the fused build
+ * writes. Flat handles in any other mode keep the scan path.
+ *
+ * @param group Group whose resolved HT mode and topology are being tested.
+ * @param layout Proposed or actual handle layout.
+ * @return true when the Flat push-count fused path is supported.
+ */
+static inline bool flat_push_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout) {
+    return layout == NCCL_EP_LAYOUT_FLAT &&
+           !meta_exchange_force_scan(group) &&
+           !is_internode_available(group) &&
+           group->ht_em_mode == ncclEpGroup::HtEmMode::kLocalPermute;
+}
+
+/**
  * Test whether push-count metadata exchange can be fused with dispatch.
  *
  * Replaces the bitmap AllGather and global scan with a device-side histogram
- * push and receiver-local EM rebuild. Requires expert-major local-permute in a
- * single LSA domain. Group creation may pass EXPERT_MAJOR as a hypothetical
- * capability probe; handle setup passes the handle's actual layout.
+ * push and receiver-local map rebuild. Single LSA domain only. Two structurally
+ * unrelated branches are OR'd together: expert-major local-permute (gated on
+ * ht_em_mode) and Flat (gated purely on layout, see flat_push_count_capable).
+ * Group creation may pass EXPERT_MAJOR as a hypothetical capability probe;
+ * handle setup passes the handle's actual layout.
  *
  * @param group Group whose resolved HT mode and topology are being tested.
  * @param layout Proposed or actual handle layout.
@@ -3459,10 +3488,11 @@ static inline bool em_local_permute_enabled(ncclEpGroup_t group, ncclEpHandle_t 
  */
 static inline bool dispatch_push_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout) {
     // kPullPush is handled by the separate pull-count gate, so it is excluded here.
-    return !meta_exchange_force_scan(group) &&
-           !is_internode_available(group) &&
-           em_local_permute_enabled(group, layout) &&
-           group->ht_em_mode == ncclEpGroup::HtEmMode::kLocalPermute;
+    const bool em_branch = !meta_exchange_force_scan(group) &&
+                           !is_internode_available(group) &&
+                           em_local_permute_enabled(group, layout) &&
+                           group->ht_em_mode == ncclEpGroup::HtEmMode::kLocalPermute;
+    return em_branch || flat_push_count_capable(group, layout);
 }
 static inline bool dispatch_push_count_active(ncclEpGroup_t group, ncclEpHandle_t handle) {
     return dispatch_push_count_capable(group, handle->layout);
@@ -4017,6 +4047,7 @@ static void ht_assign_count_scratch(ncclEpHandle_t handle, ncclEpGroup_t ep_grou
         handle->ht.dispatch_push_count.own_row = nullptr;
         handle->ht.dispatch_push_count.cached_cnt_rows = nullptr;
         handle->ht.dispatch_push_count.fused_meta_dispatch = true;
+        handle->ht.dispatch_push_count.fwd_maps_built = false;
         handle->ht.dispatch_push_count.lerm_landing = nullptr;
         return;
     }
@@ -4043,6 +4074,7 @@ static void ht_assign_count_scratch(ncclEpHandle_t handle, ncclEpGroup_t ep_grou
     handle->ht.dispatch_push_count.cached_cnt_rows =
         reinterpret_cast<int32_t*>(ptr + offset + cnt_ints_bytes + own_row_bytes + bitmap_bytes);
     handle->ht.dispatch_push_count.fused_meta_dispatch = true;
+    handle->ht.dispatch_push_count.fwd_maps_built = false;
 }
 
 static ncclResult_t
@@ -4190,6 +4222,7 @@ ht_init_handle(ncclEpHandle_t handle, ncclEpGroup_t ep_group, const ncclEpTensor
     offset += L.sz_pull_count_cached_rows;
     if (L.sz_pull_count_own_row > 0) {
         handle->ht.dispatch_push_count.fused_meta_dispatch = true;
+        handle->ht.dispatch_push_count.fwd_maps_built = false;
     }
     assert(offset == L.total);
     handle->ht.dispatch_output_per_expert_alignment = 0;
@@ -4349,13 +4382,20 @@ static ncclResult_t ht_update_handle_count_mode(
     // Unfused path (caller supplies layout_info): AllGather count rows now and derive the
     // caller tensors immediately; dispatch MAP warps then read these gathered rows instead
     // of the fused per-peer landing.
+    // Flat routes the caller's expert_counters through per_expert_counts_device (see the
+    // caller), so it must select the unfused path too; for EM that pointer is the
+    // always-present handle buffer and must not.
+    const bool flat_counts_requested =
+        handle->layout == NCCL_EP_LAYOUT_FLAT && per_expert_counts_device != nullptr;
     const bool provide_layout_info =
-        (padded_out_counts != nullptr) || (out_offsets != nullptr) || (recv_total_counter != nullptr);
+        (padded_out_counts != nullptr) || (out_offsets != nullptr) || (recv_total_counter != nullptr) ||
+        flat_counts_requested;
     // Eager mode needs the recv count at UpdateHandle time, before the fused path would
     // publish it, so it always runs the unfused count exchange.
     const bool run_unfused_count =
         provide_layout_info || ep_group->eager_mode || meta_exchange_force_unfused(ep_group);
     handle->ht.dispatch_push_count.fused_meta_dispatch = true;
+    handle->ht.dispatch_push_count.fwd_maps_built = false;
     if (run_unfused_count) {
         NCCL_CHECK_RESULT(ncclAllGather(
             cnt_rank_pub,
@@ -4364,8 +4404,8 @@ static ncclResult_t ht_update_handle_count_mode(
             ncclInt32,
             ep_group->comm,
             stream));
-        // Derive the caller layout tensors from the gathered rows. Count mode is EM-only
-        // (gated by em_local_permute_enabled). Counts/offsets exclude dropped tokens;
+        // Derive the caller layout tensors from the gathered rows (EM local-permute or
+        // Flat; see dispatch_push_count_capable). Counts/offsets exclude dropped tokens;
         // recv_total_counter reports the pre-drop total.
         nccl_ep::ht::compute_layout_info(
             handle->ht.dispatch_push_count.cached_cnt_rows,
@@ -4383,6 +4423,7 @@ static ncclResult_t ht_update_handle_count_mode(
             per_expert_counts_device,
             recv_total_counter,
             handle->ht.num_tokens_for_experts,
+            handle->layout == NCCL_EP_LAYOUT_FLAT,
             stream);
         handle->ht.dispatch_push_count.fused_meta_dispatch = false;
     }
@@ -4437,6 +4478,7 @@ static ncclResult_t ht_update_handle_pull_count_mode(
             ep_group->preprocess_num_sms, stream);
     }
     handle->ht.dispatch_push_count.fused_meta_dispatch = true;
+    handle->ht.dispatch_push_count.fwd_maps_built = false;
 
     // Layout outputs requested by the caller must be ready before dispatch: AllGather count
     // rows now and derive them immediately via the same reduction the unfused push-count path
@@ -4467,6 +4509,7 @@ static ncclResult_t ht_update_handle_pull_count_mode(
             per_expert_counts_device,
             recv_total_counter,
             handle->ht.num_tokens_for_experts,
+            /*is_flat=*/false,  // pull-count is EM local-permute only
             stream);
         handle->ht.dispatch_push_count.fused_meta_dispatch = false;
     }
@@ -4545,6 +4588,11 @@ ncclResult_t ncclEpImportHandle(
     tensor_permanent_copy(&handle->topk_idx, &topk_idx);
     handle->num_tokens = parsed_state.num_tokens;
     handle->num_tokens_set = true;
+    // Import cannot tell when the snapshot was taken. A snapshot from right after
+    // ncclEpUpdateHandle is valid for forward dispatch, which rebuilds the maps anyway;
+    // the header's ncclEpImportHandle contract makes the caller snapshot after a forward
+    // dispatch when it intends count-mode BWD dispatch or combine. Trust it here.
+    handle->ht.dispatch_push_count.fwd_maps_built = true;
     handle->ht.dispatch_tokens_per_chunk =
         ht_dispatch_chunk_policy(ep_group, handle->layout).select(handle->num_tokens);
     *out_handle = handle;
@@ -4675,15 +4723,20 @@ ncclResult_t ncclEpUpdateHandle(
     // Zero the entire preprocessing zero region (routing, r2a, a2r, ler, ntfe) in one call.
     // Buffers are allocated at max_tokens capacity, so this clears beyond the active num_tokens
     // region — safe because allgather/preprocessing will overwrite the relevant portions.
-    // Count mode only needs r2a cleared here; ntfe, LERM, and a2r are handled elsewhere
-    // (dispatch, the IPC table, and the count block below). Pull-count touches none of these
-    // buffers: dispatch_pull/combine_push never reference r2a/a2r/LERM, and the one buffer they
-    // do share (num_tokens_for_experts) is written by dispatch before combine reads it, so a
-    // host-side zero here is never observed.
+    // Count mode clears r2a (a2r is unused: single LSA team) plus the LERM and recv count,
+    // which dispatch rewrites only for the kept slots: the tail of the LERM and a pre-dispatch
+    // count read must not see the previous call's values (scan-mode parity). Pull-count touches
+    // none of these buffers: dispatch_pull/combine_push never reference r2a/a2r/LERM, and the
+    // one buffer they do share (num_tokens_for_experts) is written by dispatch before combine
+    // reads it, so a host-side zero here is never observed.
     if (count_mode) {
         const int padded_max_tokens = nccl_ep::align(max_tokens, 16);
         CUDA_CHECK(cudaMemsetAsync(
             handle->ht.rdma_to_attn_map, 0, (size_t)nNodes * padded_max_tokens * sizeof(bool), stream));
+        char* lerm_begin = reinterpret_cast<char*>(handle->ht.local_expert_routing_map);
+        char* zero_region_end =
+            static_cast<char*>(handle->ht.preprocessing_block) + handle->ht.preprocessing_zero_region_size;
+        CUDA_CHECK(cudaMemsetAsync(lerm_begin, 0, static_cast<size_t>(zero_region_end - lerm_begin), stream));
     } else if (!pull_count) {
         CUDA_CHECK(cudaMemsetAsync(
             handle->ht.preprocessing_block, 0, handle->ht.preprocessing_zero_region_size, stream));
@@ -4833,9 +4886,10 @@ ncclResult_t ncclEpUpdateHandle(
     if (expert_major) {
         per_expert_counts_device = handle->ht.per_expert_counts_active;
     } else if (recv_expert_counter != nullptr) {
-        assert(recv_expert_counter->ndim == 1 && "recv_expert_counter must be 1D");
-        assert(recv_expert_counter->datatype == ncclInt32 && "HT flat: recv_expert_counter must be ncclInt32");
-        assert(
+        // Same checks ncclEpDispatch applies to the Flat expert_counters it receives.
+        EP_HOST_ASSERT(recv_expert_counter->ndim == 1 && "recv_expert_counter must be 1D");
+        EP_HOST_ASSERT(recv_expert_counter->datatype == ncclInt32 && "HT flat: recv_expert_counter must be ncclInt32");
+        EP_HOST_ASSERT(
             recv_expert_counter->sizes[0] >= static_cast<unsigned int>(ep_group->num_local_experts) &&
             "recv_expert_counter size must be >= num_local_experts");
         ncclEpTensor_t recv_expert_counter_local;
@@ -4846,7 +4900,7 @@ ncclResult_t ncclEpUpdateHandle(
             &recv_expert_counter_local,
             0,
             &resolved_recv_expert_counter));
-        assert(resolved_recv_expert_counter->data != nullptr && "recv_expert_counter data must not be null");
+        EP_HOST_ASSERT(resolved_recv_expert_counter->data != nullptr && "recv_expert_counter data must not be null");
         per_expert_counts_device = static_cast<int32_t*>(resolved_recv_expert_counter->data);
     }
     // ht.expert_token_offsets is already the handle_mem slot for EM; FLAT path never reads it.
@@ -5987,7 +6041,15 @@ ncclResult_t ncclEpDispatch(
             }
         }
         const bool use_sm_copy = !group->eager_mode && copy_mode != nccl_ep::ht::DispatchCopyMode::kCe;
-        const bool need_recv_counts = !use_sm_copy && !is_capturing && (copy_tokens || copy_scales);
+        // CE copies outside capture move exactly the routed rows, so they need the recv count on
+        // the host. Fused count mode produces that count inside the forward dispatch kernel, so
+        // querying it here (before the kernel is enqueued) would read a stale value; those calls
+        // read it right after the kernel launch below instead (see late_recv_count_query).
+        const bool want_recv_counts = !use_sm_copy && !is_capturing && (copy_tokens || copy_scales);
+        const bool recv_count_in_kernel =
+            count_mode && forward_dispatch && handle->ht.dispatch_push_count.fused_meta_dispatch;
+        const bool need_recv_counts = want_recv_counts && !recv_count_in_kernel;
+        const bool late_recv_count_query = want_recv_counts && recv_count_in_kernel;
 
         // CE copies use actual rows outside capture and bounded capacity during capture.
         unsigned int recv_copy_rows = static_cast<unsigned int>(group->max_recv_tokens);
@@ -6007,7 +6069,9 @@ ncclResult_t ncclEpDispatch(
                 return ncclInvalidArgument;
             }
         }
-        if (recipe == NCCL_EP_DISP_QUANT_FWD &&
+        // In late-query mode recv_copy_rows is still the capacity bound here; the routed-count
+        // check for both recv_x and recv_scales runs after the kernel (see late_recv_count_query).
+        if (!late_recv_count_query && recipe == NCCL_EP_DISP_QUANT_FWD &&
             recv_scales->sizes[0] < recv_copy_rows) {
             fprintf(
                 stderr,
@@ -6056,6 +6120,12 @@ ncclResult_t ncclEpDispatch(
         // Fused-meta-dispatch path: build the rank-major s2d inside the dispatch kernel from the
         // histogram-published per-rank count rows (FWD only; BWD reuses the FWD-populated s2d).
         // No host collective or kernel runs between the histogram and dispatch.
+        if (count_mode && !forward_dispatch && !handle->ht.dispatch_push_count.fwd_maps_built) {
+            fprintf(stderr,
+                    "ncclEpDispatch: count mode builds the recv maps in the forward dispatch; "
+                    "a backward dispatch needs one after ncclEpUpdateHandle\n");
+            return ncclInvalidUsage;
+        }
         const bool count_mode_dispatch = count_mode && forward_dispatch;
         params.dispatch_push_count.active = count_mode_dispatch;
         if (count_mode_dispatch) {
@@ -6083,15 +6153,29 @@ ncclResult_t ncclEpDispatch(
             params.dispatch_push_count.allow_overflow_drop = group->config.overflow_policy == NCCL_EP_OVERFLOW_DROP;
             params.dispatch_push_count.expert_token_offsets_out = handle->ht.expert_token_offsets;
             params.dispatch_push_count.per_expert_counts_out = handle->ht.per_expert_counts_active;
-            // Info-layout at dispatch time is only wired for HT EM local-permute; other HT paths
-            // still write it in UpdateHandle. Remove once every HT mode supports it here.
-            EP_HOST_ASSERT(em_permute_active && "HT dispatch info-layout wiring is only supported for EM local permute");
-            // Caller's padded per-expert offsets/counts, wired from the dispatch-time
-            // layout_info when provided; the permute writes them post-build (receiver-local).
+            // Info-layout at dispatch time is only wired for HT EM local-permute and Flat;
+            // other HT paths still write it in UpdateHandle. Remove once every HT mode
+            // supports it here.
+            EP_HOST_ASSERT(
+                (em_permute_active || handle->layout == NCCL_EP_LAYOUT_FLAT) &&
+                "HT dispatch info-layout wiring is only supported for EM local permute and Flat");
+            // Caller's per-expert offsets/counts, wired from the dispatch-time layout_info
+            // when provided. EM: padded, written post-build by the permute (receiver-local).
+            // Flat: expert_offsets is EM-only (ignored, as ncclEpUpdateHandle does) and
+            // expert_counters is int32 (see ncclEpLayoutInfo_t), filled by the post-dispatch
+            // LERM recount rather than the MAP-warp publish.
+            const bool flat_layout = handle->layout == NCCL_EP_LAYOUT_FLAT;
+            params.dispatch_push_count.is_flat = flat_layout;
             const ncclEpTensor_t* caller_offsets_tensor =
-                layout_info ? tensor_ptr(layout_info->expert_offsets) : nullptr;
+                (layout_info && !flat_layout) ? tensor_ptr(layout_info->expert_offsets) : nullptr;
             const ncclEpTensor_t* count_caller_counts_tensor =
                 layout_info ? tensor_ptr(layout_info->expert_counters) : nullptr;
+            // Flat expert_counters may be window-bound, as ncclEpUpdateHandle accepts.
+            ncclEpTensor_t flat_counts_local;
+            if (count_caller_counts_tensor && flat_layout) {
+                NCCLCHECK(resolveTensorWindowBinding(
+                    group, count_caller_counts_tensor, &flat_counts_local, 0, &count_caller_counts_tensor));
+            }
             auto check_count_caller_tensor = [&](const ncclEpTensor_t* t) {
                 EP_HOST_ASSERT(t->ndim == 1 && "tensor must be 1D");
                 EP_HOST_ASSERT((t->datatype == ncclInt32 || t->datatype == ncclInt64) && "tensor must be ncclInt32 or ncclInt64");
@@ -6100,26 +6184,39 @@ ncclResult_t ncclEpDispatch(
                     "tensor size must be >= num_local_experts");
                 EP_HOST_ASSERT(t->data != nullptr && "tensor data must not be null");
             };
-            if (caller_offsets_tensor) check_count_caller_tensor(caller_offsets_tensor);
-            if (count_caller_counts_tensor) check_count_caller_tensor(count_caller_counts_tensor);
-            // Offsets and counts must share dtype; default int64 when neither tensor is given.
-            if (caller_offsets_tensor && count_caller_counts_tensor)
+            if (caller_offsets_tensor) {
+                check_count_caller_tensor(caller_offsets_tensor);
+            }
+            if (count_caller_counts_tensor) {
+                check_count_caller_tensor(count_caller_counts_tensor);
+                EP_HOST_ASSERT(
+                    (!flat_layout || count_caller_counts_tensor->datatype == ncclInt32) &&
+                    "HT flat: expert_counters must be ncclInt32");
+            }
+            // EM offsets and counts must share dtype; default int64 when neither tensor is given.
+            if (caller_offsets_tensor && count_caller_counts_tensor) {
                 EP_HOST_ASSERT(
                     caller_offsets_tensor->datatype == count_caller_counts_tensor->datatype &&
                     "expert_offsets and expert_counters must share dtype");
+            }
             params.dispatch_push_count.caller_offsets = caller_offsets_tensor ? caller_offsets_tensor->data : nullptr;
             params.dispatch_push_count.caller_counts = count_caller_counts_tensor ? count_caller_counts_tensor->data : nullptr;
-            // Caller's scalar recv_total_counter (pre-drop padded total), written by the fused
-            // permute alongside the per-expert counts. Its int width must match counts/offsets.
+            // Caller's scalar recv_total_counter (pre-drop total), written by the MAP-warp
+            // publish. Its int width must match the EM counts/offsets it is published with;
+            // Flat counts are written separately as int32, so they do not constrain it.
             const ncclEpTensor_t* recv_total_tensor =
                 layout_info ? tensor_ptr(layout_info->recv_total_counter) : nullptr;
             // Infer the shared dtype from whichever optional output the caller actually gave;
-            // default int64 only when none of the three were requested.
-            params.dispatch_push_count.caller_out_is_int64 =
-                count_caller_counts_tensor    ? (count_caller_counts_tensor->datatype == ncclInt64)
-                : caller_offsets_tensor ? (caller_offsets_tensor->datatype == ncclInt64)
-                : recv_total_tensor     ? (recv_total_tensor->datatype == ncclInt64)
-                                              : true;
+            // default int64 only when none of them were requested.
+            bool caller_out_is_int64 = true;
+            if (count_caller_counts_tensor && !flat_layout) {
+                caller_out_is_int64 = count_caller_counts_tensor->datatype == ncclInt64;
+            } else if (caller_offsets_tensor) {
+                caller_out_is_int64 = caller_offsets_tensor->datatype == ncclInt64;
+            } else if (recv_total_tensor) {
+                caller_out_is_int64 = recv_total_tensor->datatype == ncclInt64;
+            }
+            params.dispatch_push_count.caller_out_is_int64 = caller_out_is_int64;
             params.dispatch_push_count.em_alignment =
                 static_cast<int>(handle->ht.dispatch_output_per_expert_alignment);
             if (recv_total_tensor) {
@@ -6229,7 +6326,6 @@ ncclResult_t ncclEpDispatch(
                     stream,
                     x->datatype));
         }
-
         // Fan primaries out to secondary em_slots in this rank's recv buffer.
         // Use the resolved output array (user window under zero_copy, IPC staging otherwise).
         if (em_unfused_active) {
@@ -6263,6 +6359,25 @@ ncclResult_t ncclEpDispatch(
                     : nullptr,
                 /*scale_row_bytes=*/sf_bytes_per_token);
         }
+        // Fused count: the forward kernel enqueued above publishes num_tokens_for_experts, so a
+        // stream-ordered read here returns the routed count and the CE copies below move exactly
+        // those rows, as the scan and unfused paths do (they read it before the kernel). Unlike
+        // those paths, the host sync here waits for the whole dispatch kernel, not just the
+        // metadata, and the undersized-buffer rejection below fires after the kernel has run.
+        // CE copies outside capture only; capture and SM copies never query.
+        if (late_recv_count_query) {
+            NCCLCHECK(ht_query_num_recv_tokens(handle, stream, &recv_copy_rows));
+            if (recv_x->sizes[0] < recv_copy_rows ||
+                (copy_scales && recv_scales->sizes[0] < recv_copy_rows)) {
+                fprintf(
+                    stderr,
+                    "NCCL EP: dispatch recv buffer too small: %u rows < %u routed tokens\n",
+                    static_cast<unsigned>(recv_x->sizes[0]),
+                    recv_copy_rows);
+                return ncclInvalidArgument;
+            }
+        }
+
         /* ===== Copy intra-LSA staging → caller outputs ===== */
         // External-window outputs are written directly by the kernel; regular tensors
         // need a D2D copy from the shared intra-LSA staging buffers. On the
@@ -6407,6 +6522,28 @@ ncclResult_t ncclEpDispatch(
                         dsp_em,
                         count_mode, // count mode: LERM is a packed bitmap
                         stream);
+            }
+
+            // Flat count-mode: no per-expert zones to permute into (launch_dispatch_permute
+            // below is EM-only), so persist the MAP-warp-published LERM row directly into
+            // the handle's private copy, mirroring what the permute's lerm_in/lerm_out does
+            // for EM. The same pass tallies the caller's dispatch-time expert_counters
+            // (delivered per-expert hit counts; see launch_lerm_flat_copy).
+            if (count_mode && handle->layout == NCCL_EP_LAYOUT_FLAT) {
+                int32_t* flat_caller_counts =
+                    static_cast<int32_t*>(params.dispatch_push_count.caller_counts);
+                if (flat_caller_counts) {
+                    CUDA_CHECK(cudaMemsetAsync(
+                        flat_caller_counts, 0, group->num_local_experts * sizeof(int32_t), stream));
+                }
+                nccl_ep::ht::launch_lerm_flat_copy(
+                    handle->ht.local_expert_routing_map,
+                    handle->ht.dispatch_push_count.lerm_landing,
+                    handle->ht.num_tokens_for_experts,
+                    group->num_local_experts,
+                    num_recv_tokens,
+                    flat_caller_counts,
+                    stream);
             }
         }
 
@@ -6744,6 +6881,13 @@ ncclResult_t ncclEpDispatch(
                     cudaMemcpyDeviceToDevice,
                     stream));
             }
+        }
+
+        // Count mode: the recv maps BWD dispatch and combine read are finished by the
+        // epilogues above (lerm_flat_copy for Flat, dispatch_permute for EM), so only
+        // mark them built once every step has been enqueued without an early return.
+        if (count_mode_dispatch) {
+            handle->ht.dispatch_push_count.fwd_maps_built = true;
         }
     }
     return ncclSuccess;
@@ -7245,6 +7389,16 @@ ncclResult_t ncclEpCombine(
                 static_cast<int>(em_permute_combine),
                 static_cast<int>(comb_push));
             return ncclInvalidArgument;
+        }
+        // Count mode (see ht_update_handle_count_mode): flat2em_slot_map and
+        // local_expert_routing_map are built by the forward dispatch, so a combine
+        // issued straight after ncclEpUpdateHandle would read unbuilt maps. Checked after
+        // the argument validation above so an invalid call is still reported as such.
+        if (dispatch_push_count_active(group, handle) && !handle->ht.dispatch_push_count.fwd_maps_built) {
+            fprintf(stderr,
+                    "ncclEpCombine: count mode builds the recv maps in the forward dispatch; "
+                    "combine needs one after ncclEpUpdateHandle\n");
+            return ncclInvalidUsage;
         }
         if (comb_push) {
             // Push EM combine (FWD, NONE, single LSA team): each expert rank locally
