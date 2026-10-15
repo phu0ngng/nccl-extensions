@@ -25,6 +25,8 @@ README.md
 
 .gitlab/
 **/.gitlab-ci.yml
+# Internal NCCL EP CI configuration and documentation.
+nccl_ep/ci/
 # Binding-generation tooling is internal. Public builds use the checked-in
 # generated Cython sources under python/nccl/_extensions/bindings/.
 python/build_assets/

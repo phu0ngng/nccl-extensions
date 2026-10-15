@@ -6,6 +6,7 @@ stages:
   - setup
   - unit_test
   - integration_test
+  - cleanup
 
 include:
   - local: .gitlab/ci/nccl-build.yml
@@ -26,6 +27,11 @@ variables:
   PRE_NYX_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-nyx"
   PRE_TYCHE_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-tyche"
   IPP6_INSTALL_DIR: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}"
+
+  EOS_NVSUBMIT_LOG_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
+  PRE_NYX_NVSUBMIT_LOG_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
+  PRE_TYCHE_NVSUBMIT_LOG_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
+  IPP6_NVSUBMIT_LOG_DIR: "/storage/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
 
   IPP6_SLURM_PARTITION: "a100-cicd"
   IPP6_CUDA_HOME: "/storage/toolkits/cuda-12.9"
@@ -245,9 +251,13 @@ build_pretyche:
           cp -a "${unit_test}" "${DST}/test/nccl_ep/"
         fi
       done
+      NVSUBMIT_VENV="${INSTALL_ROOT}/nvsubmit-venv"
+      python3 -m venv "${NVSUBMIT_VENV}"
+      "${NVSUBMIT_VENV}/bin/pip" install nvsubmit==0.3.5 \
+        --index-url https://gitlab-master.nvidia.com/api/v4/projects/231609/packages/pypi/simple
       # Downstream jobs consume the setup producer's path through dotenv.
-      printf 'NCCL_HOME=%s\nNCCL_EP_HOME=%s\nNCCL_EP_BUILDDIR=%s\nNCCL_EP_INSTALL_ROOT=%s\n' \
-        "${DST}" "${DST}" "${DST}" "${INSTALL_ROOT}" > nccl_ep_install.env
+      printf 'NCCL_HOME=%s\nNCCL_EP_HOME=%s\nNCCL_EP_BUILDDIR=%s\nNCCL_EP_INSTALL_ROOT=%s\nNVSUBMIT_VENV=%s\n' \
+        "${DST}" "${DST}" "${DST}" "${INSTALL_ROOT}" "${NVSUBMIT_VENV}" > nccl_ep_install.env
   artifacts:
     reports:
       dotenv: nccl_ep_install.env
@@ -259,6 +269,15 @@ setup_eos:
     - nccl-eos
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
+
+setup_ipp6:
+  extends: .setup_base
+  rules:
+    - when: never
+  tags:
+    - ipp6-nccl
+  variables:
+    NCCL_EP_MERGE_TARGET: "${IPP6_INSTALL_DIR}/${CI_JOB_ID}/build"
 
 setup_prenyx:
   extends: .setup_base
@@ -290,7 +309,27 @@ setup_pretyche:
 ## Stage: unit_test
 ##
 
+.nvsubmit_test:
+  timeout: 2h
+  before_script:
+    - test -x "${NVSUBMIT_VENV:?setup did not publish a venv}/bin/nvsubmit"
+    - mkdir -p "${NVSUBMIT_LOG_DIR}"
+  script:
+    - >-
+      "${NVSUBMIT_VENV}/bin/nvsubmit" --verbose --testsuite "${NVSUBMIT_TESTSUITE}"
+      --cluster-config "${NVSUBMIT_CLUSTER_CONFIG}" --nccl-home "${NCCL_HOME}"
+      --log-dir "${NVSUBMIT_LOG_DIR}"
+      --junit-xml junit_results.xml
+  artifacts:
+    when: always
+    paths:
+      - junit_results.xml
+    reports:
+      junit: junit_results.xml
+    expire_in: 48 hours
+
 unit_test_eos:
+  extends: .nvsubmit_test
   stage: unit_test
   tags:
     - nccl-eos
@@ -299,27 +338,12 @@ unit_test_eos:
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NNODES: "1"
-    NP: "8"
-    NGPUS: "8"
-    NCCL_EP_UNIT_GPUS: "4"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "45"
-  script:
-    - |
-      set -euxo pipefail
-      export CUDA_HOME="${EOS_CUDA_HOME}"
-      export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${LD_LIBRARY_PATH:-}"
-      salloc \
-        -N "${NNODES}" \
-        --ntasks-per-node "${NP}" \
-        --exclusive \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-unit-eos::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_unit_tests.sh
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/eos.yml"
+    NVSUBMIT_LOG_DIR: "${EOS_NVSUBMIT_LOG_DIR}"
+    NVSUBMIT_TESTSUITE: "nccl_ep/ci/tests/unit.yml"
 
 unit_test_pretyche:
+  extends: .nvsubmit_test
   stage: unit_test
   tags:
     - ptyche
@@ -328,66 +352,50 @@ unit_test_pretyche:
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NNODES: "1"
-    NP: "4"
-    NGPUS: "4"
-    NCCL_EP_UNIT_GPUS: "4"
-    SLURM_PARTITION: "batch"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "45"
-  script:
-    - |
-      set -euxo pipefail
-      : "${NCCL_EP_INSTALL_ROOT:?setup_pretyche did not publish an install root}"
-      source "${NCCL_EP_INSTALL_ROOT}/pre-tyche-config.sh"
-      export CUDA_HOME="${PRE_TYCHE_CUDA_HOME}"
-      export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${LD_LIBRARY_PATH:-}"
-      salloc \
-        -N "${NNODES}" \
-        --ntasks-per-node "${NP}" \
-        --exclusive \
-        -p "${SLURM_PARTITION}" \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-unit-pretyche::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_unit_tests.sh
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/pre-tyche.yml"
+    NVSUBMIT_LOG_DIR: "${PRE_TYCHE_NVSUBMIT_LOG_DIR}"
+    NVSUBMIT_TESTSUITE: "nccl_ep/ci/tests/unit.yml"
 
 
 ##
 ## Stage: integration_test
 ##
 
-integration_test_ipp6:
+.nvsubmit_integration:
+  extends: .nvsubmit_test
   stage: integration_test
+  script:
+    - >-
+      "${NVSUBMIT_VENV}/bin/nvsubmit" --verbose --testsuite nccl_ep/ci/tests/integration.yml
+      --cluster-config "${NVSUBMIT_CLUSTER_CONFIG}" --nccl-home "${NCCL_HOME}"
+      --log-dir "${NVSUBMIT_LOG_DIR}"
+      --perf-regression-config nccl_ep/ci/perf-regression.yml
+      --perf-regression-pdf performance-regression.pdf
+      --junit-xml junit_results.xml
+  artifacts:
+    when: always
+    paths:
+      - junit_results.xml
+      - performance-regression.pdf
+    reports:
+      junit: junit_results.xml
+    expire_in: 48 hours
+
+integration_test_ipp6:
+  extends: .nvsubmit_integration
   rules:
     - when: never
   needs:
-    - job: build_ipp6
+    - job: setup_ipp6
       artifacts: true
   tags:
     - ipp6-nccl
   variables:
-    NNODES: "1"
-    NP: "8"
-    NGPUS: "8"
-    SLURM_PARTITION: "h100x8-cicd"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "30"
-    NCCL_EP_BENCH_HT: "0"
-  script:
-    - |
-      set -euxo pipefail
-      salloc \
-        -N "${NNODES}" \
-        --exclusive \
-        -p "${SLURM_PARTITION}" \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-test::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_ci_tests.sh
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/ipp6.yml"
+    NVSUBMIT_LOG_DIR: "${IPP6_NVSUBMIT_LOG_DIR}"
 
 integration_test_eos:
-  stage: integration_test
+  extends: .nvsubmit_integration
   tags:
     - nccl-eos
   needs:
@@ -396,73 +404,36 @@ integration_test_eos:
     - unit_test_eos
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NNODES: "1"
-    NP: "8"
-    NGPUS: "8"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "60"
-    NCCL_EP_BENCH_HT: "0"
-  script:
-    - |
-      set -euxo pipefail
-      export CUDA_HOME="${EOS_CUDA_HOME}"
-      export MPI_HOME="${EOS_MPI_HOME}"
-      export PATH="${MPI_HOME}/bin:${PATH}"
-      export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${MPI_HOME}/lib:${LD_LIBRARY_PATH:-}"
-      export OMPI_MCA_btl_tcp_if_include="eth3"
-      export OMPI_MCA_btl="tcp,self"
-      salloc \
-        -N "${NNODES}" \
-        --ntasks-per-node "${NP}" \
-        --exclusive \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-test-eos::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_ci_tests.sh
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/eos.yml"
+    NVSUBMIT_LOG_DIR: "${EOS_NVSUBMIT_LOG_DIR}"
 
 python_test_eos:
+  extends: .nvsubmit_test
   stage: integration_test
   tags:
     - nccl-eos
-  timeout: 2h
   needs:
     - job: setup_eos
       artifacts: true
     - unit_test_eos
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NNODES: "1"
-    NP: "8"
-    NGPUS: "8"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "60"
-  script:
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/eos.yml"
+    NVSUBMIT_LOG_DIR: "${EOS_NVSUBMIT_LOG_DIR}"
+    NVSUBMIT_TESTSUITE: "nccl_ep/ci/tests/python.yml"
+  before_script:
+    - !reference [.nvsubmit_test, before_script]
     - |
       set -euxo pipefail
       export CUDA_HOME="${EOS_CUDA_HOME}"
       export MPI_HOME="${EOS_MPI_HOME}"
       export PATH="${MPI_HOME}/bin:${PATH}"
       export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${MPI_HOME}/lib:${LD_LIBRARY_PATH:-}"
-      export NCCL_EP_JIT_SOURCE_DIR="${NCCL_HOME}/include/nccl_ep"
-      export NCCL_EP_JIT_BUILD_INCLUDE_DIR="${NCCL_HOME}/include"
-      export NCCL_EP_JIT_NVCC="${CUDA_HOME}/bin/nvcc"
-      export OMPI_MCA_btl_tcp_if_include="eth3"
-      export OMPI_MCA_btl="tcp,self"
-
       bash python/ci/prepare_ep_test_env.sh
       source "python/.ci-ep-python-${CI_JOB_ID}/test-env.sh"
 
-      salloc \
-        -N "${NNODES}" \
-        --ntasks-per-node "${NP}" \
-        --exclusive \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-python-eos::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_python_tests.sh
-
 integration_test_prenyx:
-  stage: integration_test
+  extends: .nvsubmit_integration
   rules:
     - when: never
   tags:
@@ -472,34 +443,11 @@ integration_test_prenyx:
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${PRE_NYX_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NNODES: "1"
-    NP: "8"
-    NGPUS: "8"
-    SLURM_PARTITION: "batch"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "60"
-    NCCL_EP_BENCH_HT: "1"
-  script:
-    - |
-      set -euxo pipefail
-      : "${NCCL_EP_INSTALL_ROOT:?setup_prenyx did not publish an install root}"
-      source "${NCCL_EP_INSTALL_ROOT}/pre-nyx-config.sh"
-      export CUDA_HOME="${PRE_NYX_CUDA_HOME}"
-      export MPI_HOME="${PRE_NYX_MPI_HOME}"
-      export PATH="${MPI_HOME}/bin:${PATH}"
-      export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${MPI_HOME}/lib:${LD_LIBRARY_PATH:-}"
-      salloc \
-        -N "${NNODES}" \
-        --ntasks-per-node "${NP}" \
-        --exclusive \
-        -p "${SLURM_PARTITION}" \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-test-prenyx::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_ci_tests.sh
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/pre-nyx.yml"
+    NVSUBMIT_LOG_DIR: "${PRE_NYX_NVSUBMIT_LOG_DIR}"
 
 integration_test_pretyche:
-  stage: integration_test
+  extends: .nvsubmit_integration
   tags:
     - ptyche
   needs:
@@ -508,29 +456,100 @@ integration_test_pretyche:
     - unit_test_pretyche
   variables:
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NNODES: "1"
-    NP: "4"
-    NGPUS: "4"
-    SLURM_PARTITION: "batch"
-    SLURM_ACCOUNT: "coreai_libraries_nccl"
-    SLURM_TIME: "60"
-    NCCL_EP_BENCH_HT: "1"
-    NCCL_EP_BENCH_NVFP4: "1"
+    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/pre-tyche.yml"
+    NVSUBMIT_LOG_DIR: "${PRE_TYCHE_NVSUBMIT_LOG_DIR}"
+
+
+##
+## Stage: cleanup
+##
+
+.cleanup_install:
+  stage: cleanup
+  when: on_success
+  variables:
+    GIT_STRATEGY: none
   script:
     - |
       set -euxo pipefail
-      : "${NCCL_EP_INSTALL_ROOT:?setup_pretyche did not publish an install root}"
-      source "${NCCL_EP_INSTALL_ROOT}/pre-tyche-config.sh"
-      export CUDA_HOME="${PRE_TYCHE_CUDA_HOME}"
-      export MPI_HOME="${PRE_TYCHE_MPI_HOME}"
-      export PATH="${MPI_HOME}/bin:${PATH}"
-      export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${NCCL_HOME}/lib:${MPI_HOME}/lib:${LD_LIBRARY_PATH:-}"
-      salloc \
-        -N "${NNODES}" \
-        --ntasks-per-node "${NP}" \
-        --exclusive \
-        -p "${SLURM_PARTITION}" \
-        --account="${SLURM_ACCOUNT}" \
-        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-ep-test-pretyche::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
-        -t "${SLURM_TIME}" \
-        bash nccl_ep/ci/run_nccl_ep_ci_tests.sh
+      : "${CI_PIPELINE_ID:?}"
+      : "${CLEANUP_INSTALL_DIR:?}"
+      # Only delete this pipeline's cluster install, including setup/build retries.
+      case "${CLEANUP_INSTALL_DIR}" in
+        /*/install/"${CI_PIPELINE_ID}"/eos|\
+        /*/install/"${CI_PIPELINE_ID}"/pre-nyx|\
+        /*/install/"${CI_PIPELINE_ID}"/pre-tyche|\
+        /*/install/"${CI_PIPELINE_ID}") ;;
+        *) echo "Refusing to delete unexpected install path: ${CLEANUP_INSTALL_DIR}" >&2; exit 1 ;;
+      esac
+      rm -rf -- "${CLEANUP_INSTALL_DIR}"
+
+cleanup_eos:
+  extends: .cleanup_install
+  tags:
+    - nccl-eos
+  needs:
+    - job: build_ipp6
+      artifacts: false
+    - job: setup_eos
+      artifacts: false
+    - job: unit_test_eos
+      artifacts: false
+    - job: integration_test_eos
+      artifacts: false
+    - job: python_test_eos
+      artifacts: false
+  variables:
+    CLEANUP_INSTALL_DIR: "${EOS_INSTALL_DIR}"
+
+cleanup_pretyche:
+  extends: .cleanup_install
+  tags:
+    - ptyche
+  needs:
+    - job: build_cft_cuda134
+      artifacts: false
+    - job: build_pretyche
+      artifacts: false
+    - job: setup_pretyche
+      artifacts: false
+    - job: unit_test_pretyche
+      artifacts: false
+    - job: integration_test_pretyche
+      artifacts: false
+    - job: test_cft_older_driver
+      artifacts: false
+  variables:
+    CLEANUP_INSTALL_DIR: "${PRE_TYCHE_INSTALL_DIR}"
+
+cleanup_prenyx:
+  extends: .cleanup_install
+  rules:
+    - when: never
+  tags:
+    - prenyx
+  needs:
+    - job: build_ipp6
+      artifacts: false
+    - job: setup_prenyx
+      artifacts: false
+    - job: integration_test_prenyx
+      artifacts: false
+  variables:
+    CLEANUP_INSTALL_DIR: "${PRE_NYX_INSTALL_DIR}"
+
+cleanup_ipp6:
+  extends: .cleanup_install
+  rules:
+    - when: never
+  tags:
+    - ipp6-nccl
+  needs:
+    - job: build_ipp6
+      artifacts: false
+    - job: setup_ipp6
+      artifacts: false
+    - job: integration_test_ipp6
+      artifacts: false
+  variables:
+    CLEANUP_INSTALL_DIR: "${IPP6_INSTALL_DIR}"

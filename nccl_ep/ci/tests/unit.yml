@@ -1,0 +1,350 @@
+# Mirrors tests/run_tests.sh, with one nvsubmit result per binary/mode.
+# Slurm launches four ranks directly, including on eight-GPU EOS.
+defaults:
+  timeout: 1800
+  owners: lschneider
+  min_gpus: 4
+  np: 4
+  nodes: 1
+  labels: [nccl_ep, unit]
+
+test_type: unit
+
+env:
+  NCCL_EP_HOME: "${NCCL_HOME}"
+  NCCL_EP_JIT_SOURCE_DIR: "${NCCL_HOME}/include/nccl_ep"
+  NCCL_EP_JIT_BUILD_INCLUDE_DIR: "${NCCL_HOME}/include"
+  NCCL_EP_JIT_CUDA_INCLUDE_DIR: "${CUDA_HOME}/include"
+  NCCL_EP_JIT_NVCC: "${CUDA_HOME}/bin/nvcc"
+  LD_LIBRARY_PATH: "${CUDA_HOME}/lib:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+  # Reset mode selectors so the baseline is independent of the runner's env.
+  NCCL_EP_HT_EM_LOCAL_DUP: "0"
+  NCCL_EP_HT_EM_NVLINK_DUP: "0"
+  NCCL_EP_HT_EM_AG_SCAN_MODE: "0"
+  NCCL_EP_HT_EM_COUNT_UNFUSED: "0"
+  NCCL_EP_HT_EM_PULL_PUSH: "0"
+  NCCL_EP_HT_UNFUSED_SYNC: "0"
+
+tests:
+  - name: test_ht_dispatch_async
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_dispatch_async"
+
+  - name: test_output_layout
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_output_layout"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+
+  - name: test_handle_maps
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_handle_maps"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+
+  - name: test_lifecycle
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_lifecycle"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+
+  - name: test_public_struct_abi
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_public_struct_abi"
+
+  - name: test_ht_bwd
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_bwd"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+
+  - name: test_ht_stale_routing_map
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_stale_routing_map"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+
+  - name: test_ht_combine_pp_interleave
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_combine_pp_interleave"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+
+  - name: test_ht_dispatch_pp_interleave
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_dispatch_pp_interleave"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+
+  - name: test_ht_overflow_drop
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_overflow_drop"
+    matrix:
+      - name_suffix: default
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+
+  - name: test_tensor_create
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_tensor_create"
+
+  - name: test_quantization_recipe
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_quantization_recipe"
+    matrix:
+      - name_suffix: default
+      - name_suffix: local_dup
+        env:
+          NCCL_EP_HT_EM_LOCAL_DUP: "1"
+      - name_suffix: nvlink_dup
+        env:
+          NCCL_EP_HT_EM_NVLINK_DUP: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_EM_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+
+  - name: test_zero_copy
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_zero_copy"
+
+  - name: test_recv_topk_idx_flags
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_recv_topk_idx_flags"
+
+  - name: test_elastic_buffer
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_elastic_buffer"
+    matrix:
+      - name_suffix: default
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
+
+  - name: test_mxfp8_combine
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_mxfp8_combine"
+
+  - name: test_mxfp8_combine_conversion
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_mxfp8_combine_conversion"
+
+  # Only these local-permute cases support pull-count with the existing budgets.
+  - name: test_ht_overflow_drop_pull_count
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_overflow_drop"
+      --gtest_filter=HtOverflowDropTest.EmLocalPermuteAlignedDropNoOob:HtOverflowDropTest.EmLocalPermuteDeepFlatOverflowPhantomRowsZeroed
+    env:
+      NCCL_EP_HT_EM_PULL_PUSH: "1"
+      NCCL_LSA_TEAM_SIZE: "4"
+
+  # These LL regressions require exact world sizes.
+  - name: test_ll_epoch_protocol
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ll_epoch_protocol"
+    min_gpus: 1
+    np: 1
+
+  - name: test_ll_group_epoch
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ll_group_epoch"

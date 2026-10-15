@@ -1,0 +1,148 @@
+constants:
+  common: "--hidden 7168 --top-k 8 --experts 256 --validate"
+
+defaults:
+  timeout: 1800
+  owners: subhadeepb
+  min_gpus: 4
+  np: NGPUS
+  labels: [nccl_ep, integration, benchmark]
+  env:
+    NCCL_GIN_TYPE: "3"
+
+test_type: ep_bench
+
+env:
+  NCCL_EP_HOME: "${NCCL_HOME}"
+  NCCL_EP_JIT_SOURCE_DIR: "${NCCL_HOME}/include/nccl_ep"
+  NCCL_EP_JIT_BUILD_INCLUDE_DIR: "${NCCL_HOME}/include"
+  NCCL_EP_JIT_CUDA_INCLUDE_DIR: "${CUDA_HOME}/include"
+  NCCL_EP_JIT_NVCC: "${CUDA_HOME}/bin/nvcc"
+  LD_LIBRARY_PATH: "${CUDA_HOME}/lib:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+
+tests:
+  # Each benchmark case produces a separate nvsubmit result and regression time series.
+  - name: ep_bench_low_latency
+    binary: nccl_ep/ep_bench
+    labels: [low_latency]
+    matrix:
+      - {name_suffix: em_128_bf16, args: "--algorithm low-latency --layout em --tokens 128 ${common} --datatype bf16"}
+      - {name_suffix: em_128_fp16, args: "--algorithm low-latency --layout em --tokens 128 ${common} --datatype fp16"}
+      - {name_suffix: em_256_bf16, args: "--algorithm low-latency --layout em --tokens 256 ${common} --datatype bf16"}
+      - {name_suffix: em_256_fp16, args: "--algorithm low-latency --layout em --tokens 256 ${common} --datatype fp16"}
+      - {name_suffix: em_1024_bf16, args: "--algorithm low-latency --layout em --tokens 1024 ${common} --datatype bf16"}
+      - {name_suffix: em_1024_fp16, args: "--algorithm low-latency --layout em --tokens 1024 ${common} --datatype fp16"}
+      - {name_suffix: em_4096_bf16, args: "--algorithm low-latency --layout em --tokens 4096 ${common} --datatype bf16"}
+      - {name_suffix: em_4096_fp16, args: "--algorithm low-latency --layout em --tokens 4096 ${common} --datatype fp16"}
+      - {name_suffix: rm_128_bf16, args: "--algorithm low-latency --layout rm --tokens 128 ${common} --datatype bf16"}
+      - {name_suffix: rm_128_fp16, args: "--algorithm low-latency --layout rm --tokens 128 ${common} --datatype fp16"}
+      - {name_suffix: rm_256_bf16, args: "--algorithm low-latency --layout rm --tokens 256 ${common} --datatype bf16"}
+      - {name_suffix: rm_256_fp16, args: "--algorithm low-latency --layout rm --tokens 256 ${common} --datatype fp16"}
+      - {name_suffix: rm_1024_bf16, args: "--algorithm low-latency --layout rm --tokens 1024 ${common} --datatype bf16"}
+      - {name_suffix: rm_1024_fp16, args: "--algorithm low-latency --layout rm --tokens 1024 ${common} --datatype fp16"}
+      - {name_suffix: rm_4096_bf16, args: "--algorithm low-latency --layout rm --tokens 4096 ${common} --datatype bf16"}
+      - {name_suffix: rm_4096_fp16, args: "--algorithm low-latency --layout rm --tokens 4096 ${common} --datatype fp16"}
+      - {name_suffix: em_128_fp32, args: "--algorithm low-latency --layout em --tokens 128 ${common} --datatype fp32"}
+      - {name_suffix: em_256_fp32, args: "--algorithm low-latency --layout em --tokens 256 ${common} --datatype fp32"}
+      - {name_suffix: em_1024_fp32, args: "--algorithm low-latency --layout em --tokens 1024 ${common} --datatype fp32"}
+      - {name_suffix: em_2048_fp32, args: "--algorithm low-latency --layout em --tokens 2048 ${common} --datatype fp32"}
+      - {name_suffix: rm_128_fp32, args: "--algorithm low-latency --layout rm --tokens 128 ${common} --datatype fp32"}
+      - {name_suffix: rm_256_fp32, args: "--algorithm low-latency --layout rm --tokens 256 ${common} --datatype fp32"}
+      - {name_suffix: rm_1024_fp32, args: "--algorithm low-latency --layout rm --tokens 1024 ${common} --datatype fp32"}
+      - {name_suffix: rm_2048_fp32, args: "--algorithm low-latency --layout rm --tokens 2048 ${common} --datatype fp32"}
+
+  - name: ep_bench_low_latency_variant
+    binary: nccl_ep/ep_bench
+    args: "--algorithm low-latency --tokens 128 ${common}"
+    labels: [low_latency, token_distribution]
+    matrix:
+      - {name_suffix: less_than_max, args_append: "--dispatch-less-than-max-tokens 64"}
+      - {name_suffix: non_uniform, args_append: "--non-uniform-tokens"}
+
+  - name: ep_bench_low_latency_topk31
+    binary: nccl_ep/ep_bench
+    args: "--algorithm low-latency --tokens 128 --hidden 7168 --top-k 31 --experts 256 --validate"
+    labels: [low_latency, topk31]
+    matrix:
+      - {name_suffix: expert_major, args_append: "--layout em"}
+      - {name_suffix: rank_major, args_append: "--layout rm"}
+      - {name_suffix: int32, args_append: "--layout em --topk-idx-int32"}
+
+  - name: ep_bench_low_latency_quantized
+    binary: nccl_ep/ep_bench
+    args: "--algorithm low-latency --tokens 128 ${common} --dispatch-only"
+    labels: [low_latency, quantization]
+    matrix:
+      - {name_suffix: fp8e4m3_fp32_scales, args_append: "--layout em --dispatch-quantization scales-forward --scales-forward-token-dtype fp8e4m3 --scales-forward-scale-dtype fp32"}
+      - {name_suffix: bf16_fp16_scales, args_append: "--layout em --dispatch-quantization scales-forward --scales-forward-token-dtype bf16 --scales-forward-scale-dtype fp16"}
+      - {name_suffix: fp4x2_uint8_scales_zcopy, args_append: "--layout rm --zcopy --dispatch-quantization scales-forward --scales-forward-token-dtype fp4x2 --scales-forward-scale-dtype uint8"}
+      - {name_suffix: ds_fp8e3m4, args_append: "--layout em --dispatch-quantization ds-fp8e3m4"}
+
+  # Optional high-throughput matrix enabled on supported clusters.
+  - name: ep_bench_high_throughput
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    labels: [high_throughput]
+    matrix:
+      - {name_suffix: fl_128_bf16, args: "--algorithm high-throughput --layout fl --tokens 128 ${common} --datatype bf16"}
+      - {name_suffix: fl_128_fp16, args: "--algorithm high-throughput --layout fl --tokens 128 ${common} --datatype fp16"}
+      - {name_suffix: fl_256_bf16, args: "--algorithm high-throughput --layout fl --tokens 256 ${common} --datatype bf16"}
+      - {name_suffix: fl_256_fp16, args: "--algorithm high-throughput --layout fl --tokens 256 ${common} --datatype fp16"}
+      - {name_suffix: fl_1024_bf16, args: "--algorithm high-throughput --layout fl --tokens 1024 ${common} --datatype bf16"}
+      - {name_suffix: fl_1024_fp16, args: "--algorithm high-throughput --layout fl --tokens 1024 ${common} --datatype fp16"}
+      - {name_suffix: fl_4096_bf16, args: "--algorithm high-throughput --layout fl --tokens 4096 ${common} --datatype bf16"}
+      - {name_suffix: fl_4096_fp16, args: "--algorithm high-throughput --layout fl --tokens 4096 ${common} --datatype fp16"}
+      - {name_suffix: em_128_bf16, args: "--algorithm high-throughput --layout em --tokens 128 ${common} --datatype bf16"}
+      - {name_suffix: em_128_fp16, args: "--algorithm high-throughput --layout em --tokens 128 ${common} --datatype fp16"}
+      - {name_suffix: em_256_bf16, args: "--algorithm high-throughput --layout em --tokens 256 ${common} --datatype bf16"}
+      - {name_suffix: em_256_fp16, args: "--algorithm high-throughput --layout em --tokens 256 ${common} --datatype fp16"}
+      - {name_suffix: em_1024_bf16, args: "--algorithm high-throughput --layout em --tokens 1024 ${common} --datatype bf16"}
+      - {name_suffix: em_1024_fp16, args: "--algorithm high-throughput --layout em --tokens 1024 ${common} --datatype fp16"}
+      - {name_suffix: em_4096_bf16, args: "--algorithm high-throughput --layout em --tokens 4096 ${common} --datatype bf16"}
+      - {name_suffix: em_4096_fp16, args: "--algorithm high-throughput --layout em --tokens 4096 ${common} --datatype fp16"}
+
+  - name: ep_bench_high_throughput_variant
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    args: "--algorithm high-throughput --tokens 4096 ${common}"
+    labels: [high_throughput, token_distribution]
+    matrix:
+      - {name_suffix: less_than_max, args_append: "--dispatch-less-than-max-tokens 2048"}
+      - {name_suffix: non_uniform, args_append: "--non-uniform-tokens"}
+
+  - name: ep_bench_high_throughput_zcopy_fp4
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    args: "--algorithm high-throughput --layout fl --tokens 128 ${common} --dispatch-only --zcopy --dispatch-quantization scales-forward --scales-forward-token-dtype fp4x2 --scales-forward-scale-dtype uint8"
+    labels: [high_throughput, quantization, zcopy]
+
+  - name: ep_bench_high_throughput_pull_push
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    args: "--algorithm high-throughput --layout em --tokens 4096 ${common}"
+    env:
+      NCCL_EP_HT_EM_PULL_PUSH: "1"
+    labels: [high_throughput, pull_push]
+    matrix:
+      - {name_suffix: bf16}
+      - {name_suffix: mxfp8, args_append: "--dispatch-only --mxfp8"}
+
+  - name: ep_bench_high_throughput_fp32
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    labels: [high_throughput, fp32]
+    matrix:
+      - {name_suffix: fl_128, args: "--algorithm high-throughput --layout fl --tokens 128 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: fl_256, args: "--algorithm high-throughput --layout fl --tokens 256 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: fl_1024, args: "--algorithm high-throughput --layout fl --tokens 1024 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: fl_2048, args: "--algorithm high-throughput --layout fl --tokens 2048 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: em_128, args: "--algorithm high-throughput --layout em --tokens 128 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: em_256, args: "--algorithm high-throughput --layout em --tokens 256 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: em_1024, args: "--algorithm high-throughput --layout em --tokens 1024 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+      - {name_suffix: em_2048, args: "--algorithm high-throughput --layout em --tokens 2048 --hidden 3584 --top-k 8 --experts 256 --validate --datatype fp32"}
+
+  - name: ep_bench_low_latency_nvfp4_combine
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_nvfp4]
+    args: "--algorithm low-latency --layout em --tokens 128 ${common} --datatype bf16 --combine-quantization nvfp4 --disable-token-dropping"
+    labels: [low_latency, nvfp4]

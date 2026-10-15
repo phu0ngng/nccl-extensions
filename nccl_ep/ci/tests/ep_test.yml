@@ -1,0 +1,36 @@
+defaults:
+  timeout: 1800
+  owners: subhadeepb
+  min_gpus: 4
+  np: NGPUS
+  labels: [nccl_ep, integration]
+
+test_type: ep_test
+
+env:
+  NCCL_GIN_TYPE: "3"
+  NCCL_EP_HOME: "${NCCL_HOME}"
+  NCCL_EP_JIT_SOURCE_DIR: "${NCCL_HOME}/include/nccl_ep"
+  NCCL_EP_JIT_BUILD_INCLUDE_DIR: "${NCCL_HOME}/include"
+  NCCL_EP_JIT_CUDA_INCLUDE_DIR: "${CUDA_HOME}/include"
+  NCCL_EP_JIT_NVCC: "${CUDA_HOME}/bin/nvcc"
+  LD_LIBRARY_PATH: "${CUDA_HOME}/lib:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+
+tests:
+  - name: ep_test_low_latency
+    binary: nccl_ep/ep_test
+    args: -a ll -t 128 -d 7168
+    labels: [low_latency]
+
+  - name: ep_test_high_throughput
+    binary: nccl_ep/ep_test
+    args: -a ht -L fl -t 4096 -d 7168
+    matrix:
+      - name_suffix: flat
+      - name_suffix: expert_major
+        args: -a ht -L em -t 4096 -d 7168
+      - name_suffix: flat_query_then_allocate
+        args: -a ht -L fl -q -t 4096 -d 7168
+      - name_suffix: expert_major_query_then_allocate
+        args: -a ht -L em -q -t 4096 -d 7168
+    labels: [high_throughput]

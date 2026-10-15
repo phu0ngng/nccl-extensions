@@ -1,0 +1,12 @@
+cluster_name: eos
+partition: batch
+account: coreai_libraries_nccl
+ngpus: 8
+cuda_home: /lustre/fsw/coreai_libraries_nccl/toolkits/cuda-12.8.0
+mpi_home: /usr/mpi/gcc/openmpi-4.1.5rc2
+features:
+  - nccl_ep_ht
+env:
+  SLURM_CPU_BIND: none
+  OMPI_MCA_btl: tcp,self
+  OMPI_MCA_btl_tcp_if_include: eth3

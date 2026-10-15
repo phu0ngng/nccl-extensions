@@ -1,0 +1,10 @@
+cluster_name: pre-nyx
+partition: batch
+account: coreai_libraries_nccl
+ngpus: 8
+cuda_home: /lustre/fsw/coreai_libraries_nccl/toolkits/cuda-12.8.0
+mpi_home: /lustre/fsw/coreai_libraries_nccl/toolkits/openmpi-5.0.6
+features:
+  - nccl_ep_ht
+env:
+  SLURM_CPU_BIND: none

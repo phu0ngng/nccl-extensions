@@ -1,0 +1,51 @@
+benchmark: ep_bench
+mode: report
+
+baseline:
+  branch: main
+  source: gitlab-ci
+  window: 10
+  min_samples: 5
+
+metrics:
+  - id: host-total-latency
+    name: host.total.latency.avg
+    direction: lower_is_better
+    relative_tolerance: 0.07
+    absolute_tolerance: 3.0
+    noise_multiplier: 3.0
+
+  - id: host-dispatch-latency
+    name: host.dispatch.latency.avg
+    direction: lower_is_better
+    relative_tolerance: 0.07
+    absolute_tolerance: 3.0
+    noise_multiplier: 3.0
+
+  - id: host-combine-latency
+    name: host.combine.latency.avg
+    direction: lower_is_better
+    relative_tolerance: 0.07
+    absolute_tolerance: 3.0
+    noise_multiplier: 3.0
+
+  - id: kernel-total-latency
+    name: kernel.total.latency.avg
+    direction: lower_is_better
+    relative_tolerance: 0.07
+    absolute_tolerance: 3.0
+    noise_multiplier: 3.0
+
+  - id: kernel-dispatch-latency
+    name: kernel.dispatch.latency.avg
+    direction: lower_is_better
+    relative_tolerance: 0.07
+    absolute_tolerance: 3.0
+    noise_multiplier: 3.0
+
+  - id: kernel-combine-latency
+    name: kernel.combine.latency.avg
+    direction: lower_is_better
+    relative_tolerance: 0.07
+    absolute_tolerance: 3.0
+    noise_multiplier: 3.0

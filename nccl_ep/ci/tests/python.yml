@@ -1,0 +1,190 @@
+# Complete ep_test.py sanity matrix.
+defaults:
+  timeout: 300
+  owners: lschneider
+  min_gpus: 4
+  np: NGPUS
+  labels: [nccl_ep, integration, python]
+
+test_type: ep_test
+
+env:
+  NCCL_EP_JIT_SOURCE_DIR: "${NCCL_HOME}/include/nccl_ep"
+  NCCL_EP_JIT_BUILD_INCLUDE_DIR: "${NCCL_HOME}/include"
+  NCCL_EP_JIT_CUDA_INCLUDE_DIR: "${CUDA_HOME}/include"
+  NCCL_EP_JIT_NVCC: "${CUDA_HOME}/bin/nvcc"
+  LD_LIBRARY_PATH: "${CUDA_HOME}/lib:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+
+constants:
+  tokens: "16"
+  hidden: "1024"
+
+tests:
+  - name: ep_python_ll_em
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em
+
+  - name: ep_python_ll_rm
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L rm
+
+  - name: ep_python_ht_fl
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl
+
+  - name: ep_python_ht_em
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L em
+
+  - name: ep_python_ll_quant
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -Q
+
+  - name: ep_python_ht_quant
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -Q
+
+  - name: ep_python_ll_em_staged_dispatch
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em -s dispatch
+
+  - name: ep_python_ll_em_staged_combine
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em -s combine
+
+  - name: ep_python_ll_em_staged_both
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em -s both
+
+  - name: ep_python_ll_rm_staged_both
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L rm -s both
+
+  - name: ep_python_ht_fl_cached
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl -c
+
+  - name: ep_python_ll_em_update
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em --update
+
+  - name: ep_python_ll_rm_update
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L rm --update
+
+  - name: ep_python_ht_fl_update
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl --update
+
+  - name: ep_python_ht_em_update
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L em --update
+
+  - name: ep_python_ht_fl_eager
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl -q
+
+  - name: ep_python_ht_em_eager
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L em -q
+
+  - name: ep_python_ht_fl_backward
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl --backward
+
+  - name: ep_python_ht_em_backward
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L em --backward
+
+  - name: ep_python_ht_fl_overflow_drop
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl --overflow-drop
+
+  - name: ep_python_ll_rm_local_expert_ids
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L rm --expert-id-kind local
+
+  - name: ep_python_ll_rm_global_expert_ids
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L rm --expert-id-kind global
+
+  - name: ep_python_ht_fl_local_expert_ids
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl --expert-id-kind local
+
+  - name: ep_python_ht_fl_global_expert_ids
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl --expert-id-kind global
+
+  - name: ep_python_ht_em_alignment
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L em --alignment 8
+
+  - name: ep_python_ll_em_mask
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em --mask
+
+  - name: ep_python_ll_em_random
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ll -L em -r
+
+  - name: ep_python_ht_fl_random
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
+      -t ${tokens} -d ${hidden} -a ht -L fl -r
+

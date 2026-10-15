@@ -1,0 +1,11 @@
+cluster_name: pre-tyche
+partition: batch
+account: coreai_libraries_nccl
+ngpus: 4
+cuda_home: /lustre/fsw/coreai_libraries_nccl/toolkits/cuda-13.0
+mpi_home: /lustre/fsw/coreai_libraries_nccl/toolkits/openmpi-5.0.6
+features:
+  - nccl_ep_ht
+  - nccl_ep_nvfp4
+env:
+  SLURM_CPU_BIND: none
