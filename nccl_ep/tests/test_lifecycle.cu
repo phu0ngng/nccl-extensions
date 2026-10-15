@@ -634,7 +634,7 @@ TEST_F(LifecycleTest, ImportsRelocatedPreparedHandleMem) {
 // default installed by ncclEpInitHandle. A mismatch silently corrupts
 // own_chunk_rank in count-mode dispatch (EM+kLocalPermute).
 //
-// Uses 33+ tokens so nccl_ep_select_dispatch_chunk returns 32 on systems with
+// Uses 33+ tokens so the adaptive policy returns 32 on systems with
 // dispatch_num_sms in [16,64]; on narrower SM counts the function returns the
 // group default regardless, and the test still verifies UpdateHandle and Import
 // agree.

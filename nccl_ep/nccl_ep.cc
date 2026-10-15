@@ -27,6 +27,7 @@
 #include "nccl_ep_cft.h"
 #include "nccl_ep_env.h"
 #include "ht_compact_prob.h"
+#include "ht_chunk_config.hpp"
 #include "common.hpp"
 
 // HT (High Throughput) includes
@@ -770,12 +771,15 @@ struct ncclEpGroup {
     // nccl_ep_env_* accessors.
     ncclEpEnvConfig env;
 
-    // HT cross-LSA-team RDMA stride: max_dispatch_tokens_per_rank rounded up to a whole
-    // number of dispatch chunks so a partial final chunk stays within an LSA team's region.
+    // Capacity padded to the combine chunk for both JIT kernels; also the cross-LSA RDMA stride.
     int ht_aligned_max_tokens = 0;
 
-    // Resolved per-phase chunks. Cross-LSA dispatch and combine share the combine chunk.
+    // Resolved group-level chunks. RDMA defaults to HT_TOKENS_PER_CHUNK_RDMA_DEFAULT
+    // (64); single-LSA defaults to NCCL_EP_HT_COMBINE_TOK_PER_GROUP times the dispatch
+    // SM budget, rounded up to a multiple of 32. NCCL_EP_TOKENS_PER_CHUNK overrides
+    // either default. Cross-LSA dispatch and combine must share this chunk.
     int ht_combine_tokens_per_chunk = 0;
+    // Dispatch override/fallback; automatic selection is stored per handle.
     int ht_dispatch_tokens_per_chunk = 0;
 
     struct {
@@ -1793,7 +1797,7 @@ init_ht_internode(ncclEpGroup_t ep_group, const ncclEpGroupConfig_t* in_config, 
         GIN_ALIGNMENT);
     size_t combine_gin_G2S_prob_sz = combine_gin_RED_prob_sz;
 
-    int max_chunks_per_rank = (ht_max_tokens + ht_combine_tokens_per_chunk - 1) / ht_combine_tokens_per_chunk;
+    int max_chunks_per_rank = nccl_ep::ceil_div(ht_max_tokens, ht_combine_tokens_per_chunk);
     size_t flags_sz =
         align_size(static_cast<size_t>(rdma_team_size - 1) * max_chunks_per_rank * sizeof(uint64_t), GIN_ALIGNMENT);
     // RDMA sync-guard: NUM_LSA_TEAMS uint64 internal-buffer readiness slots per direction.
@@ -2649,6 +2653,8 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
 
     // Initialize HT intra-LSA buffers (windows, completion flags, etc.)
     if (ht_mode) {
+        // Resolve group-level defaults and overrides. Actual-token-based
+        // dispatch selection is deferred to ncclEpUpdateHandle.
         const int chunk = nccl_ep_resolve_combine_chunk(
             ep_group->env, static_cast<int>(ep_group->dispatch_num_sms), ep_group->rdma_team_size);
         ep_group->ht_combine_tokens_per_chunk = chunk;
@@ -2660,7 +2666,7 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
         }
         // Chunk-aligned cross-LSA-team RDMA stride; also the max-tokens template arg for
         // the dispatch/combine kernels (guarantees MAX_NUM_OF_TOKENS_PER_RANK % chunk == 0).
-        ep_group->ht_aligned_max_tokens = ((ep_group->config.max_dispatch_tokens_per_rank + chunk - 1) / chunk) * chunk;
+        ep_group->ht_aligned_max_tokens = nccl_ep::align<unsigned int>(ep_group->config.max_dispatch_tokens_per_rank, chunk);
 
         NCCL_CHECK_RESULT(init_ht_intranode(ep_group, in_config, stream));
         NCCL_CHECK_RESULT(init_ht_internode(ep_group, in_config, stream));
@@ -3075,6 +3081,7 @@ struct ncclEpHandle {
             nccl_ep::LowLatencyLayout layout;
         } ll;
         struct {
+            // Match this handle's count metadata, even when other handles select a different chunk.
             int dispatch_tokens_per_chunk;
             // Global routing map lives on ep_group->ht_buffers (group-scoped).
 
@@ -3385,11 +3392,14 @@ static HtProbWire ht_prob_wire_mode(ncclEpGroup_t group, int num_topk) {
     return HtProbWire::kCompact;
 }
 
-static int ht_select_dispatch_chunk(ncclEpGroup_t group, ncclEpLayout_t layout, int num_tokens) {
-    if (layout == NCCL_EP_LAYOUT_EXPERT_MAJOR && group->ht_em_mode != ncclEpGroup::HtEmMode::kLocalPermute)
-        return group->ht_dispatch_tokens_per_chunk;
-    return nccl_ep_select_dispatch_chunk(group->env, group->ht_dispatch_tokens_per_chunk,
-                                        group->rdma_team_size, group->dispatch_num_sms, num_tokens);
+static nccl_ep::HtDispatchChunkPolicy ht_dispatch_chunk_policy(ncclEpGroup_t group, ncclEpLayout_t layout) {
+    // Automatic selection covers FLAT and expert-major local-permute only.
+    const bool supported_layout = layout != NCCL_EP_LAYOUT_EXPERT_MAJOR ||
+                                  group->ht_em_mode == ncclEpGroup::HtEmMode::kLocalPermute;
+    std::optional<int> explicit_chunk;
+    if (group->env.dispatch_tokens_per_chunk.is_set) explicit_chunk = group->ht_dispatch_tokens_per_chunk;
+    return {explicit_chunk, group->ht_dispatch_tokens_per_chunk,
+            group->rdma_team_size, static_cast<int>(group->dispatch_num_sms), supported_layout};
 }
 
 // Returns the total buffer size (in bytes) for a LL handle_mem block.
@@ -3436,13 +3446,13 @@ struct HtBlockLayout {
     size_t zero_region, no_memset_region, total;
 
     static HtBlockLayout compute(ncclEpGroup_t ep_group, ncclEpLayout_t layout, int num_topk = 0) {
-        auto align256 = [](size_t s) -> size_t { return (s + 255) & ~size_t(255); };
+        auto align256 = [](size_t s) -> size_t { return nccl_ep::align<size_t>(s, 256); };
         const int num_experts = ep_group->config.num_experts;
         const int max_tokens = ep_group->config.max_dispatch_tokens_per_rank;
         const int lsa_team_size = ep_group->lsa_team_size;
         const int rdma_team_size = ep_group->rdma_team_size;
         const int experts_per_rank = ep_group->num_local_experts;
-        const int padded_max_tokens = ((max_tokens + 15) / 16) * 16;
+        const int padded_max_tokens = nccl_ep::align(max_tokens, 16);
         const bool has_expert_major = (layout == NCCL_EP_LAYOUT_EXPERT_MAJOR);
         const bool em_permute = em_local_permute_enabled(ep_group, layout);
         // Pull recipe (dispatch + push combine). Adds recv_slot_to_src / srcpos_map,
@@ -3543,8 +3553,8 @@ struct HtBlockLayout {
         // token bitmap, followed by the own/gathered count rows. The receiver count-landing rows
         // live in the IPC table region. Only allocated in count mode.
         // Reserve the smallest selectable chunk; updates keep all scratch offsets fixed.
-        const int scratch_chunk = ht_select_dispatch_chunk(ep_group, layout, 33);
-        const size_t max_src_chunks = (static_cast<size_t>(max_tokens) + scratch_chunk - 1) / scratch_chunk;
+        const int scratch_chunk = ht_dispatch_chunk_policy(ep_group, layout).minimum();
+        const size_t max_src_chunks = nccl_ep::ceil_div<size_t>(max_tokens, scratch_chunk);
         // token_dst_rank_bitmap is ceil(nRanks/64) u64 words per token (matches the histogram's
         // hit_words = (lsa_team_size + 63) / 64); >1 word once nRanks exceeds 64.
         const size_t cnt_hit_words = nccl_ep::ceil_div<size_t>(static_cast<size_t>(ep_group->nRanks), 64);
@@ -3820,25 +3830,23 @@ static void ht_assign_count_scratch(ncclEpHandle_t handle, ncclEpGroup_t ep_grou
     const int lsa_team_size = ep_group->lsa_team_size;
     const int num_experts = ep_group->config.num_experts;
     const int num_lsa_teams = ep_group->rdma_team_size;
-    const int scratch_chunk = ht_select_dispatch_chunk(ep_group, handle->layout, 33);
+    const int scratch_chunk = ht_dispatch_chunk_policy(ep_group, handle->layout).minimum();
     const size_t max_chunks_per_rank =
-        (static_cast<size_t>(ep_group->config.max_dispatch_tokens_per_rank) + scratch_chunk - 1) / scratch_chunk;
+        nccl_ep::ceil_div<size_t>(ep_group->config.max_dispatch_tokens_per_rank, scratch_chunk);
     int32_t* cs = reinterpret_cast<int32_t*>(ptr + offset);
     handle->ht.dispatch_push_count.own_chunk_rank = cs;
     handle->ht.dispatch_push_count.per_src_lteam_num_tokens = handle->ht.dispatch_push_count.own_chunk_rank + max_chunks_per_rank * lsa_team_size;
     const size_t cnt_ints_bytes =
-        ((max_chunks_per_rank * lsa_team_size + num_lsa_teams) * sizeof(int32_t) + 255) & ~size_t(255);
+        nccl_ep::align<size_t>((max_chunks_per_rank * lsa_team_size + num_lsa_teams) * sizeof(int32_t), 256);
     handle->ht.dispatch_push_count.own_row = reinterpret_cast<int32_t*>(ptr + offset + cnt_ints_bytes);
     const size_t own_row_bytes =
-        (static_cast<size_t>(ep_group->nRanks + num_experts) * sizeof(int32_t) + 255) & ~size_t(255);
+        nccl_ep::align<size_t>(static_cast<size_t>(ep_group->nRanks + num_experts) * sizeof(int32_t), 256);
     handle->ht.dispatch_push_count.token_dst_rank_bitmap =
         reinterpret_cast<uint64_t*>(ptr + offset + cnt_ints_bytes + own_row_bytes);
     // ceil(nRanks/64) u64 words per token, matching the histogram's hit_words.
     const size_t bitmap_words = nccl_ep::ceil_div<size_t>(static_cast<size_t>(ep_group->nRanks), 64);
-    const size_t bitmap_bytes =
-        (static_cast<size_t>(ep_group->config.max_dispatch_tokens_per_rank) * bitmap_words * sizeof(uint64_t) +
-         255) &
-        ~size_t(255);
+    const size_t bitmap_bytes = nccl_ep::align<size_t>(
+        static_cast<size_t>(ep_group->config.max_dispatch_tokens_per_rank) * bitmap_words * sizeof(uint64_t), 256);
     handle->ht.dispatch_push_count.cached_cnt_rows =
         reinterpret_cast<int32_t*>(ptr + offset + cnt_ints_bytes + own_row_bytes + bitmap_bytes);
     handle->ht.dispatch_push_count.fused_meta_dispatch = true;
@@ -4342,7 +4350,7 @@ ncclResult_t ncclEpImportHandle(
     handle->num_tokens = parsed_state.num_tokens;
     handle->num_tokens_set = true;
     handle->ht.dispatch_tokens_per_chunk =
-        ht_select_dispatch_chunk(ep_group, handle->layout, handle->num_tokens);
+        ht_dispatch_chunk_policy(ep_group, handle->layout).select(handle->num_tokens);
     *out_handle = handle;
     return ncclSuccess;
 }
@@ -4402,7 +4410,7 @@ ncclResult_t ncclEpUpdateHandle(
         handle->num_tokens <= static_cast<int>(ep_group->config.max_dispatch_tokens_per_rank) &&
         "Token count exceeds HT buffer capacity");
 
-    handle->ht.dispatch_tokens_per_chunk = ht_select_dispatch_chunk(ep_group, handle->layout, handle->num_tokens);
+    handle->ht.dispatch_tokens_per_chunk = ht_dispatch_chunk_policy(ep_group, handle->layout).select(handle->num_tokens);
     if (nccl_ep_env_verbose(ep_group->env)) {
         fprintf(stderr, "[nccl_ep] HT handle chunk: rank=%d tokens=%d dispatch=%d combine=%d\n",
                 ep_group->env.rank, handle->num_tokens, handle->ht.dispatch_tokens_per_chunk,
@@ -5876,7 +5884,7 @@ ncclResult_t ncclEpDispatch(
                 nccl_ep::ht::call_dispatch(
                     params,
                     group->ht_aligned_max_tokens,
-                    forward_dispatch ? handle->ht.dispatch_tokens_per_chunk : group->ht_dispatch_tokens_per_chunk,
+                    handle->ht.dispatch_tokens_per_chunk,
                     group->rdma_team_size,
                     recipe,
                     pass_direction,
@@ -7216,7 +7224,7 @@ ncclResult_t ncclEpCombine(
                 nccl_ep::ht::call_combine(
                     params,
                     group->ht_aligned_max_tokens, // chunk-aligned stride
-                    group->ht_combine_tokens_per_chunk,
+                    group->ht_combine_tokens_per_chunk, // tokens per combine chunk
                     group->rdma_team_size, // num_lsa_teams (RDMA domain size)
                     backward_combine, // backward mode flag
                     static_cast<int>(group->combine_num_sms),
