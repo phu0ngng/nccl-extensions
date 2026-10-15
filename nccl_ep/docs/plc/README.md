@@ -17,6 +17,7 @@ exclusion without an explicit review.
 - [MR171: HT compact top-k weights and IDs](mr171-ht-compact-prob-wire/README.md) — automatic compact push dispatch with original-order weights and inline expert IDs, compact FP32 gradients for backward combine; pull-push keeps its existing sparse-direct path.
 - [MR289: Gapless source top-k order](mr289-ht-compact-topk-order/README.md) — one-pass compact receiver with source top-k order by default; `NCCL_EP_HT_RECV_TOPK_ORDER=expert-ascend` restores ascending expert order through a JIT specialization.
 - [Low-latency dispatch over CFT](ll-cft-dispatch/README.md) — single-warp counted-fabric-write payload path (`NCCL_EP_LL_CFT`); see [CFT API design](#cft-api-design) for the comparison with NCCL.
+- [302: Low-latency 1-sided combine with automatic kernel selection](302-ll-combine-1sided/README.md) — dispatch-push/combine-pull protocol, and dispatch-side on-device auto-mode pick with static/dynamic disqualification.
 - [Counting-warp scan of the top-k table (CFT path)](ll-count-scan/README.md) — pipelined, branch-free per-destination token counting, selected only under `NCCL_EP_LL_CFT`; the store path keeps its scan.
 
 ## CFT API design
