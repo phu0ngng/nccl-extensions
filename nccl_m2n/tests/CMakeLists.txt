@@ -115,6 +115,7 @@ find_package(MPI)
 
 # ─── basic_api_test_local (no MPI) ────────────────────────────────────────────
 add_executable(basic_api_test_local
+    nonblocking_comm_test.cc
     basic_api_test_local.cc
     pack_staging_pool_test.cc
     test_helpers.cu

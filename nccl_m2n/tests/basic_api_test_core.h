@@ -1378,6 +1378,21 @@ static void basicApiPrintRuntimeSummary(const char* title, int worldSize, int de
  * Returns CaseResult; rank-aggregation happens in the bootstrap loop.
  * ====================================================================*/
 
+static inline CaseResult checkPipeHostRmaSupport(TestEnv* env) {
+  const char* copyAlgorithm = getenv("NCCL_RESHARD_COPY_ALGORITHM");
+  const char* pipeNetMode = getenv("NCCL_RESHARD_PIPE_NET_MODE");
+  if (copyAlgorithm != nullptr && strcasecmp(copyAlgorithm, "PIPE") == 0 && pipeNetMode != nullptr &&
+      (strcasecmp(pipeNetMode, "HOST_RMA") == 0 || strcasecmp(pipeNetMode, "HOST-RMA") == 0 ||
+       strcasecmp(pipeNetMode, "HOSTRMA") == 0)) {
+    int driverVersion = 0;
+    if (cudaDriverGetVersion(&driverVersion) != cudaSuccess) driverVersion = -1;
+    const int minDriverVersion = env->allreduceMinInt(env, driverVersion);
+    if (minDriverVersion < 0) return makeFail("failed to query the CUDA driver version");
+    if (minDriverVersion < 12050) return makeSkip("PIPE host-RMA requires CUDA driver API 12.5 or newer");
+  }
+  return makePass();
+}
+
 static CaseResult runOneCase(const TestCase& tc, TestEnv* env) {
   const bool asyncOrdering = tc.bAsyncOrdering && env->alternateStream != nullptr;
   /* ----- 1. feasibility check (single source of truth, see
@@ -1397,6 +1412,9 @@ static CaseResult runOneCase(const TestCase& tc, TestEnv* env) {
     }
     return makeSkip(buf);
   }
+  const CaseResult support = checkPipeHostRmaSupport(env);
+  if (support.status != CASE_PASS) return support;
+
   int srcTotal = shape.srcTotal;
   int dstTotal = shape.dstTotal;
   int srcDim0 = shape.srcDim0, srcDim1 = shape.srcDim1;

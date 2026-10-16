@@ -203,6 +203,8 @@ runNonBlockingCoverage() {
     --filter tiny_contribution --algorithm ring --api default --copy-algorithm pack --lb-mode uniform
   runNonBlockingCase "nonblocking PACK/window API" \
     --filter tiny_contribution --algorithm ring --api window --copy-algorithm pack --lb-mode uniform
+  NCCL_RESHARD_PIPE_NET_MODE=HOST_RMA runNonBlockingCase "nonblocking PIPE host-RMA/default API" \
+    --filter tiny_contribution --algorithm ring --api default --copy-algorithm pipe --lb-mode uniform
   if [[ "${NCCL_M2N_MPI_TEST_PROFILE}" == eight_rank ]]; then
     NCCL_COMM_BLOCKING=0 runPackGroupCase
   fi

@@ -172,8 +172,7 @@ protected:
     if (rank_ == 0) ASSERT_EQ(ncclSuccess, ncclGetUniqueId(&id));
     ASSERT_EQ(MPI_SUCCESS, MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
 
-    ASSERT_EQ(ncclSuccess, ncclCommInitRank(comm, world_, id, rank_));
-    ASSERT_EQ(ncclSuccess, testWaitCommReady(*comm));
+    ASSERT_NCCL(ncclCommInitRankConfig(comm, world_, id, rank_, nullptr), *comm);
   }
 
   void preparePipeParams(ncclComm_t comm, ncclDistTensor_t* src, ncclDistTensor_t* dst,
@@ -291,7 +290,7 @@ TEST_F(PipeGraphPathTest, Dsv3LikeFourSourceShardsTwoLocalDestinationReplicas) {
 
   gReshardCopyAlgorithm = savedCopyAlgorithm;
   ASSERT_EQ(MPI_SUCCESS, MPI_Barrier(MPI_COMM_WORLD));
-  ASSERT_EQ(ncclSuccess, ncclCommDestroy(comm));
+  ASSERT_NCCL(ncclCommDestroy(comm));
 }
 
 TEST_F(PipeGraphPathTest, FourRanksCoverPointToPointTrainerFaninAndTrainerFanout) {
@@ -404,7 +403,7 @@ TEST_F(PipeGraphPathTest, FourRanksCoverPointToPointTrainerFaninAndTrainerFanout
 
   gReshardCopyAlgorithm = savedCopyAlgorithm;
   ASSERT_EQ(MPI_SUCCESS, MPI_Barrier(MPI_COMM_WORLD));
-  ASSERT_EQ(ncclSuccess, ncclCommDestroy(comm));
+  ASSERT_NCCL(ncclCommDestroy(comm));
 }
 
 TEST_F(PipeGraphPathTest, ThreeDestinationDomainsCoverGeneratorRingIngressForwardingAndFanout) {
@@ -480,7 +479,7 @@ TEST_F(PipeGraphPathTest, ThreeDestinationDomainsCoverGeneratorRingIngressForwar
 
   gReshardCopyAlgorithm = savedCopyAlgorithm;
   ASSERT_EQ(MPI_SUCCESS, MPI_Barrier(MPI_COMM_WORLD));
-  ASSERT_EQ(ncclSuccess, ncclCommDestroy(comm));
+  ASSERT_NCCL(ncclCommDestroy(comm));
 }
 
 } // namespace

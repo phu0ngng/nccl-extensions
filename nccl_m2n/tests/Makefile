@@ -47,7 +47,8 @@ TEST_HELPERS_SRC := $(TESTSDIR)/test_helpers.cu
 TEST_MPI_SRCS    := $(TESTSDIR)/basic_api_test_mpi.cc   \
                     $(TESTSDIR)/pipe_graph_path_test.cc \
                     $(TEST_HELPERS_SRC)
-TEST_LOCAL_SRCS  := $(TESTSDIR)/basic_api_test_local.cc \
+TEST_LOCAL_SRCS  := $(TESTSDIR)/nonblocking_comm_test.cc \
+                    $(TESTSDIR)/basic_api_test_local.cc \
                     $(TESTSDIR)/pack_staging_pool_test.cc \
                     $(TEST_HELPERS_SRC)
 

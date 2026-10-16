@@ -20,10 +20,10 @@
 #include <nccl.h>
 
 #include "reshard_internal.h"
+#include "test_helpers.h"
 
 namespace {
 
-#define ASSERT_NCCL(call) ASSERT_EQ(ncclSuccess, (call))
 #define ASSERT_CUDA(call) ASSERT_EQ(cudaSuccess, (call))
 
 constexpr size_t kSlotBytes = 4096;
@@ -49,7 +49,7 @@ protected:
   void SetUp() override {
     ASSERT_CUDA(cudaSetDevice(0));
     int devices[1] = {0};
-    ASSERT_NCCL(ncclCommInitAll(&comm, 1, devices));
+    ASSERT_NCCL(ncclCommInitAll(&comm, 1, devices), comm);
     ASSERT_CUDA(cudaStreamCreate(&stream));
 
     packStagingFinalize();
@@ -82,7 +82,9 @@ protected:
     if (hadSavedProfile) setenv("NCCL_RESHARD_PACK_BUFFSIZES", savedProfile.c_str(), 1);
     else unsetenv("NCCL_RESHARD_PACK_BUFFSIZES");
     if (stream != nullptr) cudaStreamDestroy(stream);
-    if (comm != nullptr) ncclCommDestroy(comm);
+    if (comm != nullptr) {
+      ASSERT_NCCL(ncclCommDestroy(comm));
+    }
   }
 
   void enableSingleSlotBucket() {
@@ -168,9 +170,9 @@ TEST_F(PackStagingPoolTest, AssignsStableRoundRobinLanesAcrossCommunicators) {
   ncclComm_t comm2 = nullptr;
   ncclComm_t comm3 = nullptr;
   ncclComm_t comm4 = nullptr;
-  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices));
-  ASSERT_NCCL(ncclCommInitAll(&comm3, 1, devices));
-  ASSERT_NCCL(ncclCommInitAll(&comm4, 1, devices));
+  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices), comm2);
+  ASSERT_NCCL(ncclCommInitAll(&comm3, 1, devices), comm3);
+  ASSERT_NCCL(ncclCommInitAll(&comm4, 1, devices), comm4);
 
   ASSERT_NCCL(ensurePackStagingBuffer(comm, kSlotBytes, stream));
   void* slot0 = getPackStagingBuffer(comm);
@@ -201,7 +203,7 @@ TEST_F(PackStagingPoolTest, RejectsOverlappingUsersOfOnePhysicalLane) {
   enableSingleSlotBucket();
   int devices[1] = {0};
   ncclComm_t comm2 = nullptr;
-  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices));
+  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices), comm2);
 
   std::atomic<bool> slotReady{false};
   std::atomic<bool> releaseOwner{false};
@@ -251,7 +253,7 @@ TEST_F(PackStagingPoolTest, WaitsForPriorCommunicatorOnAnotherStream) {
   enableSingleSlotBucket();
   int devices[1] = {0};
   ncclComm_t comm2 = nullptr;
-  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices));
+  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices), comm2);
 
   ASSERT_NCCL(ensurePackStagingBuffer(comm, kSlotBytes, nullptr));
   cudaStream_t nonblocking = nullptr;
@@ -282,7 +284,7 @@ TEST_F(PackStagingPoolTest, KeepsHostRmaWarmupStatePerCommunicator) {
   enableSingleSlotBucket();
   int devices[1] = {0};
   ncclComm_t comm2 = nullptr;
-  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices));
+  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices), comm2);
 
   ASSERT_NCCL(ensurePackStagingBuffer(comm, kSlotBytes, stream));
   void* sharedSlot = getPackStagingBuffer(comm);
@@ -309,8 +311,8 @@ TEST_F(PackStagingPoolTest, NewMappingsSkipPoisonedLanes) {
   int devices[1] = {0};
   ncclComm_t comm2 = nullptr;
   ncclComm_t comm3 = nullptr;
-  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices));
-  ASSERT_NCCL(ncclCommInitAll(&comm3, 1, devices));
+  ASSERT_NCCL(ncclCommInitAll(&comm2, 1, devices), comm2);
+  ASSERT_NCCL(ncclCommInitAll(&comm3, 1, devices), comm3);
 
   ASSERT_NCCL(ensurePackStagingBuffer(comm, kSlotBytes, stream));
   reshardFailNextCompletionEventRecordForTest(/*bFailStreamSynchronize=*/true);

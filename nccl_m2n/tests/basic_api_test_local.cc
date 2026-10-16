@@ -656,6 +656,7 @@ static int initLocalRuntime() {
   for (int i = 0; i < gWorldSize; ++i) devlist[i] = i;
 
   TEST_NCCLCHECK(ncclCommInitAll(gComms.data(), gWorldSize, devlist.data()));
+  testWaitComms(gComms);
   for (int i = 0; i < gWorldSize; ++i) {
     TEST_NCCLCHECK(ncclM2nInit(&gM2nHandles[i], NULL));
   }
@@ -676,10 +677,9 @@ static void shutdownLocalRuntime() {
     }
   }
   gM2nHandles.clear();
+  testWaitComms(gComms);
   for (ncclComm_t comm : gComms) {
-    if (comm != nullptr) {
-      TEST_NCCLCHECK(ncclCommDestroy(comm));
-    }
+    TEST_NCCLCHECK(ncclCommDestroy(comm));
   }
   gComms.clear();
 }

@@ -834,6 +834,7 @@ static ncclResult_t pipeHostWaitSignals(ncclComm_t comm, PipeHostWaitList* waits
   const int nDesc = static_cast<int>(waits->size());
   RESHARD_DEBUG(rank, "PIPE host_rma %s wait enqueue begin ndesc=%d", tag, nDesc);
   NCCL_M2N_CHECK(ncclWaitSignal(nDesc, waits->data(), comm, stream));
+  NCCL_M2N_CHECK(m2nWaitCommReady(comm));
   RESHARD_DEBUG(rank, "PIPE host_rma %s wait enqueue end ndesc=%d", tag, nDesc);
   NCCL_M2N_CHECK(pipeHostTraceSync(stream, rank, tag, "wait", -1));
   return ncclSuccess;
@@ -864,7 +865,8 @@ static ncclResult_t pipeHostRmaPhaseBegin(int rank, const char* phase) {
   return ncclSuccess;
 }
 
-static ncclResult_t pipeHostRmaPhaseEnd(cudaStream_t stream, int rank, const char* phase, ncclResult_t scheduleResult) {
+static ncclResult_t pipeHostRmaPhaseEnd(ncclComm_t comm, cudaStream_t stream, int rank, const char* phase,
+                                        ncclResult_t scheduleResult) {
   NCCL_M2N_CHECK_ARG(gPipeHostNcclGroupDepth > 0, rank, "PIPE host_rma: phase %s ended without a matching group start",
                      phase);
   gPipeHostNcclGroupDepth--;
@@ -876,6 +878,9 @@ static ncclResult_t pipeHostRmaPhaseEnd(cudaStream_t stream, int rank, const cha
     return scheduleResult;
   }
   NCCL_M2N_CHECK(groupEndResult);
+  /* Group completion can leave enqueue work pending even after a success return.
+   * Finish it before the pipeline records events or submits a dependent phase. */
+  NCCL_M2N_CHECK(m2nWaitCommReady(comm));
   NCCL_M2N_CHECK(pipeHostTraceSync(stream, rank, phase, "phase_end", -1));
   return ncclSuccess;
 }
@@ -888,7 +893,7 @@ static ncclResult_t pipeHostRunPutSignalPhase(const PipeHostComm& hostComm, int 
   }
   NCCL_M2N_CHECK(pipeHostRmaPhaseBegin(logRank, phase));
   ncclResult_t scheduleResult = enqueueFn();
-  return pipeHostRmaPhaseEnd(stream, logRank, phase, scheduleResult);
+  return pipeHostRmaPhaseEnd(hostComm.comm, stream, logRank, phase, scheduleResult);
 }
 
 template <typename BuildWaitFn>
@@ -3152,7 +3157,9 @@ extern "C" ncclResult_t ncclReshard(ncclM2nHandle_t handle, ncclComm_t comm, con
     /* Host-RMA keeps the cached host plan but replaces the device trainer /
      * generator kernels with host-orchestrated NCCL RMA and CUDA CE work.
      * There is no DevComm use to record for this path; split state is passed
-     * only so host RMA can choose the same split A/B communication graph. */
+     * only so host RMA can choose the same split A/B communication graph.
+     * Release the API gate for every submission and readiness wait in the
+     * pipeline so another local rank can enqueue its matching operations. */
     {
       M2nApiUnlock apiUnlock;
       return launchStagingReshardPipeHostRma(pipeLaunchParams, pipePlanEntry->hostPlan, staging, &pipeCall,
