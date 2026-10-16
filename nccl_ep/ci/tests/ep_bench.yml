@@ -121,7 +121,7 @@ tests:
     features: [nccl_ep_ht]
     args: "--algorithm high-throughput --layout em --tokens 4096 ${common}"
     env:
-      NCCL_EP_HT_EM_PULL_PUSH: "1"
+      NCCL_EP_HT_PULL_PUSH: "1"
     labels: [high_throughput, pull_push]
     matrix:
       - {name_suffix: bf16}
