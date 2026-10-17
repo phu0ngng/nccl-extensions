@@ -165,6 +165,15 @@ typedef enum {
     NCCL_EP_ZERO_COPY_ON
 } ncclEpZeroCopyMode_t;
 
+// HT dispatch/combine data flow. The names describe dispatch followed by
+// combine. AUTO preserves the library default and allows the legacy
+// NCCL_EP_HT_EM_PULL_PUSH environment override.
+typedef enum {
+    NCCL_EP_HT_FLOW_AUTO = NCCL_EP_AUTO,
+    NCCL_EP_HT_FLOW_PUSH_PULL,
+    NCCL_EP_HT_FLOW_PULL_PUSH,
+} ncclEpHtFlow_t;
+
 /**
  * Numbering convention for the recv_topk_idx output of dispatch.
  *

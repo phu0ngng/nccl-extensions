@@ -72,7 +72,7 @@ extern "C" {
 //       .tokens = my_tokens,
 //   };
 // ============================================================================
-#define NCCL_EP_API_VERSION 3
+#define NCCL_EP_API_VERSION 4
 #define NCCL_EP_MAGIC 0xC00FFFEEu
 
 #define NCCL_EP_STRUCT_INIT(type_, magic_) \
@@ -335,6 +335,15 @@ typedef struct {
     unsigned int dispatch_num_sms;
     // Combine SM budget. NCCL_EP_AUTO inherits the resolved shared budget.
     unsigned int combine_num_sms;
+    // HT dispatch/combine flow. All ranks must resolve to the same flow;
+    // inconsistent API or environment configuration is unsupported. An
+    // explicit value is authoritative. AUTO preserves the built-in push/pull
+    // default and permits the legacy NCCL_EP_HT_EM_PULL_PUSH environment
+    // override.
+    // PUSH_PULL supports flat and expert-major; PULL_PUSH currently requires
+    // expert-major and a single LSA domain.
+    ncclEpHtFlow_t ht_flow;
+    unsigned int padding_v4; // consumes V4 tail padding; future fields append after it
 } ncclEpGroupConfig_t;
 
 #define NCCL_EP_GROUP_CONFIG_INIT \
@@ -353,12 +362,15 @@ typedef struct {
 
 #define NCCL_EP_GROUP_CONFIG_V3_LAST_FIELD combine_num_sms
 #define NCCL_EP_GROUP_CONFIG_V3_SIZE 120u
-#define NCCL_EP_GROUP_CONFIG_CURRENT_VERSION 3
+#define NCCL_EP_GROUP_CONFIG_V4_LAST_FIELD padding_v4
+#define NCCL_EP_GROUP_CONFIG_V4_SIZE 128u
+#define NCCL_EP_GROUP_CONFIG_CURRENT_VERSION 4
 
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpGroupConfig_t, NCCL_EP_GROUP_CONFIG);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpGroupConfig_t, NCCL_EP_GROUP_CONFIG, 1);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpGroupConfig_t, NCCL_EP_GROUP_CONFIG, 2);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpGroupConfig_t, NCCL_EP_GROUP_CONFIG, 3);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpGroupConfig_t, NCCL_EP_GROUP_CONFIG, 4);
 
 // Opaque type forward declaration
 typedef struct ncclEpGroup* ncclEpGroup_t;

@@ -2167,6 +2167,15 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
 
     bool low_latency_mode = (in_config->algorithm == NCCL_EP_ALGO_LOW_LATENCY);
     bool ht_mode = (in_config->algorithm == NCCL_EP_ALGO_HIGH_THROUGHPUT);
+    if (in_config->ht_flow < NCCL_EP_HT_FLOW_AUTO ||
+        in_config->ht_flow > NCCL_EP_HT_FLOW_PULL_PUSH) {
+        fprintf(stderr, "ncclEpCreateGroup: invalid ht_flow=%d\n", (int)in_config->ht_flow);
+        return ncclInvalidArgument;
+    }
+    if (low_latency_mode && in_config->ht_flow != NCCL_EP_HT_FLOW_AUTO) {
+        fprintf(stderr, "ncclEpCreateGroup: ht_flow applies to HT groups only\n");
+        return ncclInvalidUsage;
+    }
     assert(in_config->num_experts > 0 && "ncclEpCreateGroup: num_experts must be greater than 0");
     assert(in_config->max_token_bytes > 0 && "ncclEpCreateGroup: max_token_bytes must be greater than 0");
 
@@ -2553,36 +2562,41 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
         assert(
             ep_group->rdma_team_size * ep_group->lsa_team_size == ep_group->nRanks &&
             "ncclEpCreateGroup: HT requires rdma_team_size * lsa_team_size == nRanks");
-
-        // Pull dispatch and push combine run over NVLink within a single LSA team for
-        // now; multi-node (inter-LSA-team) support is a future extension. Fail fast at
-        // group creation on an inter-LSA-team topology until then.
-        if (nccl_ep_env_flag_on(ep_group->env.ht_em_pull_push) && ep_group->rdma_team_size > 1) {
-            fprintf(stderr,
-                    "ncclEpCreateGroup: NCCL_EP_HT_EM_PULL_PUSH is "
-                    "single-LSA-team only for now; inter-LSA-team (rdma_team_size=%d > 1) is not yet supported.\n",
-                    ep_group->rdma_team_size);
-            return ncclInvalidUsage;
-        }
     }
 
-    // HT EM mode: env override wins, else auto-pick from (zero_copy, number of LSA teams).
+    // HT EM mode: explicit public flow, then legacy env under AUTO, then built-in default.
     //   pull_push (any zero_copy)   -> kPullPush     (NVLink pull dispatch + push combine)
     //   non zero_copy               -> kLocalPermute (FLAT dispatch + permute kernels)
     //   zero_copy, multiple teams   -> kNvlinkDup    (sender duplicates per-expert over NVLink)
     //   zero_copy, single team      -> kLocalDup     (receiver-side fan-out via local_dup)
     // LL groups ignore HT mode overrides and their compatibility checks.
     if (ht_mode) {
-        const bool want_local_dup = nccl_ep_env_flag_on(ep_group->env.ht_em_local_dup);
-        const bool want_nvlink_dup = nccl_ep_env_flag_on(ep_group->env.ht_em_nvlink_dup);
-        const bool want_pull_push = nccl_ep_env_flag_on(ep_group->env.ht_em_pull_push);
+        const bool explicit_pull_push = in_config->ht_flow == NCCL_EP_HT_FLOW_PULL_PUSH;
+        const bool explicit_push_pull = in_config->ht_flow == NCCL_EP_HT_FLOW_PUSH_PULL;
+        const bool env_pull_push = nccl_ep_env_flag_on(ep_group->env.ht_em_pull_push);
+        const bool want_pull_push = explicit_pull_push ||
+            (in_config->ht_flow == NCCL_EP_HT_FLOW_AUTO && env_pull_push);
+        const bool want_local_dup = !explicit_pull_push &&
+            nccl_ep_env_flag_on(ep_group->env.ht_em_local_dup);
+        const bool want_nvlink_dup = !explicit_pull_push &&
+            nccl_ep_env_flag_on(ep_group->env.ht_em_nvlink_dup);
+        if (nccl_ep_env_verbose(ep_group->env) && explicit_push_pull && env_pull_push) {
+            fprintf(stderr, "[nccl_ep] config.ht_flow=PUSH_PULL ignores %s\n",
+                    ep_group->env.ht_em_pull_push.name);
+        }
+        if (nccl_ep_env_verbose(ep_group->env) && explicit_pull_push &&
+            (nccl_ep_env_flag_on(ep_group->env.ht_em_local_dup) ||
+             nccl_ep_env_flag_on(ep_group->env.ht_em_nvlink_dup))) {
+            fprintf(stderr, "[nccl_ep] config.ht_flow=PULL_PUSH ignores HT EM dup-mode environment overrides\n");
+        }
         if (want_local_dup && want_nvlink_dup) {
             fprintf(stderr, "NCCL EP: NCCL_EP_HT_EM_LOCAL_DUP and NCCL_EP_HT_EM_NVLINK_DUP are mutually exclusive\n");
             return ncclInvalidUsage;
         }
-        // Pull-push and the dup modes are distinct EM recipes. Reject the explicit
-        // conflict instead of silently dropping the pull-push request.
-        if (want_pull_push && (want_local_dup || want_nvlink_dup)) {
+        // Under AUTO, preserve the legacy environment conflict check. Explicit
+        // public flow selection has higher precedence and ignores conflicting env knobs.
+        if (in_config->ht_flow == NCCL_EP_HT_FLOW_AUTO &&
+            want_pull_push && (want_local_dup || want_nvlink_dup)) {
             fprintf(stderr, "NCCL EP: NCCL_EP_HT_EM_PULL_PUSH is mutually exclusive with "
                             "NCCL_EP_HT_EM_LOCAL_DUP / NCCL_EP_HT_EM_NVLINK_DUP\n");
             return ncclInvalidUsage;
@@ -2602,6 +2616,18 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
                 (ep_group->rdma_team_size > 1) ? ncclEpGroup::HtEmMode::kNvlinkDup : ncclEpGroup::HtEmMode::kLocalDup;
         } else {
             ep_group->ht_em_mode = ncclEpGroup::HtEmMode::kLocalPermute;
+        }
+        if (ep_group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush &&
+            ep_group->rdma_team_size > 1) {
+            fprintf(stderr,
+                    "ncclEpCreateGroup: HT pull-push flow is single-LSA-team only; "
+                    "rdma_team_size=%d is unsupported\n", ep_group->rdma_team_size);
+            return ncclInvalidUsage;
+        }
+        if (nccl_ep_env_verbose(ep_group->env)) {
+            fprintf(stderr, "[nccl_ep] HT flow resolved to %s\n",
+                    ep_group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush ?
+                        "pull-push" : "push-pull");
         }
         // Unfused head/tail sync is only wired for the pull-push EM path.
         if (nccl_ep_env_flag_on(ep_group->env.ht_unfused_sync) &&
@@ -4048,11 +4074,12 @@ ncclResult_t ncclEpInitHandle(
         "ncclEpInitHandle: HT mode supports flat and expert-major layouts");
     // Pull dispatch + push combine only stages expert-major traffic; its shared
     // intra-LSA buffers are sized for that path, so reject FLAT handles up-front.
-    EP_HOST_ASSERT(
-        !(ep_group->config.algorithm == NCCL_EP_ALGO_HIGH_THROUGHPUT &&
-          ep_group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush &&
-          layout != NCCL_EP_LAYOUT_EXPERT_MAJOR) &&
-        "ncclEpInitHandle: NCCL_EP_HT_EM_PULL_PUSH requires expert-major layout");
+    if (ep_group->config.algorithm == NCCL_EP_ALGO_HIGH_THROUGHPUT &&
+        ep_group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush &&
+        layout != NCCL_EP_LAYOUT_EXPERT_MAJOR) {
+        fprintf(stderr, "ncclEpInitHandle: HT pull-push flow requires expert-major layout\n");
+        return ncclInvalidUsage;
+    }
     EP_HOST_ASSERT(
         !(ep_group->config.algorithm == NCCL_EP_ALGO_LOW_LATENCY && layout != NCCL_EP_LAYOUT_EXPERT_MAJOR &&
           layout != NCCL_EP_LAYOUT_RANK_MAJOR) &&

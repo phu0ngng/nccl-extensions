@@ -19,6 +19,7 @@ __all__ = [
     "CombineQuantizationRecipe",
     "DispatchQuantizationRecipe",
     "ExpertIdKind",
+    "HtFlow",
     "Layout",
     "OverflowPolicy",
     "PassDir",
@@ -134,6 +135,19 @@ class ZeroCopyMode(IntEnum):
     can write dispatch output directly but its combine remains staged.
     :py:attr:`DispatchQuantizationRecipe.FWD` requires paired token and
     scale windows."""
+
+
+class HtFlow(IntEnum):
+    """HT dispatch/combine flow, mirroring :c:type:`ncclEpHtFlow_t`."""
+
+    AUTO = 0
+    """Use push/pull unless the legacy environment override requests pull/push."""
+
+    PUSH_PULL = 1
+    """Push dispatch followed by pull combine. Supports flat and expert-major layouts."""
+
+    PULL_PUSH = 2
+    """Pull dispatch followed by push combine. Expert-major and one LSA domain only."""
 
 
 class ExpertIdKind(IntEnum):
