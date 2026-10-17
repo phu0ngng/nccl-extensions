@@ -67,7 +67,7 @@ void ncclEpGroupConfig_backwards_compat_test() {
     static_assert(offsetof(ncclEpGroupConfig_t, dispatch_num_sms) == 112);
     static_assert(offsetof(ncclEpGroupConfig_t, combine_num_sms) == 116);
     static_assert(offsetof(ncclEpGroupConfig_t, ht_flow) == 120);
-    static_assert(offsetof(ncclEpGroupConfig_t, padding_v4) == 124);
+    static_assert(offsetof(ncclEpGroupConfig_t, meta_exchange_policy) == 124);
     static_assert(sizeof(ncclEpGroupConfig_t) == 128);
 }
 
@@ -233,6 +233,7 @@ TEST(PublicStructAbiTest, InitializersPopulatePrefix) {
     EXPECT_EQ(group.dispatch_num_sms, NCCL_EP_AUTO);
     EXPECT_EQ(group.combine_num_sms, NCCL_EP_AUTO);
     EXPECT_EQ(group.ht_flow, NCCL_EP_HT_FLOW_AUTO);
+    EXPECT_EQ(group.meta_exchange_policy, NCCL_EP_META_EXCHANGE_AUTO);
     expectPublicStructPrefix(
         dispatch_inputs, NCCL_EP_DISPATCH_INPUTS_SIZE, NCCL_EP_MAGIC);
     expectPublicStructPrefix(
@@ -292,8 +293,20 @@ TEST_F(PublicStructAbiRuntimeTest, HtFlowRejectsInvalidAndLlSelections) {
     EXPECT_EQ(ncclEpCreateGroup(&group, g_comm, &config), ncclInvalidArgument);
     EXPECT_EQ(group, nullptr);
 
+    config.ht_flow = NCCL_EP_HT_FLOW_AUTO;
+    config.meta_exchange_policy = static_cast<ncclEpMetaExchangePolicy_t>(
+        NCCL_EP_META_EXCHANGE_FORCE_SCAN + 1);
+    EXPECT_EQ(ncclEpCreateGroup(&group, g_comm, &config), ncclInvalidArgument);
+    EXPECT_EQ(group, nullptr);
+
     config.algorithm = NCCL_EP_ALGO_LOW_LATENCY;
+    config.meta_exchange_policy = NCCL_EP_META_EXCHANGE_AUTO;
     config.ht_flow = NCCL_EP_HT_FLOW_PUSH_PULL;
+    EXPECT_EQ(ncclEpCreateGroup(&group, g_comm, &config), ncclInvalidUsage);
+    EXPECT_EQ(group, nullptr);
+
+    config.ht_flow = NCCL_EP_HT_FLOW_AUTO;
+    config.meta_exchange_policy = NCCL_EP_META_EXCHANGE_FORCE_SCAN;
     EXPECT_EQ(ncclEpCreateGroup(&group, g_comm, &config), ncclInvalidUsage);
     EXPECT_EQ(group, nullptr);
 }
@@ -310,6 +323,26 @@ TEST_F(PublicStructAbiRuntimeTest, ExplicitPushPullOverridesLegacyEnvironment) {
     EXPECT_EQ(
         ncclEpCreateHandle(
             &handle, group, NCCL_EP_LAYOUT_FLAT, topk_idx_, nullptr, nullptr, g_stream),
+        ncclSuccess);
+    EXPECT_EQ(cudaStreamSynchronize(g_stream), cudaSuccess);
+    if (handle != nullptr) EXPECT_EQ(ncclEpHandleDestroy(handle), ncclSuccess);
+    EXPECT_EQ(ncclEpGroupDestroy(group), ncclSuccess);
+}
+
+TEST_F(PublicStructAbiRuntimeTest, ExplicitMetaPolicyOverridesLegacyEnvironment) {
+    ScopedHtFlowEnv scan_env("NCCL_EP_HT_EM_AG_SCAN_MODE", "1");
+    ScopedHtFlowEnv unfused_env("NCCL_EP_HT_EM_COUNT_UNFUSED", "1");
+    ncclEpGroupConfig_t config = htFlowTestConfig();
+    config.ht_flow = NCCL_EP_HT_FLOW_PUSH_PULL;
+    config.meta_exchange_policy = NCCL_EP_META_EXCHANGE_REQUIRE_FUSED;
+
+    ncclEpGroup_t group = nullptr;
+    ASSERT_EQ(ncclEpCreateGroup(&group, g_comm, &config), ncclSuccess);
+
+    ncclEpHandle_t handle = nullptr;
+    EXPECT_EQ(
+        ncclEpCreateHandle(
+            &handle, group, NCCL_EP_LAYOUT_EXPERT_MAJOR, topk_idx_em_, nullptr, nullptr, g_stream),
         ncclSuccess);
     EXPECT_EQ(cudaStreamSynchronize(g_stream), cudaSuccess);
     if (handle != nullptr) EXPECT_EQ(ncclEpHandleDestroy(handle), ncclSuccess);

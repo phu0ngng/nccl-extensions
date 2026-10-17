@@ -343,7 +343,13 @@ typedef struct {
     // PUSH_PULL supports flat and expert-major; PULL_PUSH currently requires
     // expert-major and a single LSA domain.
     ncclEpHtFlow_t ht_flow;
-    unsigned int padding_v4; // consumes V4 tail padding; future fields append after it
+    // HT metadata exchange. All ranks must resolve to the same policy;
+    // inconsistent API or environment configuration is unsupported. An
+    // explicit policy is authoritative. AUTO permits legacy environment
+    // overrides, fuses with dispatch when supported, and keeps existing
+    // fallbacks otherwise. REQUIRE_FUSED rejects handles/calls that need
+    // early exchange or scan; FORCE_SCAN selects the legacy scan path.
+    ncclEpMetaExchangePolicy_t meta_exchange_policy;
 } ncclEpGroupConfig_t;
 
 #define NCCL_EP_GROUP_CONFIG_INIT \
@@ -362,7 +368,7 @@ typedef struct {
 
 #define NCCL_EP_GROUP_CONFIG_V3_LAST_FIELD combine_num_sms
 #define NCCL_EP_GROUP_CONFIG_V3_SIZE 120u
-#define NCCL_EP_GROUP_CONFIG_V4_LAST_FIELD padding_v4
+#define NCCL_EP_GROUP_CONFIG_V4_LAST_FIELD meta_exchange_policy
 #define NCCL_EP_GROUP_CONFIG_V4_SIZE 128u
 #define NCCL_EP_GROUP_CONFIG_CURRENT_VERSION 4
 

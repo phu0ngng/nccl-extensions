@@ -21,6 +21,7 @@ __all__ = [
     "ExpertIdKind",
     "HtFlow",
     "Layout",
+    "MetaExchangePolicy",
     "OverflowPolicy",
     "PassDir",
     "ZeroCopyMode",
@@ -148,6 +149,19 @@ class HtFlow(IntEnum):
 
     PULL_PUSH = 2
     """Pull dispatch followed by push combine. Expert-major and one LSA domain only."""
+
+
+class MetaExchangePolicy(IntEnum):
+    """HT metadata exchange policy, mirroring :c:type:`ncclEpMetaExchangePolicy_t`."""
+
+    AUTO = 0
+    """Fuse metadata with dispatch when supported; otherwise use the existing fallback."""
+
+    REQUIRE_FUSED = 1
+    """Reject handles or updates that cannot keep metadata exchange fused with dispatch."""
+
+    FORCE_SCAN = 2
+    """Force the legacy routing-map exchange and scan path."""
 
 
 class ExpertIdKind(IntEnum):

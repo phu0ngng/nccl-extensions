@@ -21,6 +21,7 @@ from nccl.ep.enums import (
     Algorithm,
     HtFlow,
     Layout,
+    MetaExchangePolicy,
     OverflowPolicy,
     ZeroCopyMode,
 )
@@ -97,6 +98,10 @@ class GroupConfig:
             over legacy environment controls; under ``AUTO``, the environment
             may override the built-in push-pull default. All ranks must resolve
             to the same flow. Default ``AUTO``.
+        meta_exchange_policy: Whether HT metadata exchange is automatic, required
+            to be fused with dispatch, or forced to scan. An explicit policy
+            takes precedence over legacy environment controls; all ranks must
+            resolve to the same policy. Default ``AUTO``.
         num_topk: Upper bound on per-token top-k across all handles of
             this group. Required for HT eager mode with Expert-Major
             layout; 0 means unset.
@@ -118,6 +123,7 @@ class GroupConfig:
     dispatch_num_sms: int = 0
     combine_num_sms: int = 0
     ht_flow: HtFlow = HtFlow.AUTO
+    meta_exchange_policy: MetaExchangePolicy = MetaExchangePolicy.AUTO
     alloc: AllocConfig = field(default_factory=AllocConfig)
     enable_mask: bool = False
     timeout_ns: int = 0

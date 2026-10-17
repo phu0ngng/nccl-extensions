@@ -2238,8 +2238,8 @@ cdef class CombineOutputs:
 cdef _get_group_config_dtype_offsets():
     cdef ncclEpGroupConfig_t pod
     return _numpy.dtype({
-        'names': ['size_', 'magic', 'version', 'algorithm', 'num_experts', 'max_dispatch_tokens_per_rank', 'max_recv_tokens_per_rank', 'max_token_bytes', 'rdma_buffer_size', 'num_qp_per_rank', 'num_channels', 'max_num_sms', 'alloc', 'enable_mask', 'timeout_ns', 'zero_copy', 'overflow_policy', 'num_topk', 'padding_v2', 'dispatch_num_sms', 'combine_num_sms', 'ht_flow', 'padding_v4'],
-        'formats': [_numpy.uint32, _numpy.uint32, _numpy.uint32, _numpy.int32, _numpy.uint32, _numpy.uint32, _numpy.uint32, _numpy.uint32, _numpy.dtype(('V', sizeof(unsigned long int))), _numpy.uint32, _numpy.uint32, _numpy.uint32, alloc_config_dtype, _numpy.uint32, _numpy.uint64, _numpy.int32, _numpy.int32, _numpy.uint32, (_numpy.uint8, 4), _numpy.uint32, _numpy.uint32, _numpy.int32, _numpy.uint32],
+        'names': ['size_', 'magic', 'version', 'algorithm', 'num_experts', 'max_dispatch_tokens_per_rank', 'max_recv_tokens_per_rank', 'max_token_bytes', 'rdma_buffer_size', 'num_qp_per_rank', 'num_channels', 'max_num_sms', 'alloc', 'enable_mask', 'timeout_ns', 'zero_copy', 'overflow_policy', 'num_topk', 'padding_v2', 'dispatch_num_sms', 'combine_num_sms', 'ht_flow', 'meta_exchange_policy'],
+        'formats': [_numpy.uint32, _numpy.uint32, _numpy.uint32, _numpy.int32, _numpy.uint32, _numpy.uint32, _numpy.uint32, _numpy.uint32, _numpy.dtype(('V', sizeof(unsigned long int))), _numpy.uint32, _numpy.uint32, _numpy.uint32, alloc_config_dtype, _numpy.uint32, _numpy.uint64, _numpy.int32, _numpy.int32, _numpy.uint32, (_numpy.uint8, 4), _numpy.uint32, _numpy.uint32, _numpy.int32, _numpy.int32],
         'offsets': [
             (<intptr_t>&(pod.size)) - (<intptr_t>&pod),
             (<intptr_t>&(pod.magic)) - (<intptr_t>&pod),
@@ -2263,7 +2263,7 @@ cdef _get_group_config_dtype_offsets():
             (<intptr_t>&(pod.dispatch_num_sms)) - (<intptr_t>&pod),
             (<intptr_t>&(pod.combine_num_sms)) - (<intptr_t>&pod),
             (<intptr_t>&(pod.ht_flow)) - (<intptr_t>&pod),
-            (<intptr_t>&(pod.padding_v4)) - (<intptr_t>&pod),
+            (<intptr_t>&(pod.meta_exchange_policy)) - (<intptr_t>&pod),
         ],
         'itemsize': sizeof(ncclEpGroupConfig_t),
     })
@@ -2595,15 +2595,15 @@ cdef class GroupConfig:
         self._ptr[0].ht_flow = <ncclEpHtFlow_t><int>val
 
     @property
-    def padding_v4(self):
-        """int: Reserved ABI padding."""
-        return self._ptr[0].padding_v4
+    def meta_exchange_policy(self):
+        """int: HT metadata-exchange policy."""
+        return <int>(self._ptr[0].meta_exchange_policy)
 
-    @padding_v4.setter
-    def padding_v4(self, val):
+    @meta_exchange_policy.setter
+    def meta_exchange_policy(self, val):
         if self._readonly:
             raise ValueError("This GroupConfig instance is read-only")
-        self._ptr[0].padding_v4 = val
+        self._ptr[0].meta_exchange_policy = <ncclEpMetaExchangePolicy_t><int>val
 
     @staticmethod
     def from_buffer(buffer):
@@ -2694,6 +2694,12 @@ class HtFlow(_cyb_IntEnum):
     HT_FLOW_AUTO = NCCL_EP_HT_FLOW_AUTO
     HT_FLOW_PUSH_PULL = NCCL_EP_HT_FLOW_PUSH_PULL
     HT_FLOW_PULL_PUSH = NCCL_EP_HT_FLOW_PULL_PUSH
+
+class MetaExchangePolicy(_cyb_IntEnum):
+    """See `ncclEpMetaExchangePolicy_t`."""
+    META_EXCHANGE_AUTO = NCCL_EP_META_EXCHANGE_AUTO
+    META_EXCHANGE_REQUIRE_FUSED = NCCL_EP_META_EXCHANGE_REQUIRE_FUSED
+    META_EXCHANGE_FORCE_SCAN = NCCL_EP_META_EXCHANGE_FORCE_SCAN
 
 class ExpertIdKind(_cyb_IntEnum):
     """

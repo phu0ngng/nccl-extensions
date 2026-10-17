@@ -65,6 +65,7 @@ static ncclResult_t ll_resize_rdma_buffer(ncclEpGroup_t ep_group, size_t new_siz
 // Forward declarations used by mega-buffer sizing (definitions live later in this file).
 static bool is_internode_available(ncclEpGroup_t ep_group);
 static inline bool dispatch_push_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout);
+static inline bool dispatch_pull_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout);
 
 // Define NCCL_CHECK_RESULT macro for NCCL error checking
 #ifndef NCCL_CHECK_RESULT
@@ -1008,6 +1009,78 @@ struct ncclEpGroup {
           num_dispatch_signals(0), clean_barrier_signal_base(0), ht_buffers{}, eager_mode(false) {}
 };
 
+/**
+ * Resolve whether this group must use the global-scan metadata path.
+ *
+ * An explicit public policy takes precedence. The legacy scan environment
+ * override is honored only while the public policy remains AUTO.
+ *
+ * @param group Group whose metadata-exchange policy is being resolved.
+ * @return true when fused count exchange is disabled in favor of global scan.
+ */
+static inline bool meta_exchange_force_scan(ncclEpGroup_t group) {
+    return group->config.meta_exchange_policy == NCCL_EP_META_EXCHANGE_FORCE_SCAN ||
+           (group->config.meta_exchange_policy == NCCL_EP_META_EXCHANGE_AUTO &&
+            nccl_ep_env_flag_on(group->env.ht_em_ag_scan_mode));
+}
+
+/**
+ * Resolve whether count exchange must complete before dispatch.
+ *
+ * This is the legacy comparison/debug override and applies only while the
+ * public metadata-exchange policy remains AUTO.
+ *
+ * @param group Group whose metadata-exchange policy is being resolved.
+ * @return true when count exchange should run unfused before dispatch.
+ */
+static inline bool meta_exchange_force_unfused(ncclEpGroup_t group) {
+    return group->config.meta_exchange_policy == NCCL_EP_META_EXCHANGE_AUTO &&
+           nccl_ep_env_flag_on(group->env.ht_em_count_unfused);
+}
+
+/**
+ * Validate that a proposed handle satisfies REQUIRE_FUSED.
+ *
+ * AUTO and FORCE_SCAN need no validation. REQUIRE_FUSED rejects any layout,
+ * topology, sizing mode, or resolved HT flow that cannot use a fused count
+ * path and reports the first actionable reason to stderr.
+ *
+ * @param group Group that will own the handle.
+ * @param layout Proposed handle layout.
+ * @param num_topk Proposed handle top-k count.
+ * @return ncclSuccess when the policy is satisfied; ncclInvalidUsage otherwise.
+ */
+static inline ncclResult_t validate_required_fused_exchange(
+    ncclEpGroup_t group, ncclEpLayout_t layout, int num_topk) {
+    if (group->config.meta_exchange_policy != NCCL_EP_META_EXCHANGE_REQUIRE_FUSED)
+        return ncclSuccess;
+
+    const char* reason = nullptr;
+    if (layout != NCCL_EP_LAYOUT_EXPERT_MAJOR)
+        reason = "only expert-major layout supports fused metadata exchange";
+    else if (group->eager_mode)
+        reason = "eager sizing needs the recv count before dispatch";
+    else if (group->rdma_team_size > 1)
+        reason = "fused metadata exchange is single-LSA-team only";
+    else if (num_topk > MAX_NUM_TOPK)
+        reason = "num_topk exceeds the fused metadata limit";
+    else if (group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush &&
+             group->config.num_experts > kTopkIdxInvalid)
+        reason = "pull-push fused metadata requires num_experts <= 65535";
+    else if (group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush &&
+             !dispatch_pull_count_capable(group, layout))
+        reason = "pull-push fused metadata count limits are exceeded";
+    else if (group->ht_em_mode != ncclEpGroup::HtEmMode::kPullPush &&
+             !dispatch_push_count_capable(group, layout))
+        reason = "the resolved push-pull implementation does not support fused metadata";
+
+    if (reason != nullptr) {
+        fprintf(stderr, "ncclEpInitHandle: meta_exchange_policy=REQUIRE_FUSED rejected: %s\n", reason);
+        return ncclInvalidUsage;
+    }
+    return ncclSuccess;
+}
+
 static void epPrintAutoRecvBudgetDetails(ncclEpGroup_t group) {
     const unsigned int topk = group->config.num_topk > 0 ? group->config.num_topk : 1u;
     fprintf(
@@ -1294,12 +1367,12 @@ init_ht_intranode(ncclEpGroup_t ep_group, const ncclEpGroupConfig_t* in_config, 
     // of this IPC region.
     // LERM is a packed bitmap: ceil(num_local_experts/64) u64 words per slot.
     const size_t lerm_words = nccl_ep::ceil_div<size_t>(static_cast<size_t>(num_local_experts), 64);
-    // Group half of dispatch_push_count_capable(); when false, the LERM/count-row region below
-    // is dead space and skipped.
+    // Group creation runs before any handle layout is known. EXPERT_MAJOR is a
+    // hypothetical capability probe: could this group support a future expert-major
+    // push-count handle? The result only sizes group-shared storage; handle setup
+    // calls the same helper with the handle's actual layout before activating the path.
     const bool group_count_capable =
-        !nccl_ep_env_flag_on(ep_group->env.ht_em_ag_scan_mode) &&
-        !is_internode_available(ep_group) &&
-        ep_group->ht_em_mode == ncclEpGroup::HtEmMode::kLocalPermute;
+        dispatch_push_count_capable(ep_group, NCCL_EP_LAYOUT_EXPERT_MAJOR);
     // LERM bitmap rows, then one published [cnt_rank | cnt_expert] count row per sender.
     // Both regions are skipped when the group can't take the count path.
     const size_t count_row_ints =
@@ -1321,9 +1394,8 @@ init_ht_intranode(ncclEpGroup_t ep_group, const ncclEpGroupConfig_t* in_config, 
     // as dispatch_push_count_capable (see dispatch_pull_count_capable), so it must match that
     // gate exactly, or the mega-buffer region this rank allocates disagrees with what dispatch
     // expects to publish into.
-    const bool group_pull_count_capable = pull_push &&
-        !nccl_ep_env_flag_on(ep_group->env.ht_em_ag_scan_mode) &&
-        !is_internode_available(ep_group) && !ep_group->eager_mode;
+    const bool group_pull_count_capable =
+        dispatch_pull_count_capable(ep_group, NCCL_EP_LAYOUT_EXPERT_MAJOR);
     // Collective: every rank must agree, since a peer resolves pull_meta_ptrs[i] from its own
     // group_pull_count_capable applied to peer i's IPC base -- a mismatched peer (e.g. stale env
     // var on one rank) would otherwise compute an out-of-bounds NVLink pointer into that peer.
@@ -1335,7 +1407,7 @@ init_ht_intranode(ncclEpGroup_t ep_group, const ncclEpGroupConfig_t* in_config, 
         for (int r = 1; r < ep_group->nRanks; ++r) {
             EP_HOST_ASSERT(
                 all_pull_count[r] == all_pull_count[0] &&
-                "ncclEpCreateGroup: NCCL_EP_HT_EM_AG_SCAN_MODE must resolve identically across ranks");
+                "ncclEpCreateGroup: fused pull-count capability must resolve identically across ranks");
         }
     }
     const size_t pull_meta_row_bytes =
@@ -2184,8 +2256,16 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
         fprintf(stderr, "ncclEpCreateGroup: invalid ht_flow=%d\n", (int)in_config->ht_flow);
         return ncclInvalidArgument;
     }
-    if (low_latency_mode && in_config->ht_flow != NCCL_EP_HT_FLOW_AUTO) {
-        fprintf(stderr, "ncclEpCreateGroup: ht_flow applies to HT groups only\n");
+    if (in_config->meta_exchange_policy < NCCL_EP_META_EXCHANGE_AUTO ||
+        in_config->meta_exchange_policy > NCCL_EP_META_EXCHANGE_FORCE_SCAN) {
+        fprintf(stderr, "ncclEpCreateGroup: invalid meta_exchange_policy=%d\n",
+                (int)in_config->meta_exchange_policy);
+        return ncclInvalidArgument;
+    }
+    if (low_latency_mode &&
+        (in_config->ht_flow != NCCL_EP_HT_FLOW_AUTO ||
+         in_config->meta_exchange_policy != NCCL_EP_META_EXCHANGE_AUTO)) {
+        fprintf(stderr, "ncclEpCreateGroup: ht_flow and meta_exchange_policy apply to HT groups only\n");
         return ncclInvalidUsage;
     }
     assert(in_config->num_experts > 0 && "ncclEpCreateGroup: num_experts must be greater than 0");
@@ -2640,6 +2720,13 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
             fprintf(stderr, "[nccl_ep] HT flow resolved to %s\n",
                     ep_group->ht_em_mode == ncclEpGroup::HtEmMode::kPullPush ?
                         "pull-push" : "push-pull");
+            if (in_config->meta_exchange_policy != NCCL_EP_META_EXCHANGE_AUTO &&
+                (ep_group->env.ht_em_ag_scan_mode.is_set ||
+                 ep_group->env.ht_em_count_unfused.is_set)) {
+                fprintf(stderr, "[nccl_ep] explicit meta_exchange_policy ignores %s and %s\n",
+                        ep_group->env.ht_em_ag_scan_mode.name,
+                        ep_group->env.ht_em_count_unfused.name);
+            }
         }
         // Unfused head/tail sync is only wired for the pull-push EM path.
         if (nccl_ep_env_flag_on(ep_group->env.ht_unfused_sync) &&
@@ -2660,6 +2747,10 @@ ncclResult_t ncclEpCreateGroup(ncclEpGroup_t* out_ep_group, ncclComm_t comm, con
         (static_cast<size_t>(2) * ep_group->nRanks + ep_group->config.num_experts +
          NCCL_EP_COMBINE_SYNC_COUNT) *
         sizeof(int);
+    // Use the same hypothetical expert-major probe for group-level workspace sizing.
+    // A true result means a future expert-major handle can use push-count and this
+    // group does not need the global scan scratch; per-handle activation still uses
+    // the actual layout.
     const bool ht_count_only =
         ht_mode && dispatch_push_count_capable(ep_group, NCCL_EP_LAYOUT_EXPERT_MAJOR);
     const size_t workspace_bytes = ht_count_only
@@ -3354,14 +3445,21 @@ static inline bool em_local_permute_enabled(ncclEpGroup_t group, ncclEpHandle_t 
     return em_local_permute_enabled(group, handle->layout);
 }
 
-// Fused-meta-dispatch (count exchange) gate: replaces the bitmap AllGather + global scan
-// with a device-side histogram push and receiver-local EM rebuild. EM local-permute,
-// single-LSA-team only; disabled by NCCL_EP_HT_EM_AG_SCAN_MODE. Layout sizing and handle
-// activation share this gate so they never disagree.
+/**
+ * Test whether push-count metadata exchange can be fused with dispatch.
+ *
+ * Replaces the bitmap AllGather and global scan with a device-side histogram
+ * push and receiver-local EM rebuild. Requires expert-major local-permute in a
+ * single LSA domain. Group creation may pass EXPERT_MAJOR as a hypothetical
+ * capability probe; handle setup passes the handle's actual layout.
+ *
+ * @param group Group whose resolved HT mode and topology are being tested.
+ * @param layout Proposed or actual handle layout.
+ * @return true when the push-count fused path is supported.
+ */
 static inline bool dispatch_push_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout) {
-    // kPullPush is also EM local-permute but always uses the scan path (order-preserving
-    // uint16 map), so it is excluded here.
-    return !nccl_ep_env_flag_on(group->env.ht_em_ag_scan_mode) &&
+    // kPullPush is handled by the separate pull-count gate, so it is excluded here.
+    return !meta_exchange_force_scan(group) &&
            !is_internode_available(group) &&
            em_local_permute_enabled(group, layout) &&
            group->ht_em_mode == ncclEpGroup::HtEmMode::kLocalPermute;
@@ -3381,18 +3479,23 @@ static inline bool em_pull_enabled(ncclEpGroup_t group, ncclEpHandle_t handle) {
     return em_pull_enabled(group, handle->layout);
 }
 
-// Fused pull-count gate: receiver-side MAP warps build the recv-slot/EM maps in-kernel from a
-// pulled count+topk row, replacing the scan (routing-map AllGather + host-side map build) that
-// pull dispatch otherwise depends on. Fused count stages per-handle metadata during UpdateHandle,
-// then pushes it to receiver inboxes and builds maps during dispatch. Eager mode needs maps
-// earlier and keeps using the scan path. Restricted to kPullPush within one LSA team; shares the
-// NCCL_EP_HT_EM_AG_SCAN_MODE fallback-to-scan flag with dispatch_push_count_capable, so one env
-// var forces every HT EM path back to scan for an apples-to-apples comparison.
+/**
+ * Test whether pull-count metadata exchange can be fused with dispatch.
+ *
+ * Rebuilds receive-slot and EM maps inside dispatch from a pulled count/top-k
+ * row. Requires pull-push expert-major in one LSA domain, non-eager sizing,
+ * and a local expert count that fits the uint16 map. Group creation may pass
+ * EXPERT_MAJOR as a hypothetical probe; handle setup uses the actual layout.
+ *
+ * @param group Group whose resolved HT mode and topology are being tested.
+ * @param layout Proposed or actual handle layout.
+ * @return true when the pull-count fused path is supported.
+ */
 static inline bool dispatch_pull_count_capable(ncclEpGroup_t group, ncclEpLayout_t layout) {
     // dispatch_pull_map_warp packs local_expert * MAX_NUM_TOPK + topk_position into a uint16_t
     // hit; local_expert must stay within [0, 65536 / MAX_NUM_TOPK) or it silently wraps.
     constexpr int kPullCountMaxLocalExperts = 65536 / MAX_NUM_TOPK;
-    return !nccl_ep_env_flag_on(group->env.ht_em_ag_scan_mode) &&
+    return !meta_exchange_force_scan(group) &&
            !is_internode_available(group) &&
            !group->eager_mode &&
            group->num_local_experts <= kPullCountMaxLocalExperts &&
@@ -4144,6 +4247,7 @@ ncclResult_t ncclEpInitHandle(
         "ncclEpInitHandle: LL mode supports only expert-major and rank-major layouts");
     assert(ep_group->config.num_experts > 0);
     assert(ep_group->config.num_experts % ep_group->nRanks == 0);
+    NCCLCHECK(validate_required_fused_exchange(ep_group, layout, num_topk));
 
     // Validate EM padding alignment up-front (pow2 required) before any allocation.
     const bool is_ht_em =
@@ -4250,7 +4354,7 @@ static ncclResult_t ht_update_handle_count_mode(
     // Eager mode needs the recv count at UpdateHandle time, before the fused path would
     // publish it, so it always runs the unfused count exchange.
     const bool run_unfused_count =
-        provide_layout_info || ep_group->eager_mode || nccl_ep_env_flag_on(ep_group->env.ht_em_count_unfused);
+        provide_layout_info || ep_group->eager_mode || meta_exchange_force_unfused(ep_group);
     handle->ht.dispatch_push_count.fused_meta_dispatch = true;
     if (run_unfused_count) {
         NCCL_CHECK_RESULT(ncclAllGather(
@@ -4467,6 +4571,17 @@ ncclResult_t ncclEpUpdateHandle(
     ncclEpGroup_t ep_group = handle->group;
     assert(ep_group != nullptr);
 
+    if (ep_group->config.meta_exchange_policy == NCCL_EP_META_EXCHANGE_REQUIRE_FUSED &&
+        layout_info != nullptr &&
+        (layout_info->expert_counters != nullptr ||
+         layout_info->src_rank_counters != nullptr ||
+         layout_info->expert_offsets != nullptr ||
+         layout_info->recv_total_counter != nullptr)) {
+        fprintf(stderr, "ncclEpUpdateHandle: meta_exchange_policy=REQUIRE_FUSED does not allow "
+                        "layout outputs before dispatch; pass nullptr fields and read layout during dispatch\n");
+        return ncclInvalidUsage;
+    }
+
     // LL and HT both accept ncclInt32 or ncclInt64; the cached idx keeps the
     // caller's native width.
     assert(
@@ -4528,6 +4643,34 @@ ncclResult_t ncclEpUpdateHandle(
     // Pull-native path selector (kPullPush): rebuild the recv-slot maps from NVLink-pulled count
     // rows + topk instead of the uint16 AllGather + scan. Mutually exclusive with count_mode.
     const bool pull_count = dispatch_pull_count_active(ep_group, handle);
+    if (nccl_ep_env_verbose(ep_group->env)) {
+        const bool early_layout = layout_info != nullptr &&
+            (layout_info->expert_counters != nullptr ||
+             layout_info->src_rank_counters != nullptr ||
+             layout_info->expert_offsets != nullptr ||
+             layout_info->recv_total_counter != nullptr);
+        const char* path = "scan";
+        const char* reason = "layout or resolved flow is not fused-count capable";
+        if (count_mode || pull_count) {
+            path = pull_count ? "fused pull-count" : "fused push-count";
+            reason = "metadata exchange is fused with dispatch";
+            if (early_layout) {
+                path = "unfused count";
+                reason = "early layout output requested";
+            } else if (ep_group->eager_mode) {
+                path = "unfused count";
+                reason = "eager sizing needs an early recv count";
+            } else if (meta_exchange_force_unfused(ep_group)) {
+                path = "unfused count";
+                reason = "NCCL_EP_HT_EM_COUNT_UNFUSED requested under AUTO";
+            }
+        } else if (meta_exchange_force_scan(ep_group)) {
+            reason = ep_group->config.meta_exchange_policy == NCCL_EP_META_EXCHANGE_FORCE_SCAN ?
+                "meta_exchange_policy=FORCE_SCAN" :
+                "NCCL_EP_HT_EM_AG_SCAN_MODE requested under AUTO";
+        }
+        fprintf(stderr, "[nccl_ep] metadata exchange: %s (%s)\n", path, reason);
+    }
 
     // Zero the entire preprocessing zero region (routing, r2a, a2r, ler, ntfe) in one call.
     // Buffers are allocated at max_tokens capacity, so this clears beyond the active num_tokens
@@ -4837,7 +4980,12 @@ ncclResult_t ncclEpCreateHandle(
         config,
         static_cast<int>(topk_idx->sizes[1]),
         /*handle_mem=*/nullptr));
-    return ncclEpUpdateHandle(*out_handle, topk_idx, layout_info, stream);
+    const ncclResult_t result = ncclEpUpdateHandle(*out_handle, topk_idx, layout_info, stream);
+    if (result != ncclSuccess) {
+        ncclEpHandleDestroy(*out_handle);
+        *out_handle = nullptr;
+    }
+    return result;
 }
 
 ncclResult_t ncclEpHandleDestroy(ncclEpHandle_t handle) {
