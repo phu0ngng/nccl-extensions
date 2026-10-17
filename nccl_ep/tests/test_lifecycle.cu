@@ -523,6 +523,72 @@ TEST_F(LifecycleTest, SeparatedInitUpdateTwoUpdates) {
     NCCL_ASSERT(ncclEpHandleDestroy(h));
 }
 
+// Scan preprocessing is ordered at group scope (its routing-map AllGather is already
+// group-owned), so multiple handles share its update-only workspace. Updating h2 before
+// dispatching h1 verifies that prepared routing state remains private to each handle.
+TEST_F(LifecycleTest, ScanWorkspaceSharedAcrossHandles) {
+    ncclEpHandle_t h1 = nullptr;
+    ncclEpHandle_t h2 = nullptr;
+    NCCL_ASSERT(ncclEpInitHandle(&h1, g_ep_group, NCCL_EP_LAYOUT_FLAT, nullptr, kTopK, nullptr));
+    NCCL_ASSERT(ncclEpInitHandle(&h2, g_ep_group, NCCL_EP_LAYOUT_FLAT, nullptr, kTopK, nullptr));
+
+    const void *h1_rank_mask = nullptr, *h1_scan_tmp = nullptr;
+    const void *h2_rank_mask = nullptr, *h2_scan_tmp = nullptr;
+    const int32_t *h1_token_to_slot = nullptr, *h2_token_to_slot = nullptr;
+    ncclEpHandle_test_getScanScratch(h1, &h1_rank_mask, &h1_scan_tmp, &h1_token_to_slot);
+    ncclEpHandle_test_getScanScratch(h2, &h2_rank_mask, &h2_scan_tmp, &h2_token_to_slot);
+    ASSERT_NE(h1_rank_mask, nullptr);
+    ASSERT_NE(h1_scan_tmp, nullptr);
+    EXPECT_EQ(h1_rank_mask, h2_rank_mask);
+    EXPECT_EQ(h1_scan_tmp, h2_scan_tmp);
+    EXPECT_EQ(h1_token_to_slot, nullptr);  // FLAT does not need the EM remap bridge.
+    EXPECT_EQ(h2_token_to_slot, nullptr);
+
+    NCCL_ASSERT(ncclEpUpdateHandle(h1, topk_idx_, nullptr, g_stream));
+    NCCL_ASSERT(ncclEpUpdateHandle(h2, topk_idx_, nullptr, g_stream));
+    CUDA_ASSERT(cudaStreamSynchronize(g_stream));
+
+    for (ncclEpHandle_t handle : {h1, h2}) {
+        auto combined = run_dispatch_combine_flat(handle);
+        for (int i = 0; i < kNumTokens; ++i) {
+            float expected = static_cast<float>(g_rank * kNumTokens + i + 1);
+            EXPECT_NEAR(combined[i], expected, 0.5f) << "rank " << g_rank << " token " << i;
+        }
+    }
+
+    NCCL_ASSERT(ncclEpHandleDestroy(h2));
+    NCCL_ASSERT(ncclEpHandleDestroy(h1));
+
+    // The scan-mode EM local-permute path additionally shares its token-to-slot bridge.
+    // This branch runs in the suite's NCCL_EP_HT_EM_AG_SCAN_MODE rerun.
+    if (ht_em_ag_scan_mode_active()) {
+        ncclEpHandle_t em1 = nullptr;
+        ncclEpHandle_t em2 = nullptr;
+        NCCL_ASSERT(ncclEpInitHandle(
+            &em1, g_ep_group, NCCL_EP_LAYOUT_EXPERT_MAJOR, nullptr, kTopK, nullptr));
+        NCCL_ASSERT(ncclEpInitHandle(
+            &em2, g_ep_group, NCCL_EP_LAYOUT_EXPERT_MAJOR, nullptr, kTopK, nullptr));
+
+        const void *em1_rank_mask = nullptr, *em1_scan_tmp = nullptr;
+        const void *em2_rank_mask = nullptr, *em2_scan_tmp = nullptr;
+        const int32_t *em1_token_to_slot = nullptr, *em2_token_to_slot = nullptr;
+        ncclEpHandle_test_getScanScratch(em1, &em1_rank_mask, &em1_scan_tmp, &em1_token_to_slot);
+        ncclEpHandle_test_getScanScratch(em2, &em2_rank_mask, &em2_scan_tmp, &em2_token_to_slot);
+        ASSERT_NE(em1_token_to_slot, nullptr);
+        EXPECT_EQ(em1_rank_mask, h1_rank_mask);
+        EXPECT_EQ(em1_scan_tmp, h1_scan_tmp);
+        EXPECT_EQ(em1_rank_mask, em2_rank_mask);
+        EXPECT_EQ(em1_scan_tmp, em2_scan_tmp);
+        EXPECT_EQ(em1_token_to_slot, em2_token_to_slot);
+
+        NCCL_ASSERT(ncclEpUpdateHandle(em1, topk_idx_, nullptr, g_stream));
+        NCCL_ASSERT(ncclEpUpdateHandle(em2, topk_idx_, nullptr, g_stream));
+        CUDA_ASSERT(cudaStreamSynchronize(g_stream));
+        NCCL_ASSERT(ncclEpHandleDestroy(em2));
+        NCCL_ASSERT(ncclEpHandleDestroy(em1));
+    }
+}
+
 // ── Test: CallerOwnedHandleMem — caller-owned handle_mem buffer ───────────────
 // Caller queries the required size, allocates, wraps as ncclUint8 1D tensor,
 // passes to ncclEpInitHandle. Verifies roundtrip correctness and that

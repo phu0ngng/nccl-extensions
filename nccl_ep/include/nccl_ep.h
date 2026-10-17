@@ -608,7 +608,9 @@ typedef struct {
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpHandleState_t, NCCL_EP_HANDLE_STATE);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpHandleState_t, NCCL_EP_HANDLE_STATE, 1);
 
-// Query the device bytes required for a handle's routing buffers.
+// Query the device bytes required for a handle's persistent routing state.
+// Group-owned update-only scan workspace is allocated lazily by ncclEpInitHandle
+// and is not included in size_out.
 //
 // Arguments:
 //   ep_group  - [IN]  A valid EP group
@@ -756,7 +758,9 @@ ncclResult_t ncclEpCreateHandle(
 
 ncclResult_t ncclEpHandleDestroy(ncclEpHandle_t handle);
 
-// Query the device bytes required for a handle's routing buffers.
+// Query the device bytes required for a handle's persistent routing state.
+// Group-owned update-only scan workspace is allocated lazily by ncclEpInitHandle
+// and is not included in size_out.
 //
 // Arguments:
 //   ep_group  - [IN]  A valid EP group

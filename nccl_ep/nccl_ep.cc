@@ -925,6 +925,18 @@ struct ncclEpGroup {
             float* recv_topk_weights_flat = nullptr;
         } count_scratch;
 
+    // Update-only scan workspace. Scan-mode UpdateHandle already uses the group-owned
+    // global_routing_map, so these buffers follow the same ordered-use lifetime and are
+    // shared by every scan handle instead of being retained in each handle_mem block.
+        struct ScanScratch {
+            void* token_rank_mask = nullptr;
+            void* preprocessing_scan_tmp = nullptr;
+            int32_t* token_to_recv_slot = nullptr;
+            size_t token_rank_mask_size = 0;
+            size_t preprocessing_scan_tmp_size = 0;
+            size_t token_to_recv_slot_size = 0;
+        } scan_scratch;
+
     // Fused pull-count MAP-build scratch (group-shared; zeroed and consumed within a single
     // dispatch, so group-scoping stays 1F1B-safe like em_permute_cursors).
         int32_t* pull_recv_cursor = nullptr;  // [lsa_team_size + num_local_experts + 1] rank + expert cursors, plus trailing arrival counter
@@ -2977,6 +2989,24 @@ ncclResult_t ncclEpGroupDestroy(ncclEpGroup_t ep_group) {
         CUDA_CHECK(ep_group->alloc.free_fn(ep_group->ht_buffers.global_routing_map, ep_group->alloc.context));
         ep_group->ht_buffers.global_routing_map = nullptr;
     }
+    if (ep_group->ht_buffers.scan_scratch.token_rank_mask != nullptr) {
+        CUDA_CHECK(ep_group->alloc.free_fn(
+            ep_group->ht_buffers.scan_scratch.token_rank_mask, ep_group->alloc.context));
+        ep_group->ht_buffers.scan_scratch.token_rank_mask = nullptr;
+        ep_group->ht_buffers.scan_scratch.token_rank_mask_size = 0;
+    }
+    if (ep_group->ht_buffers.scan_scratch.preprocessing_scan_tmp != nullptr) {
+        CUDA_CHECK(ep_group->alloc.free_fn(
+            ep_group->ht_buffers.scan_scratch.preprocessing_scan_tmp, ep_group->alloc.context));
+        ep_group->ht_buffers.scan_scratch.preprocessing_scan_tmp = nullptr;
+        ep_group->ht_buffers.scan_scratch.preprocessing_scan_tmp_size = 0;
+    }
+    if (ep_group->ht_buffers.scan_scratch.token_to_recv_slot != nullptr) {
+        CUDA_CHECK(ep_group->alloc.free_fn(
+            ep_group->ht_buffers.scan_scratch.token_to_recv_slot, ep_group->alloc.context));
+        ep_group->ht_buffers.scan_scratch.token_to_recv_slot = nullptr;
+        ep_group->ht_buffers.scan_scratch.token_to_recv_slot_size = 0;
+    }
     if (ep_group->ht_buffers.global_topk_idx != nullptr) {
         CUDA_CHECK(ep_group->alloc.free_fn(ep_group->ht_buffers.global_topk_idx, ep_group->alloc.context));
         ep_group->ht_buffers.global_topk_idx = nullptr;
@@ -3453,10 +3483,10 @@ static size_t ll_handle_mem_size(ncclEpGroup_t ep_group, int num_topk) {
     return sz_recv_src + sz_dispatch + sz_send_src;
 }
 
-// All individual buffer sizes for a HT handle_mem block plus derived totals.
+// All individual buffer sizes for HT prepared state and update-only scan workspace.
 // Single source of truth shared by ht_handle_mem_size() and ht_init_handle().
 struct HtBlockLayout {
-    // global_routing_map is group-scoped (ep_group->ht_buffers); not part of this block.
+    // global_routing_map and scan-only scratch are group-scoped; not part of handle_mem.
     size_t sz_r2a, sz_a2r, sz_ler, sz_ntfe, sz_wire_pos;
     size_t sz_s2d, sz_rank_mask, sz_scan_tmp;
     size_t sz_topk_idx; // cached topk_idx (uint16 under pull-push, int32 expert ids elsewhere)
@@ -3626,15 +3656,42 @@ struct HtBlockLayout {
                            (ep_group->nRanks + num_experts) * sizeof(int32_t))
                 : 0;
         L.zero_region = L.sz_r2a + L.sz_a2r + L.sz_ler + L.sz_ntfe;
-        L.no_memset_region = L.sz_rank_mask + L.sz_scan_tmp + L.sz_topk_idx + L.sz_pec_active + L.sz_eto +
+        L.no_memset_region = L.sz_topk_idx + L.sz_pec_active + L.sz_eto +
                              L.sz_emuf_group_buf + L.sz_emuf_group_count + L.sz_flat2em_slot_map +
-                             L.sz_token_to_recv_slot + L.sz_count_scratch + L.sz_recv_slot_to_src +
+                             L.sz_count_scratch + L.sz_recv_slot_to_src +
                              L.sz_pull_count_own_row + L.sz_pull_count_cached_rows +
                              L.sz_srcpos_map;
         L.total = L.zero_region + L.sz_s2d + L.sz_wire_pos + L.no_memset_region;
         return L;
     }
 };
+
+// Lazily allocate the scan workspace required by this handle. Separate allocations keep
+// previously-created handle pointers stable when a later EM scan handle additionally needs
+// token_to_recv_slot. InitHandle is already outside CUDA graph capture.
+static void ensure_ht_scan_scratch(ncclEpGroup_t ep_group, const HtBlockLayout& L) {
+    auto& scratch = ep_group->ht_buffers.scan_scratch;
+    if (L.sz_rank_mask > 0 && scratch.token_rank_mask == nullptr) {
+        CUDA_CHECK(ep_group->alloc.alloc_fn(
+            &scratch.token_rank_mask, L.sz_rank_mask, ep_group->alloc.context));
+        scratch.token_rank_mask_size = L.sz_rank_mask;
+    }
+    if (L.sz_scan_tmp > 0 && scratch.preprocessing_scan_tmp == nullptr) {
+        CUDA_CHECK(ep_group->alloc.alloc_fn(
+            &scratch.preprocessing_scan_tmp, L.sz_scan_tmp, ep_group->alloc.context));
+        scratch.preprocessing_scan_tmp_size = L.sz_scan_tmp;
+    }
+    if (L.sz_token_to_recv_slot > 0 && scratch.token_to_recv_slot == nullptr) {
+        CUDA_CHECK(ep_group->alloc.alloc_fn(
+            reinterpret_cast<void**>(&scratch.token_to_recv_slot),
+            L.sz_token_to_recv_slot,
+            ep_group->alloc.context));
+        scratch.token_to_recv_slot_size = L.sz_token_to_recv_slot;
+    }
+    assert(L.sz_rank_mask == 0 || scratch.token_rank_mask_size >= L.sz_rank_mask);
+    assert(L.sz_scan_tmp == 0 || scratch.preprocessing_scan_tmp_size >= L.sz_scan_tmp);
+    assert(L.sz_token_to_recv_slot == 0 || scratch.token_to_recv_slot_size >= L.sz_token_to_recv_slot);
+}
 
 static size_t ht_handle_mem_size(ncclEpGroup_t ep_group, ncclEpLayout_t layout, int num_topk) {
     return HtBlockLayout::compute(ep_group, layout, num_topk).total;
@@ -3935,6 +3992,7 @@ ht_init_handle(ncclEpHandle_t handle, ncclEpGroup_t ep_group, const ncclEpTensor
     }
     handle->num_topk = num_topk;
     const auto L = HtBlockLayout::compute(ep_group, handle->layout, num_topk);
+    ensure_ht_scan_scratch(ep_group, L);
 
     if (handle_mem != nullptr) {
         assert(handle_mem->ndim == 1 && handle_mem->datatype == ncclUint8);
@@ -3970,10 +4028,10 @@ ht_init_handle(ncclEpHandle_t handle, ncclEpGroup_t ep_group, const ncclEpTensor
     handle->ht.wire_prob_pos = (L.sz_wire_pos > 0) ? static_cast<void*>(ptr + offset) : nullptr;
     offset += L.sz_wire_pos;
     // --- end of S2D + source-position region (memset 0xFF) ---
-    handle->ht.token_rank_mask = (L.sz_rank_mask > 0) ? ptr + offset : nullptr;
-    offset += L.sz_rank_mask;
-    handle->ht.preprocessing_scan_tmp = (L.sz_scan_tmp > 0) ? reinterpret_cast<void*>(ptr + offset) : nullptr;
-    offset += L.sz_scan_tmp;
+    handle->ht.token_rank_mask =
+        (L.sz_rank_mask > 0) ? ep_group->ht_buffers.scan_scratch.token_rank_mask : nullptr;
+    handle->ht.preprocessing_scan_tmp =
+        (L.sz_scan_tmp > 0) ? ep_group->ht_buffers.scan_scratch.preprocessing_scan_tmp : nullptr;
     handle->ht.topk_idx = (L.sz_topk_idx > 0) ? reinterpret_cast<void*>(ptr + offset) : nullptr;
     offset += L.sz_topk_idx;
     // EM remap counts/offsets live in handle_mem (EM only; FLAT must not read them).
@@ -3999,8 +4057,7 @@ ht_init_handle(ncclEpHandle_t handle, ncclEpGroup_t ep_group, const ncclEpTensor
         (L.sz_flat2em_slot_map > 0) ? reinterpret_cast<int32_t*>(ptr + offset) : nullptr;
     offset += L.sz_flat2em_slot_map;
     handle->ht.token_to_recv_slot =
-        (L.sz_token_to_recv_slot > 0) ? reinterpret_cast<int32_t*>(ptr + offset) : nullptr;
-    offset += L.sz_token_to_recv_slot;
+        (L.sz_token_to_recv_slot > 0) ? ep_group->ht_buffers.scan_scratch.token_to_recv_slot : nullptr;
     // Layout order matters: own_row must follow own_chunk_rank/per_src_lteam_num_tokens so
     // ht_update_handle_count_mode can zero all three with one memset (see its call site).
     ht_assign_count_scratch(handle, ep_group, ptr, offset, L.sz_count_scratch);
@@ -4031,6 +4088,7 @@ ht_init_handle(ncclEpHandle_t handle, ncclEpGroup_t ep_group, const ncclEpTensor
     if (L.sz_pull_count_own_row > 0) {
         handle->ht.dispatch_push_count.fused_meta_dispatch = true;
     }
+    assert(offset == L.total);
     handle->ht.dispatch_output_per_expert_alignment = 0;
 
     if (is_internode_available(ep_group)) {
@@ -7514,6 +7572,16 @@ int ncclEpHandle_test_getCompactProbWireFloats(ncclEpHandle_t handle) {
         handle->group->config.algorithm != NCCL_EP_ALGO_HIGH_THROUGHPUT ||
         ht_prob_wire_mode(handle->group, handle->num_topk) != HtProbWire::kCompact) return 0;
     return nccl_ep::ht::dispatch_compact_prob_row_floats(handle->num_topk);
+}
+
+void ncclEpHandle_test_getScanScratch(
+    ncclEpHandle_t handle,
+    const void** token_rank_mask,
+    const void** preprocessing_scan_tmp,
+    const int32_t** token_to_recv_slot) {
+    if (token_rank_mask != nullptr) *token_rank_mask = handle->ht.token_rank_mask;
+    if (preprocessing_scan_tmp != nullptr) *preprocessing_scan_tmp = handle->ht.preprocessing_scan_tmp;
+    if (token_to_recv_slot != nullptr) *token_to_recv_slot = handle->ht.token_to_recv_slot;
 }
 
 int ncclEpHandle_test_getNumTopk(ncclEpHandle_t handle) {
