@@ -213,11 +213,10 @@ typedef struct {
   size_t dstStrides[NCCL_RESHARD_MAX_TENSOR_DIMS];
   int ndims;
 
-  int srcShardTensorDim;
-  int dstShardTensorDim;
+  ncclReshardShardLayout_t srcShardLayout;
+  ncclReshardShardLayout_t dstShardLayout;
   int srcShardCount;
   int dstShardCount;
-  bool sameShardDim;
 
   bool isSource;
   bool isDest;

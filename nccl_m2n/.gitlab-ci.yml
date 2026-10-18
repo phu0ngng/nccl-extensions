@@ -43,6 +43,8 @@ build:nccl_m2n:
         NVCC_GENCODE="$NVCC_GENCODE" \
         GTEST_DIR="${CI_PROJECT_DIR}/.ci/googletest/googletest" \
         lib tests bench reshard reshard_batch_user_window
+      test -x build/bin/multi_dim_geometry_test
+      test -x build/bin/multi_dim_test_mpi
       test -s build/lib/libnccl_m2n.so
       test -s build/include/nccl_m2n.h
       test -x build/bin/basic_api_test_local
@@ -151,6 +153,8 @@ build_pretyche:
           GTEST_DIR=/workspace/.ci/googletest/googletest \
           lib tests bench reshard reshard_batch_user_window
 
+      test -x "${install_dir}/build/bin/multi_dim_geometry_test"
+      test -x "${install_dir}/build/bin/multi_dim_test_mpi"
       test -x "${install_dir}/build/bin/basic_api_test_local"
       test -x "${install_dir}/build/bin/basic_api_test_mpi"
       test -x "${install_dir}/build/bin/reshard_bench"
@@ -160,6 +164,8 @@ build_pretyche:
       mkdir -p "${artifact_dir}/bin" "${artifact_dir}/include" "${artifact_dir}/lib"
       cp -a "${install_dir}/build/lib/libnccl_m2n.so" "${artifact_dir}/lib/"
       cp -a "${install_dir}/build/include/nccl_m2n.h" "${artifact_dir}/include/"
+      cp -a "${install_dir}/build/bin/multi_dim_geometry_test" "${artifact_dir}/bin/"
+      cp -a "${install_dir}/build/bin/multi_dim_test_mpi" "${artifact_dir}/bin/"
       cp -a "${install_dir}/build/bin/basic_api_test_local" "${artifact_dir}/bin/"
       cp -a "${install_dir}/build/bin/basic_api_test_mpi" "${artifact_dir}/bin/"
       cp -a "${install_dir}/build/bin/reshard_bench" "${artifact_dir}/bin/"
@@ -190,6 +196,8 @@ setup_eos:
       cp -a "${CI_PROJECT_DIR}/.ci/nccl/build/." "${dst}/"
       cp -a "${CI_PROJECT_DIR}/build/lib/libnccl_m2n.so" "${dst}/lib/"
       cp -a "${CI_PROJECT_DIR}/build/include/nccl_m2n.h" "${dst}/include/"
+      cp -a "${CI_PROJECT_DIR}/build/bin/multi_dim_geometry_test" "${dst}/bin/"
+      cp -a "${CI_PROJECT_DIR}/build/bin/multi_dim_test_mpi" "${dst}/bin/"
       cp -a "${CI_PROJECT_DIR}/build/bin/basic_api_test_local" "${dst}/bin/"
       cp -a "${CI_PROJECT_DIR}/build/bin/basic_api_test_mpi" "${dst}/bin/"
       cp -a "${CI_PROJECT_DIR}/build/bin/reshard_bench" "${dst}/bin/"

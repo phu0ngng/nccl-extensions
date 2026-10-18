@@ -24,6 +24,23 @@
 
 find_package(Threads REQUIRED)
 
+# Multi-dimensional coverage runs without GTest. The geometry executable
+# exercises host planning only; launch the GPU executable under MPI.
+add_executable(multi_dim_geometry_test multi_dim_geometry_test.cc)
+target_include_directories(multi_dim_geometry_test PRIVATE "${NCCL_M2N_SOURCE_DIR}/src")
+target_link_libraries(multi_dim_geometry_test PRIVATE NCCL::m2n_static Threads::Threads)
+set_target_properties(multi_dim_geometry_test PROPERTIES CXX_STANDARD 17
+    RUNTIME_OUTPUT_DIRECTORY "${NCCL_M2N_RUNTIME_DIR}")
+add_test(NAME multi_dim_geometry_test COMMAND multi_dim_geometry_test)
+find_package(MPI QUIET)
+if(MPI_FOUND)
+  add_executable(multi_dim_test_mpi multi_dim_test.cc)
+  target_compile_definitions(multi_dim_test_mpi PRIVATE OMPI_SKIP_MPICXX=1)
+  target_link_libraries(multi_dim_test_mpi PRIVATE NCCL::m2n_static MPI::MPI_CXX Threads::Threads)
+  set_target_properties(multi_dim_test_mpi PROPERTIES CXX_STANDARD 17
+      RUNTIME_OUTPUT_DIRECTORY "${NCCL_M2N_RUNTIME_DIR}")
+endif()
+
 # ─── GTest ────────────────────────────────────────────────────────────────────
 # Reuse a parent/package target when possible. The test binaries define their
 # own main(), so only gtest is required. The source fallback compiles

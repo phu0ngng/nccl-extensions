@@ -687,18 +687,19 @@ void computeMeshGroupInfo(const ncclDistTensor_t* tensor, int worldRank, ncclRes
 
 int getMeshRank(const ncclDistTensor_t* tensor, const ncclReshardMeshGroupInfo* info, int shardIdx, int repIdx);
 
-void computeGlobalRange(const size_t localDims[], int ndims, int shardTensorDim, int shardIdx, size_t globalStart[],
-                        size_t globalEnd[]);
+ncclResult_t resolveReshardDims(int worldRank, const size_t srcDims[], const ncclReshardShardLayout_t& srcLayout,
+                                 const size_t dstDims[], const ncclReshardShardLayout_t& dstLayout, int ndims,
+                                 size_t resolvedSrc[], size_t resolvedDst[]);
 
 bool computeOverlap(const size_t srcStart[], const size_t srcEnd[], const size_t dstStart[], const size_t dstEnd[],
                     int ndims, size_t overlapStart[], size_t overlapEnd[]);
 
-void computeTransferPlan(const size_t srcDims[], const size_t srcStrides[], int srcShardDim, int srcShardIdx,
-                         const size_t dstDims[], const size_t dstStrides[], int dstShardDim, int dstShardIdx, int ndims,
+void computeTransferPlan(const size_t srcDims[], const size_t srcStrides[], const ncclReshardShardLayout_t& srcLayout, int srcShardIdx,
+                         const size_t dstDims[], const size_t dstStrides[], const ncclReshardShardLayout_t& dstLayout, int dstShardIdx, int ndims,
                          size_t elementsPerChunk, ncclReshardTransferPlan* plan);
-ncclResult_t computeTransferPlanChecked(const size_t srcDims[], const size_t srcStrides[], int srcShardDim,
+ncclResult_t computeTransferPlanChecked(const size_t srcDims[], const size_t srcStrides[], const ncclReshardShardLayout_t& srcLayout,
                                         int srcShardIdx, const size_t dstDims[], const size_t dstStrides[],
-                                        int dstShardDim, int dstShardIdx, int ndims, size_t elementsPerChunk,
+                                        const ncclReshardShardLayout_t& dstLayout, int dstShardIdx, int ndims, size_t elementsPerChunk,
                                         ncclReshardTransferPlan* plan);
 
 /* ======================================================================

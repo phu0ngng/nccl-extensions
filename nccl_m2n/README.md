@@ -70,6 +70,26 @@ See [Public API Reference](#public-api-reference) for the full mesh,
 placement, and tensor-descriptor semantics, including rank roles and
 same-dim vs. cross-dim sharding.
 
+Both mesh axes may independently use `REPLICATE` or `SHARD(d)`, where
+`0 <= d < tensor.ndims`. This includes `(SHARD(0), SHARD(1))`, swapped
+placements, and repeated sharding such as `(SHARD(0), SHARD(0))`.
+Mesh axes are applied in placement order: axis 0 partitions the global
+tensor, then axis 1 partitions each resulting piece. For a length-16 tensor
+on a `2 x 2` mesh with `(SHARD(0), SHARD(0))`, mesh coordinates `(0,0)`,
+`(0,1)`, `(1,0)`, `(1,1)` own `[0,4)`, `[4,8)`, `[8,12)`, `[12,16)`.
+
+Each rank holds a contiguous, equally sized local tile. For each tensor
+dimension `d`, its global extent is `localShape[d]` times the product of
+mesh-axis sizes placed at `SHARD(d)`. Source and destination global shapes
+must match. Fully replicated layouts `(REPLICATE, REPLICATE)` are supported.
+Public meshes have one or two axes, and tensors may have 1–3 dimensions.
+These placement semantics apply to both `ncclReshard` and
+`ncclReshardWithWindow`, including grouped calls and Python bindings.
+
+**Reshard geometry** — each source tile sends its intersection with each
+destination tile, including when either side shards multiple dimensions.
+Replicas reuse the existing replication load balancing and forwarding paths.
+
 ---
 
 ## Quick Start

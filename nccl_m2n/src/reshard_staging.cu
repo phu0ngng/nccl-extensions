@@ -165,8 +165,6 @@ static int stagingComputeCtaHeuristicPeerCount(const StagingTransferDescriptor* 
   computeMeshGroupInfo(src, src->mesh->startRank, &srcInfo);
   computeMeshGroupInfo(dst, dst->mesh->startRank, &dstInfo);
 
-  const int srcShardDim = srcInfo.shardTensorDim;
-  const int dstShardDim = dstInfo.shardTensorDim;
   const int srcShardCount = std::max(1, srcInfo.shardCount);
   const int dstShardCount = std::max(1, dstInfo.shardCount);
   int maxActivePeers = 1;
@@ -177,8 +175,8 @@ static int stagingComputeCtaHeuristicPeerCount(const StagingTransferDescriptor* 
     int active = 0;
     for (int ds = 0; ds < dstShardCount; ds++) {
       ncclReshardTransferPlan plan{};
-      computeTransferPlan(desc->srcDims, desc->srcStrides, srcShardDim, ss, desc->dstDims, desc->dstStrides,
-                          dstShardDim, ds, desc->ndims, elementsPerChunk, &plan);
+      computeTransferPlan(desc->srcDims, desc->srcStrides, srcInfo.shardLayout, ss, desc->dstDims, desc->dstStrides,
+                          dstInfo.shardLayout, ds, desc->ndims, elementsPerChunk, &plan);
       if (plan.totalInnerTransfers > 0) {
         active++;
       }
@@ -193,8 +191,8 @@ static int stagingComputeCtaHeuristicPeerCount(const StagingTransferDescriptor* 
     int active = 0;
     for (int ss = 0; ss < srcShardCount; ss++) {
       ncclReshardTransferPlan plan{};
-      computeTransferPlan(desc->srcDims, desc->srcStrides, srcShardDim, ss, desc->dstDims, desc->dstStrides,
-                          dstShardDim, ds, desc->ndims, elementsPerChunk, &plan);
+      computeTransferPlan(desc->srcDims, desc->srcStrides, srcInfo.shardLayout, ss, desc->dstDims, desc->dstStrides,
+                          dstInfo.shardLayout, ds, desc->ndims, elementsPerChunk, &plan);
       if (plan.totalInnerTransfers > 0) {
         active++;
       }
@@ -2686,13 +2684,12 @@ extern "C" ncclResult_t ncclReshard(ncclM2nHandle_t handle, ncclComm_t comm, con
                                      const size_t* dims) -> ncclResult_t {
     ncclReshardMeshGroupInfo info;
     computeMeshGroupInfo(tensor, tensor->mesh->startRank, &info);
-    if (info.shardTensorDim < 0) {
-      return ncclSuccess;
+    for (int d = 0; d < ndims; d++) {
+      size_t globalDim = 0;
+      NCCL_M2N_CHECK_ARG(m2nCheckedMulSize(dims[d], (size_t)info.shardLayout.shardCounts[d], &globalDim), world_rank,
+                         "ncclReshard: %s shard dimension overflows global extent: dim=%d local=%zu shardCount=%d",
+                         side, d, dims[d], info.shardLayout.shardCounts[d]);
     }
-    size_t global_dim = 0;
-    NCCL_M2N_CHECK_ARG(m2nCheckedMulSize(dims[info.shardTensorDim], (size_t)info.shardCount, &global_dim), world_rank,
-                       "ncclReshard: %s shard dimension overflows global extent: dim=%d local=%zu shardCount=%d", side,
-                       info.shardTensorDim, dims[info.shardTensorDim], info.shardCount);
     return ncclSuccess;
   };
   NCCL_M2N_CHECK(check_shard_global_size("source", &src_local, src_tensor_dims));
