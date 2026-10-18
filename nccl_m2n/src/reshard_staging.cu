@@ -2933,7 +2933,7 @@ extern "C" ncclResult_t ncclReshard(ncclM2nHandle_t handle, ncclComm_t comm, con
         {
           M2nApiUnlock apiUnlock;
           NCCL_M2N_CHECK(ncclCommWindowRegister(comm, staging->buffer, staging->totalSize, &staging_window,
-                                                NCCL_WIN_COLL_SYMMETRIC));
+                                                NCCL_WIN_COLL_SYMMETRIC | NCCL_WIN_STRICT_ORDERING));
           NCCL_M2N_CHECK(m2nWaitCommReady(comm));
         }
         NCCL_M2N_CHECK(cacheInternalWindow(comm, staging->buffer, staging->totalSize, RESHARD_INTERNAL_WINDOW_STAGING,

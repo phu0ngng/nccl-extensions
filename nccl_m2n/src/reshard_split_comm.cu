@@ -882,7 +882,7 @@ ncclResult_t reshardSplitEnsureResources(const ReshardSplitComms* sc, void* stag
       {
         M2nApiUnlock apiUnlock;
         NCCL_M2N_CHECK(ncclCommWindowRegister(sc->commA, stagingBuffer, stagingCapacity, &winA,
-                                               NCCL_WIN_COLL_SYMMETRIC));
+                                               NCCL_WIN_COLL_SYMMETRIC | NCCL_WIN_STRICT_ORDERING));
         NCCL_M2N_CHECK(m2nWaitCommReady(sc->commA));
       }
       NCCL_M2N_CHECK(cacheInternalWindow(sc->commA, stagingBuffer, stagingCapacity, RESHARD_INTERNAL_WINDOW_SPLIT,
@@ -913,7 +913,7 @@ ncclResult_t reshardSplitEnsureResources(const ReshardSplitComms* sc, void* stag
       {
         M2nApiUnlock apiUnlock;
         NCCL_M2N_CHECK(ncclCommWindowRegister(sc->commB, stagingBuffer, stagingCapacity, &winB,
-                                               NCCL_WIN_COLL_SYMMETRIC));
+                                               NCCL_WIN_COLL_SYMMETRIC | NCCL_WIN_STRICT_ORDERING));
         NCCL_M2N_CHECK(m2nWaitCommReady(sc->commB));
       }
       NCCL_M2N_CHECK(cacheInternalWindow(sc->commB, stagingBuffer, stagingCapacity, RESHARD_INTERNAL_WINDOW_SPLIT,
