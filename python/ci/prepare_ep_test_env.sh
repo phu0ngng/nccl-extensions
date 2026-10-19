@@ -74,6 +74,8 @@ fi
 LD_LIBRARY_PATH="${NCCL_HOME}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     "${RUNTIME_VENV_DIR}/bin/python" -c \
     'import nccl.ep; from nccl._extensions.bindings import nccl_ep'
+LD_LIBRARY_PATH="${NCCL_HOME}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    "${RUNTIME_VENV_DIR}/bin/python" "${PACKAGE_DIR}/tests/test_api_parity.py"
 
 printf 'export PYTHON_BIN=%q\n' "${RUNTIME_VENV_DIR}/bin/python" > "${ENV_FILE}"
 printf '%s\n' "${ENV_FILE}"

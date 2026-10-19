@@ -339,6 +339,36 @@ def run_cybind(targets: list[Target], output_dir: Path) -> None:
         raise RuntimeError(f"cybind exited with status {result}")
 
 
+def _replace_exact(
+    path: Path, old: str, new: str, *, expected_count: int = 1
+) -> None:
+    """Replace a known generated fragment, failing if cybind output changed."""
+    text = path.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count != expected_count:
+        raise RuntimeError(
+            f"Expected {expected_count} occurrence(s) in {path}, found {count}"
+        )
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def apply_generated_fixups(targets: list[Target], output_dir: Path) -> None:
+    """Apply narrow workarounds for known limitations in the pinned cybind.
+
+    Keep each replacement exact and fail when its expected input disappears so
+    an eventual cybind upgrade cannot silently leave a stale workaround behind.
+    """
+    if any(target.name == "nccl_ep" for target in targets):
+        # cybind 0.3.1 inverts Py_buffer.readonly. Preserve the buffer
+        # protocol's meaning: immutable exporters produce read-only wrappers.
+        path = output_dir / "nccl/_extensions/bindings/nccl_ep.pyx"
+        _replace_exact(
+            path,
+            "<intptr_t><void *>view.buf, not view.readonly, buffer",
+            "<intptr_t><void *>view.buf, view.readonly, buffer",
+        )
+
+
 def generate_bindings(
     targets: list[Target],
     staging_dir: Path,
@@ -349,6 +379,7 @@ def generate_bindings(
 
     output_dir = staging_dir / "generated"
     run_cybind(targets, output_dir)
+    apply_generated_fixups(targets, output_dir)
     static_templates = {
         target.bindings_relpath / filename: (
             target.templates_dir / target.bindings_relpath / filename
