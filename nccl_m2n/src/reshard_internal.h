@@ -27,6 +27,7 @@
 #include "m2n_handle.h"
 #include "m2n_log.h"
 #include "reshard_limits.h"
+#include "reshard_pipe_resources.h"
 #include <mutex>
 
 #include "reshard_types.h"
@@ -201,6 +202,9 @@ inline bool gReshardPipeLaunchOrder = true;
  * NCCL_RESHARD_USE_INTERNAL_STREAMS. Internal streams are the default; false
  * keeps work on caller streams with ordered DevComm reuse. */
 inline bool gReshardUseInternalStreams = true;
+/* Fixed host cache capacity for this runtime epoch; DevComms remain lazy and
+ * are never evicted. This does not resize the split/control tables. */
+inline int gReshardDevCommCacheCapacity = MAX_DEVCOMM_CACHE_ENTRIES;
 
 /* Byte-level chunk size used by the RING prepare path. Default is
  * CHUNK_SIZE_BYTES; overridable via NCCL_RESHARD_CHUNK_SIZE.
@@ -218,7 +222,9 @@ inline bool gReshardSplitComm = true;
  * "size[:slots],size[:slots],..."; sizes accept bytes or binary K/M suffixes,
  * and omitted slots default to one). The built-in profile is one 2-GiB bucket
  * with four slots, allocated lazily as selected. Explicit profiles replace the
- * default. Communicators reuse physical slots in stable round-robin waves. */
+ * default. An explicit GEN_COMM_CONCURRENCY caps each bucket's effective slot
+ * count at initialization. Communicators reuse physical slots in stable
+ * round-robin waves. */
 struct ReshardStagingBucketCfg {
   size_t size;
   int numSlots;
@@ -227,6 +233,12 @@ inline constexpr int kMaxStagingBuckets = 8;
 inline constexpr size_t kMinPackStagingBytes = 2048;
 inline constexpr size_t kDefaultStagingBucketBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
 inline constexpr int kDefaultStagingBucketSlots = 4;
+/* GEN_COMM_CONCURRENCY selects PIPE's independently addressable commB lanes.
+ * PACK derives its bound from the effective (optionally capped) slot profile. */
+inline int gReshardCommBConcurrency = kDefaultStagingBucketSlots;
+/* PIPE FIFO histories outlive execution-lane uses. Reserve the complete
+ * parent namespace bank before creating the first pooled kernel DevComm. */
+inline int gReshardPipeCommBParentCapacity = RESHARD_PIPE_DEFAULT_PARENT_CAPACITY;
 inline ReshardStagingBucketCfg gReshardStagingBuckets[kMaxStagingBuckets] = {
   {kDefaultStagingBucketBytes, kDefaultStagingBucketSlots}};
 inline int gReshardStagingBucketCount = 1;
@@ -240,7 +252,7 @@ inline int reshardStagingTotalSlots() {
   return total;
 }
 inline int reshardGetSplitSlotCount() {
-  return gReshardStagingBucketCount;
+  return gReshardCopyAlgorithm == RESHARD_COPY_ALGO_PACK ? reshardStagingTotalSlots() : gReshardCommBConcurrency;
 }
 
 /* When true AND a dst replica spans >1 NVL domain (domainsPerRep > 1,
@@ -313,6 +325,8 @@ inline int reshardGetPipeGinChannelsPerPeer() {
   return gReshardPipeGinChannelsPerPeer;
 }
 inline bool reshardGetSplitCommEnabled() {
+  // A cached parent lane cannot follow a PACK request between size buckets.
+  if (gReshardCopyAlgorithm == RESHARD_COPY_ALGO_PACK && gReshardStagingBucketCount > 1) return false;
   return gReshardAdaptiveCallConfigValid ? gReshardAdaptiveCallConfig.splitComm : gReshardSplitComm;
 }
 inline bool reshardGetSplitSingleRepInject() {
@@ -441,13 +455,15 @@ struct ReshardDevCommCacheKey {
   }
 };
 
-/* Present only in user-stream mode, where it serializes event reuse and
- * quarantines an entry if neither the event nor its stream can provide a
- * completion fence. */
+/* Shared cache-use state: serializes event reuse in user-stream mode,
+ * quarantines unsafe entries, and retains persistent PIPE signal histories. */
 struct ReshardDevCommUseState {
   std::mutex mutex;
   bool bSerializeUses = true;
   bool bPoisoned = false;
+  /* PIPE signal histories must remain paired with their staging cursors until
+   * runtime finalization, even after the last GPU use has completed. */
+  bool bRetainPersistentState = false;
 };
 
 /* Token threaded from DevComm acquisition to the point where the caller has
@@ -464,7 +480,21 @@ ncclDevComm* findCachedDevComm(const ReshardDevCommCacheKey& key,
                                cudaEvent_t* outCompletionEvent = nullptr,
                                std::shared_ptr<ReshardDevCommUseState>* outUseState = nullptr);
 
-ncclResult_t cacheDevComm(const ReshardDevCommCacheKey& key, const ncclDevComm* devComm);
+/* Reserve locally before collective creation releases the API lock. No
+ * admission collective is performed: callers must abort the distributed job
+ * on a local capacity error. An uncommitted reservation is released on exit. */
+struct ReshardDevCommCacheReservation {
+  int index = -1;
+  ReshardDevCommCacheReservation() = default;
+  ~ReshardDevCommCacheReservation();
+  ReshardDevCommCacheReservation(const ReshardDevCommCacheReservation&) = delete;
+  ReshardDevCommCacheReservation& operator=(const ReshardDevCommCacheReservation&) = delete;
+};
+ncclResult_t reserveDevCommCacheEntry(ReshardDevCommCacheReservation* reservation);
+
+ncclResult_t cacheDevComm(const ReshardDevCommCacheKey& key, const ncclDevComm* devComm,
+                           bool retainPersistentState = false,
+                           ReshardDevCommCacheReservation* reservation = nullptr);
 
 /* Records `event` on `stream`. If the record fails the work may already be
  * enqueued, so the stream is synchronized before the resource can be reused;
@@ -520,6 +550,7 @@ inline ncclResult_t reshardRecordDevCommUse(ReshardDevCommUse* use, cudaStream_t
 #ifdef NCCL_M2N_TESTING
 void reshardFailNextCompletionEventRecordForTest(bool bFailStreamSynchronize = false);
 void reshardFailNextCacheEventSynchronizeForTest();
+void reshardSplitSetLaneCompletionForTest(int lane, cudaEvent_t event);
 #endif
 
 ncclWindow_t* findCachedInternalWindowByPtr(ncclComm_t comm, void* buffer, size_t size,
@@ -543,8 +574,10 @@ ncclResult_t streamPoolAcquire(ncclComm_t comm, int dev, cudaStream_t* outStream
 
 void cacheFinalize();
 
-/* reshard_split_comm.cu — tear down all cached split sub-comms / probe
- * DevComms. */
+/* Drain existing shared PIPE lane events before cached DevComms/windows are
+ * destroyed. No events or synchronization are added to the launch path. */
+void reshardSplitSynchronizeCommBLanes();
+/* reshard_split_comm.cu — tear down all cached split sub-comms / probe DevComms. */
 void reshardSplitCommFinalize();
 void stagingPipeLaunchCompletionFinalize();
 
@@ -763,6 +796,8 @@ int packStagingAllocationCountForTest();
 
 /* Rank-stable bucket partition for the calling thread's in-flight reshard. */
 int getStagingBucketIndex(ncclComm_t comm);
+/* Local physical staging-slot identity for the calling thread's in-flight PACK reshard. */
+int getStagingPhysicalSlotIndex(ncclComm_t comm);
 
 /* Test-only entry point for exercising a collective section while the API
  * lock is held. */

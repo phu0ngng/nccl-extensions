@@ -50,6 +50,7 @@ TEST_MPI_SRCS    := $(TESTSDIR)/basic_api_test_mpi.cc   \
 TEST_LOCAL_SRCS  := $(TESTSDIR)/nonblocking_comm_test.cc \
                     $(TESTSDIR)/basic_api_test_local.cc \
                     $(TESTSDIR)/pack_staging_pool_test.cc \
+                    $(TESTSDIR)/devcomm_cache_test.cc \
                     $(TEST_HELPERS_SRC)
 
 .PHONY: all tests basic_api_test_mpi basic_api_test_local gtest gtest-clean clean help
@@ -67,6 +68,15 @@ $(BINDIR)/multi_dim_test_mpi: $(TESTSDIR)/multi_dim_test.cc $(M2N_LIBTARGET) $(L
 
 all: tests
 tests: multi_dim_geometry_test multi_dim_test_mpi
+.PHONY: pipe_commb_resources_test
+pipe_commb_resources_test: $(BINDIR)/pipe_commb_resources_test
+	$<
+
+$(BINDIR)/pipe_commb_resources_test: $(TESTSDIR)/pipe_commb_resources_test.cc $(SRCDIR)/reshard_pipe_resources.h
+	@mkdir -p $(BINDIR)
+	$(CXX) -std=c++17 -Wall -Wextra -I$(SRCDIR) $< -o $@
+
+tests: pipe_commb_resources_test
 
 ifeq ($(GTEST_AVAILABLE),0)
 

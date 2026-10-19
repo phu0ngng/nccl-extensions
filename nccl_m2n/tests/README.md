@@ -14,6 +14,22 @@ Both use only the public API in `src/nccl_m2n.h`.
 
 ## Building
 
+`pipe_commb_resources_test` is a host-only test of stable PIPE parent namespace
+IDs, exhaustion without wrapping, control-slot ranges, resource sizing and
+overflow. It does not require CUDA, NCCL or GTest at runtime. Build directly:
+
+```sh
+c++ -std=c++17 -Wall -Wextra -Isrc tests/pipe_commb_resources_test.cc -o /tmp/pipe_commb_resources_test
+/tmp/pipe_commb_resources_test
+```
+
+From a configured CUDA/NCCL build, `make -C tests pipe_commb_resources_test`
+builds and runs it. CMake includes it when tests are enabled, even without GTest.
+`NCCL_RESHARD_GEN_COMM_PARENT_CAPACITY` reserves PIPE's persistent namespaces
+before first use; it is independent of `NCCL_RESHARD_GEN_COMM_CONCURRENCY`.
+The latter selects PIPE lanes and optionally caps PACK's effective physical
+slots per bucket. An unset value leaves PACK's configured slot counts unchanged.
+
 ```sh
 make tests
 ```

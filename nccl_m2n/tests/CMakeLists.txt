@@ -40,6 +40,12 @@ if(MPI_FOUND)
   set_target_properties(multi_dim_test_mpi PROPERTIES CXX_STANDARD 17
       RUNTIME_OUTPUT_DIRECTORY "${NCCL_M2N_RUNTIME_DIR}")
 endif()
+# Always available, including when GTest is absent. This target tests the
+# host-side namespace/resource contract without CUDA/NCCL runtime calls.
+add_executable(pipe_commb_resources_test pipe_commb_resources_test.cc)
+target_include_directories(pipe_commb_resources_test PRIVATE "${NCCL_M2N_SOURCE_DIR}/src")
+set_target_properties(pipe_commb_resources_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME pipe_commb_resources_test COMMAND pipe_commb_resources_test)
 
 # ─── GTest ────────────────────────────────────────────────────────────────────
 # Reuse a parent/package target when possible. The test binaries define their
@@ -118,6 +124,7 @@ add_executable(basic_api_test_local
     nonblocking_comm_test.cc
     basic_api_test_local.cc
     pack_staging_pool_test.cc
+    devcomm_cache_test.cc
     test_helpers.cu
     ${SRCS}
 )
