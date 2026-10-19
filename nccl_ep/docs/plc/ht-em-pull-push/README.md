@@ -44,11 +44,12 @@ Dispatch recipes `NONE` and `QUANT_FWD`; push-combine `NONE` fwd/bwd.
 ### Mode gate
 
 `HtEmMode::kPullPush` is added alongside the three existing enum values
-(`nccl_ep.cc:768-772`). Selected at group creation when `layout ==
-EXPERT_MAJOR`, `NCCL_EP_HT_EM_PULL_PUSH` is set, and `num_lsa_teams == 1`
-(the last is rejected otherwise, `nccl_ep.cc:1931-1955`). `em_pull_enabled()`
-and `em_comb_push_enabled()` both key off the enum, so the two legs move
-together.
+(`nccl_ep.cc:768-772`). `NCCL_EP_HT_PULL_PUSH` selects pull/push at group
+creation for both `EXPERT_MAJOR` and `FLAT` layouts when `num_lsa_teams == 1`;
+the old `NCCL_EP_HT_EM_PULL_PUSH` name is no longer recognized. This document
+describes the expert-major implementation. The single-team requirement is
+rejected otherwise (`nccl_ep.cc:1931-1955`). `em_pull_enabled()` and
+`em_comb_push_enabled()` both key off the enum, so the two legs move together.
 
 ### Pull dispatch
 
@@ -411,7 +412,7 @@ token, so the dispatch pipeline stays the same width.
 ## Validation
 
 Correctness must be checked with the four supported configurations of
-`NCCL_EP_HT_EM_PULL_PUSH=1`: dispatch recipes `NONE` and `QUANT_FWD`, and
+`NCCL_EP_HT_PULL_PUSH=1`: dispatch recipes `NONE` and `QUANT_FWD`, and
 push-combine `NONE` forward and backward. `ep_bench.cu` covers forward
 directly and the backward pass under `-B / --backward`
 (`ep_bench.cu:4295, 4517, 5949-6071`): it reuses the forward routing,
@@ -425,7 +426,7 @@ pass delivered.
   smem cap; only a hidden size whose single staged warp exceeds the cap is
   unsupported and `ncclEpDispatch` fails cleanly (`nccl_ep.cc:4379-4400`).
   No graceful fallback to the local-permute (`kLocalPermute`) path yet — the
-  caller must disable `NCCL_EP_HT_EM_PULL_PUSH`.
+  caller must disable `NCCL_EP_HT_PULL_PUSH`.
 - **Multi-team.** `num_lsa_teams > 1` on the backlog.
 - **`QUANT_FWD` scale-row registers.** `ScaleInt4PerLane` is JIT-sized to
   the actual row; very large rows should chunk through a register-tile loop
