@@ -76,8 +76,8 @@ tests:
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_handle_maps"
+    # These tests inspect scan metadata; retain the distinct EM transport modes.
     matrix:
-      - name_suffix: default
       - name_suffix: local_dup
         env:
           NCCL_EP_HT_EM_LOCAL_DUP: "1"
@@ -87,9 +87,6 @@ tests:
       - name_suffix: scan
         env:
           NCCL_EP_HT_AG_SCAN_MODE: "1"
-      - name_suffix: count_unfused
-        env:
-          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_lifecycle
     binary: "@bash"
@@ -161,8 +158,8 @@ tests:
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_ht_stale_routing_map"
+    # These tests inspect scan metadata; retain the distinct EM transport modes.
     matrix:
-      - name_suffix: default
       - name_suffix: local_dup
         env:
           NCCL_EP_HT_EM_LOCAL_DUP: "1"
@@ -172,9 +169,6 @@ tests:
       - name_suffix: scan
         env:
           NCCL_EP_HT_AG_SCAN_MODE: "1"
-      - name_suffix: count_unfused
-        env:
-          NCCL_EP_HT_COUNT_UNFUSED: "1"
 
   - name: test_ht_compact_prob
     binary: "@bash"
