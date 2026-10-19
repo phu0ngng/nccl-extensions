@@ -280,6 +280,17 @@ tests:
       - name_suffix: count_unfused
         env:
           NCCL_EP_HT_COUNT_UNFUSED: "1"
+      - name_suffix: pull_push
+        args_append: "--gtest_filter=HtOverflowDropTest.DispatchCombineContinueOnOverflow:HtOverflowDropTest.FlatFusedDropRecount:HtOverflowDropTest.EmLocalPermuteAlignedDropNoOob:HtOverflowDropTest.EmLocalPermuteDeepFlatOverflowPhantomRowsZeroed"
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        args_append: "--gtest_filter=HtOverflowDropTest.DispatchCombineContinueOnOverflow"
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
 
   - name: test_tensor_create
     binary: "@bash"
