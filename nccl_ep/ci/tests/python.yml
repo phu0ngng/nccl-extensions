@@ -20,6 +20,13 @@ constants:
   hidden: "1024"
 
 tests:
+  - name: ep_python_afd_bindings
+    binary: "@bash"
+    args: >-
+      -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/python/ci/verify_ep_afd_bindings.py"'
+    min_gpus: 1
+    np: 1
+
   - name: ep_python_ll_em
     binary: "@bash"
     args: >-
@@ -187,4 +194,3 @@ tests:
     args: >-
       -c 'exec "${PYTHON_BIN}" "${CI_PROJECT_DIR}/nccl_ep/ep_test.py" "$@"' _
       -t ${tokens} -d ${hidden} -a ht -L fl -r
-

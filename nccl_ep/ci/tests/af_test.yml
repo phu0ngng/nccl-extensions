@@ -1,0 +1,29 @@
+defaults:
+  timeout: 1800
+  owners: kwen
+  min_gpus: 4
+  np: NGPUS
+  labels: [nccl_ep, integration, afd, low_latency]
+
+test_type: af_test
+
+env:
+  NCCL_EP_HOME: "${NCCL_HOME}"
+  NCCL_EP_JIT_SOURCE_DIR: "${NCCL_HOME}/include/nccl_ep"
+  NCCL_EP_JIT_BUILD_INCLUDE_DIR: "${NCCL_HOME}/include"
+  NCCL_EP_JIT_CUDA_INCLUDE_DIR: "${CUDA_HOME}/include"
+  NCCL_EP_JIT_NVCC: "${CUDA_HOME}/bin/nvcc"
+  LD_LIBRARY_PATH: "${CUDA_HOME}/lib:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+
+tests:
+  # Leave NCCL_EP_DISPATCH_LSA at its default so AFD itself must disqualify
+  # every specialized LL kernel and select the universal implementation.
+  - name: af_test_universal
+    binary: nccl_ep/af_test
+    args: -d 2048 -t 32 -i 2
+    matrix:
+      - name_suffix: staged
+      - name_suffix: zero_copy_auto
+        args: -d 2048 -t 32 -i 2 -z
+      - name_suffix: topk8
+        args: -d 2048 -t 32 -e 32 -k 8 -i 2

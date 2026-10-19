@@ -7,7 +7,7 @@ exclusion without an explicit review.
 ## PLCs
 
 - [HT scan workspace ownership](ht-scan-workspace.md) — group-shared update-only metadata scan buffers.
-- [Attention-FFN Disaggregation (AFD) for Low-Latency EP](attention-ffn-disaggregation/README.md)
+- [Attention-FFN Disaggregation (AFD) for Low-Latency EP](attention-ffn-disaggregation/README.md) — partitions one LL communicator into token-owning attention ranks and expert-owning FFN ranks, with role-checked C/Python APIs.
 - [271: Low latency LSA FP8 dispatch optimization](271-ll-lsa-fp8-dispatch/README.md) — shared quantization reuse, compact block geometry, vector stores, and capacity fallback.
 - [285: LL TMA dispatch for LSA-only cases](285-ll-tma-dispatch/README.md) — warp-0 TMA stage-ring pipeline for the SEND phase, concurrent idle-warp sentinel/recv-count-buffer clear; default for LSA-eligible, unquantized, rank-major dispatch.
 - [Low-latency epoch ticketing](ll-epoch-ticketing/README.md) — graph-safe LL two-bank resource selection.

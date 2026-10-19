@@ -389,3 +389,9 @@ tests:
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_ll_group_epoch"
+
+  - name: test_ll_afd_selection
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ll_afd_selection"

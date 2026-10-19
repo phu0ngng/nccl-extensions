@@ -92,7 +92,7 @@ build_ipp6:
           NCCL_SUBMODULE_HOME="${CI_PROJECT_DIR}/.ci/nccl" \
           BUILDDIR="${NCCL_HOME}" \
           NVCC_GENCODE="${NVCC_GENCODE}" \
-          ep_test ep_bench
+          ep_test ep_bench af_test
 
       env NCCL_HOME="${NCCL_HOME}" \
         make -C "${CI_PROJECT_DIR}/nccl_ep/tests" \
@@ -106,7 +106,7 @@ build_ipp6:
       cp -a "${NCCL_HOME}/lib"/libnccl_ep.* "${ART}/lib/"
       cp -a "${NCCL_HOME}/include/nccl_ep.h" "${ART}/include/"
       cp -a "${NCCL_HOME}/include/nccl_ep" "${ART}/include/"
-      cp -a "${NCCL_HOME}/test/nccl_ep/ep_test" "${NCCL_HOME}/test/nccl_ep/ep_bench" "${ART}/test/nccl_ep/"
+      cp -a "${NCCL_HOME}/test/nccl_ep/ep_test" "${NCCL_HOME}/test/nccl_ep/ep_bench" "${NCCL_HOME}/test/nccl_ep/af_test" "${ART}/test/nccl_ep/"
       for unit_test in "${NCCL_HOME}/test/nccl_ep"/test_*; do
         if [[ -f "${unit_test}" && -x "${unit_test}" ]]; then
           cp -a "${unit_test}" "${ART}/test/nccl_ep/"
@@ -175,7 +175,7 @@ build_pretyche:
           NCCL_SUBMODULE_HOME=/nccl \
           BUILDDIR=/nccl_install/build \
           NVCC_GENCODE='-gencode=arch=compute_100,code=sm_100' \
-          ep_test ep_bench
+          ep_test ep_bench af_test
 
       srun \
         --account="$(get_slurm_account)" \
@@ -198,7 +198,7 @@ build_pretyche:
       cp -a "${NCCL_HOME}/lib"/libnccl_ep.* "${ART}/lib/"
       cp -a "${NCCL_HOME}/include/nccl_ep.h" "${ART}/include/"
       cp -a "${NCCL_HOME}/include/nccl_ep" "${ART}/include/"
-      cp -a "${NCCL_HOME}/test/nccl_ep/ep_test" "${NCCL_HOME}/test/nccl_ep/ep_bench" "${ART}/test/nccl_ep/"
+      cp -a "${NCCL_HOME}/test/nccl_ep/ep_test" "${NCCL_HOME}/test/nccl_ep/ep_bench" "${NCCL_HOME}/test/nccl_ep/af_test" "${ART}/test/nccl_ep/"
       for unit_test in "${NCCL_HOME}/test/nccl_ep"/test_*; do
         if [[ -f "${unit_test}" && -x "${unit_test}" ]]; then
           cp -a "${unit_test}" "${ART}/test/nccl_ep/"
@@ -245,7 +245,7 @@ build_pretyche:
       cp -a "${ART}/lib"/libnccl_ep.* "${DST}/lib/"
       cp -a "${ART}/include/nccl_ep.h" "${DST}/include/"
       cp -a "${ART}/include/nccl_ep" "${DST}/include/"
-      cp -a "${ART}/test/nccl_ep/ep_test" "${ART}/test/nccl_ep/ep_bench" "${DST}/test/nccl_ep/"
+      cp -a "${ART}/test/nccl_ep/ep_test" "${ART}/test/nccl_ep/ep_bench" "${ART}/test/nccl_ep/af_test" "${DST}/test/nccl_ep/"
       for unit_test in "${ART}/test/nccl_ep"/test_*; do
         if [[ -f "${unit_test}" && -x "${unit_test}" ]]; then
           cp -a "${unit_test}" "${DST}/test/nccl_ep/"

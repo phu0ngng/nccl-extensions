@@ -64,6 +64,10 @@ nccl_ep:
     # Dispatch / Combine / Complete (named-struct ABI; see note above).
     ncclEpDispatch: {}
     ncclEpCombine: {}
+    ncclEpAfDispatch: {}
+    ncclEpAfCombine: {}
+    ncclEpAfRecv: {}
+    ncclEpAfReturn: {}
     ncclEpComplete: {}
 
     # Rank masking / fault handling (requires enable_mask in the group config).

@@ -14,7 +14,7 @@ change are covered in the upstream RFC and are not repeated here:
 
 This document records the API and LL-path design chosen to implement that RFC.
 
-**API.** One existing EP group spans all ranks. A V3 config field partitions it:
+**API.** One existing EP group spans all ranks. A V4 config field partitions it:
 
 ```c
 ncclEpGroupConfig_t::num_attn_ranks   // N_a; 0 = classic homogeneous EP
@@ -23,13 +23,14 @@ ncclEpGroupConfig_t::num_attn_ranks   // N_a; 0 = classic homogeneous EP
 Callers create the group and handle with the normal EP APIs
 (`ncclEpCreateGroup` / `ncclEpCreateHandle`, Rank-Major). Optional
 `ncclEpAfDispatch` / `ncclEpAfRecv` / `ncclEpAfCombine` / `ncclEpAfReturn`
-wrappers assert A- vs F-side role at the call site; `ncclEpDispatch` /
+wrappers validate A- vs F-side role at the call site; `ncclEpDispatch` /
 `ncclEpCombine` remain valid if the framework branches itself.
 
-**Runtime.** The dispatch/combine kernels stay the symmetric all-to-all. AFD is
+**Runtime.** AFD is supported by the universal LL dispatch/combine kernels only;
+the LSA-specialized SIMT/TMA kernels remain unchanged. The universal kernels use
 index remapping plus role gating on the existing collective. Routing metadata
-rides in the existing LL dispatch header (no sidecar). Transport setup is
-unchanged: every rank still allocates the same windows and QPs.
+rides in the existing LL dispatch header (no sidecar). Transport setup uses the
+same collective windows and QPs; role-only receive slabs may be omitted.
 
 The first release is deliberately narrow: LL algorithm, Rank-Major layout,
 square partition. See [Scope](#scope-and-limits).
@@ -89,18 +90,19 @@ unchanged, since a uniform offset does not change a first-occurrence test.
 
 ### Role gating
 
-Three blocks would otherwise deadlock, because each waits on traffic its role
-never receives:
+Four blocks would otherwise deadlock or publish unused traffic, because each waits
+on or sends traffic its role never receives:
 
 | Block | Gate | Without the gate |
 |---|---|---|
+| dispatch send/count publish | `afdRankOwnsTokens` | F-ranks publish zero counts into slots no receiver consumes |
 | dispatch recv | `afdRankOwnsExperts` | A-ranks wait for tokens never sent to them |
 | combine send | `afdRankOwnsExperts` | A-ranks compute a negative global expert id |
 | combine recv | `afdRankOwnsTokens` | F-ranks wait for finish flags never raised |
 
-The dispatch **send** phase needs no gate: an F-rank owns no source tokens, so its
-handle reports `num_tokens == 0` and the send loop is empty. This falls out of the
-existing token-count plumbing rather than being special-cased.
+The dispatch send/count-publish role is burned into the universal JIT variant, so
+F-rank kernels compile out that work. The epoch-bank wipe and synchronization remain
+unconditional on both roles.
 
 ## Routing metadata: no new channel
 
@@ -115,10 +117,12 @@ ship. That is out of scope here.
 
 ## Transport
 
-Because AFD is the same collective over the same group, every rank still creates
-the same windows, signals, and GIN contexts. An A-rank simply never has traffic on
-the dispatch-recv direction. No QP or credit-path fork is required. Validated
-inter-node in the source MR (see [Validation](#validation)).
+Because AFD is the same collective over the same group, every rank still participates
+in transport setup and creates the required signals and GIN contexts. Role-only receive
+slabs need not be allocated on the opposite role. For zero-copy dispatch, all ranks
+participate in the window registration sequence, but A-ranks may register a minimal
+placeholder rather than the full F-side receive slab. No QP or credit-path fork is
+required. Validated inter-node in the source MR (see [Validation](#validation)).
 
 ## Public API
 
@@ -151,16 +155,23 @@ create-AF API and no explicit attn/expert rank lists. An arbitrary rank set woul
 force an indirection table on every expert→rank mapping on the critical path, for
 no expressiveness the caller cannot get by ordering its communicator.
 
-Constraints enforced at create time:
+Constraints enforced at group creation:
 
 - `num_attn_ranks` in `[0, nRanks)`; `0` is classic homogeneous EP
-- `num_attn_ranks > 0` requires LL algorithm and Rank-Major layout
+- `num_attn_ranks > 0` requires the LL algorithm
+- `num_attn_ranks == nRanks - num_attn_ranks` (square A:F partition)
+- `num_experts > nRanks`
 - `num_experts` divisible by `nRanks - num_attn_ranks`
+
+Rank-Major layout is enforced when the handle is created or initialized.
+
+At collective call time, AFD supports only `NCCL_EP_DISP_QUANT_NONE` and
+`NCCL_EP_COMB_QUANT_NONE`; quantized AFD is not supported.
 
 ### Collectives
 
 Every rank still participates in each collective call. Optional role-named
-wrappers assert the caller's side and forward to the existing entry points:
+wrappers validate the caller's side and forward to the existing entry points:
 
 | Role | API | Forwards to |
 |---|---|---|
@@ -169,18 +180,38 @@ wrappers assert the caller's side and forward to the existing entry points:
 | F-side (rank `≥ N_a`) | `ncclEpAfRecv` | `ncclEpDispatch` |
 | F-side | `ncclEpAfReturn` | `ncclEpCombine` |
 
-The wrappers exist for call-site assertion, not for behavior. Frameworks that
-prefer to branch themselves can call `ncclEpDispatch` / `ncclEpCombine` directly
-with `num_attn_ranks` set.
+The wrappers exist for call-site validation, not for distinct collective behavior.
+Frameworks that prefer to branch themselves can call `ncclEpDispatch` /
+`ncclEpCombine` directly with `num_attn_ranks` set. The Python facade exposes the same role checks as
+`Handle.af_dispatch`, `Handle.af_recv`, `Handle.af_combine`, and
+`Handle.af_return`; the generated low-level bindings use the corresponding
+`af_dispatch`, `af_recv`, `af_combine`, and `af_return` names.
 
 Tensor I/O matches classic Rank-Major LL EP: A-side supplies tokens and receives
 combined results; F-side receives into a caller-allocated Rank-Major buffer and
-returns expert outputs.
+returns expert outputs. A-ranks omit the dispatch receive tensors
+(`outputs->tokens`, `outputs->topk_weights`, `outputs->topk_idx`, and
+`src_rank_counters`) and omit combine `inputs->tokens`; those full Rank-Major
+slabs are allocated only on F-ranks. Conversely, F-ranks omit dispatch
+`inputs->topk_weights`. On F-ranks, `src_rank_counters` retains its `[nRanks]`
+shape, but AFD writes only the active attention-source prefix
+`[0, num_attn_ranks)`; the remaining entries are unspecified and must not be
+consumed.
+
+The exception is LL dispatch zero-copy, which retains the classic `AUTO`
+contract that window attachment is consistent across ranks. Every rank enters
+the same collective `ncclCommWindowRegister` call and attaches its handle as
+`outputs->tokens`. F-ranks register the full receive slab; A-ranks use a minimal
+placeholder allocation. NCCL supports asymmetric registration sizes, and no
+dispatch payload targets the A-rank placeholder. With no attached windows, AFD
+uses the ordinary staged path. A mixed windowed/non-windowed call is unsupported,
+as it already is for classic LL EP.
 
 ## ABI
 
-`num_attn_ranks` is appended as a **V3** field of `ncclEpGroupConfig_t`, with
-`padding_v3` consuming the tail, and `NCCL_EP_API_VERSION` bumped to 3.
+`num_attn_ranks` is appended as a **V4** field of `ncclEpGroupConfig_t`, with
+`padding_v4` consuming the tail, and `NCCL_EP_API_VERSION` bumped to 4. V3 is
+already occupied by the independent dispatch/combine SM-budget fields.
 
 It deliberately does *not* claim the reserved `padding_v2`. That field is pinned as
 a frozen boundary marker by `NCCL_EP_GROUP_CONFIG_V2_LAST_FIELD` and by an
@@ -200,9 +231,10 @@ Supported in this design:
 - Rank-Major layout only, enforced by `ncclEpCreateHandle` / `ncclEpInitHandle`
   when `num_attn_ranks > 0`.
 - **Square partition**: `N_a == N_f`.
+- Unquantized dispatch and combine recipes only. Quantized AFD is a follow-up;
+  callers must use `NCCL_EP_DISP_QUANT_NONE` and `NCCL_EP_COMB_QUANT_NONE`.
 
-The square-partition limit is the one worth being explicit about, because nothing
-rejects a non-square config today beyond the shared assertions. In dispatch-recv and
+The square-partition limit is enforced at group creation. In dispatch-recv and
 combine-send, the peer rank is derived as `responsibleExpertIdx / numLocalExperts`,
 which enumerates `[0, N_f)` — a *source* A-rank in dispatch-recv, a *destination*
 A-rank in combine-send. That identification is only valid when `N_a == N_f`. A general
@@ -214,15 +246,18 @@ Follow-ups, in expected order:
 1. General `N_a:N_f` ratios (dispatch-recv / combine-send source-rank fan-out).
 2. Expert-Major layout.
 3. HT path, including a routing sidecar if preprocessing cannot reuse the LL header.
-4. Reject non-square partitions explicitly until (1) lands.
+4. Add CFT support; AFD currently rejects the optional CFT transport.
 
 ## Implementation notes
 
-`numAttnRanks` is threaded through `DispatchParams` / `CombineParams`, the LL kernel
-arg structs, and both JIT source emitters as a **runtime** argument, not a template
-parameter. This is intentional: as a template parameter it would widen the JIT cache
-key and compile a second variant of every hidden size / recipe / layout / index-width
-combination for a value that costs one register.
+`numAttnRanks` is threaded through `DispatchParams` / `CombineParams` and the LL
+kernel arg structs as a runtime value. The two rank-ownership booleans derived from it
+are burned into the JIT variant so role-inapplicable work compiles out; the numeric
+partition itself does not multiply variants for every possible rank count.
+
+Kernel selection forces AFD calls onto the universal LL implementation. The
+LSA-specialized dispatch and combine entry points neither receive nor interpret AFD
+state, which keeps their existing fast paths and ABI unchanged.
 
 ## Validation
 
@@ -231,10 +266,12 @@ The design was validated on EOS H100 in the source MR
 1-node and 2-node inter-node RDMA, 2 A-ranks + 2 F-ranks, 8 experts, `top_k=1`,
 hidden 2048 — exact bit-for-bit round-trip.
 
-`af_test.cu` is the corresponding in-tree test: A-ranks dispatch, F-ranks run an
-identity "expert" (echo `recv_x`) and return, A-ranks combine and compare. With
-`top_k == 1` and unit weights the combine is a pure identity, so any deviation from
-a bit-exact round-trip is a bug.
+`af_test.cu` is the corresponding in-tree test: A-ranks dispatch, F-ranks validate
+payload and routing metadata, run an identity "expert" (echo `recv_x`), and return;
+A-ranks validate the combined contribution from every distinct destination F-rank.
+Each iteration uses a different sentinel so the test detects stale epoch-bank reads.
+CI covers `top_k == 1`, `top_k == 8` including same-F-rank deduplication, and staged
+plus asymmetric-window `AUTO` zero-copy dispatch.
 
 The LL path in this repository has been restructured since the source MR (JIT
 kernels, quantization recipes), so the kernel edits were re-applied by hand rather
@@ -248,16 +285,16 @@ the primary evidence that the default path is untouched.
 
 ## Risks
 
-**Silent non-square misconfiguration.** A caller setting `N_a != N_f` gets no error
-today, only wrong results. Mitigation: add the explicit rejection (follow-up 4)
-before advertising AFD beyond early adopters.
+**Non-square partitions are unsupported.** Group creation rejects `N_a != N_f`.
+Supporting general ratios requires the dispatch-recv/combine-send fan-out described
+under [Scope and limits](#scope-and-limits).
 
 **Index-space drift.** Future LL changes that introduce new expert<->rank arithmetic
 will be written in whichever space is locally convenient and can miss the `+ N_a`
 translation. The failure mode is a wrong peer under AFD and nothing at all under
 classic EP, so `ep_test` will not catch it. Mitigation: keep the world-rank / F-index
-distinction named and commented at each conversion site, and run `af_test` in CI once
-a multi-rank AFD job is available.
+distinction named and commented at each conversion site, and keep the multi-rank
+`af_test` cases in CI.
 
 **Optional role wrappers.** Four wrappers that forward to two existing entry points
 are a small maintenance cost if AFD does not see uptake. Mitigation: they are pure
