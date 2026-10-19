@@ -6,6 +6,7 @@ exclusion without an explicit review.
 
 ## PLCs
 
+- [HT scan workspace ownership](ht-scan-workspace.md) — group-shared update-only metadata scan buffers.
 - [271: Low latency LSA FP8 dispatch optimization](271-ll-lsa-fp8-dispatch/README.md) — shared quantization reuse, compact block geometry, vector stores, and capacity fallback.
 - [285: LL TMA dispatch for LSA-only cases](285-ll-tma-dispatch/README.md) — warp-0 TMA stage-ring pipeline for the SEND phase, concurrent idle-warp sentinel/recv-count-buffer clear; default for LSA-eligible, unquantized, rank-major dispatch.
 - [Low-latency epoch ticketing](ll-epoch-ticketing/README.md) — graph-safe LL two-bank resource selection.
@@ -18,6 +19,7 @@ exclusion without an explicit review.
 - [MR289: Gapless source top-k order](mr289-ht-compact-topk-order/README.md) — one-pass compact receiver with source top-k order by default; `NCCL_EP_HT_RECV_TOPK_ORDER=expert-ascend` restores ascending expert order through a JIT specialization.
 - [Low-latency dispatch over CFT](ll-cft-dispatch/README.md) — single-warp counted-fabric-write payload path (`NCCL_EP_LL_CFT`); see [CFT API design](#cft-api-design) for the comparison with NCCL.
 - [302: Low-latency 1-sided combine with automatic kernel selection](302-ll-combine-1sided/README.md) — dispatch-push/combine-pull protocol, and dispatch-side on-device auto-mode pick with static/dynamic disqualification.
+- [MR298: LL CFT dispatch on the LSA rank-major kernel](298-ll-cft-lsa-dispatch/README.md) — staged and zero-copy LSA dispatch with per-source counted/ordinary completion and LSA combine.
 - [Counting-warp scan of the top-k table (CFT path)](ll-count-scan/README.md) — pipelined, branch-free per-destination token counting, selected only under `NCCL_EP_LL_CFT`; the store path keeps its scan.
 
 ## CFT API design

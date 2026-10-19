@@ -31,6 +31,11 @@ tests:
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_ht_dispatch_async"
+    matrix:
+      - name_suffix: default
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
 
   - name: test_output_layout
     binary: "@bash"
@@ -187,6 +192,12 @@ tests:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
           NCCL_EP_HT_UNFUSED_SYNC: "1"
+      - name_suffix: scan
+        env:
+          NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
 
   - name: test_ht_combine_pp_interleave
     binary: "@bash"
@@ -266,6 +277,9 @@ tests:
       - name_suffix: scan
         env:
           NCCL_EP_HT_EM_AG_SCAN_MODE: "1"
+      - name_suffix: count_unfused
+        env:
+          NCCL_EP_HT_EM_COUNT_UNFUSED: "1"
 
   - name: test_tensor_create
     binary: "@bash"
