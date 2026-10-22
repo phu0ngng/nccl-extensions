@@ -9,6 +9,13 @@
 
 include:
   - local: .gitlab/ci/nccl-build.yml
+  - project: gpucomms/cicd-platform
+    ref: main
+    file: pipelines/github-first/.github-sim-gate.yml
+
+variables:
+  CICD_PLATFORM_REF: main
+  GITHUB_SIM_PIPELINE_FILE: pipelines/nccl-extensions/.nccl-extensions-filtered-ci.yml
 
 stages:
   - nccl
@@ -105,32 +112,8 @@ nccl_ep:
       yaml_variables: true
       pipeline_variables: true
 
+github-sim:prepare:
+  stage: downstream
+
 github-sim:
   stage: downstream
-  needs: []
-  rules:
-    - if: $GITHUB_SHA
-      when: never
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      changes:
-        - "nccl_ep/**/*"
-        - "nccl_m2n/**/*"
-        - "python/**/*"
-        - "third_party/**/*"
-        - ".clang-format"
-        - ".clang-format-ignore"
-        - ".gitignore"
-        - ".gitmodules"
-        - "CONTRIBUTING.md"
-        - "LICENSE.txt"
-        - "README.md"
-        - "PUBLIC_PATHS.txt"
-  trigger:
-    include:
-      - project: gpucomms/cicd-platform
-        ref: main
-        file: pipelines/nccl-extensions/.nccl-extensions-filtered-ci.yml
-    strategy: depend
-  variables:
-    CI_INFRA_REF: main
-    MODE: sim
