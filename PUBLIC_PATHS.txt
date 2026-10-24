@@ -37,5 +37,8 @@ PUBLIC_PATHS.txt
 # Internal NCCL EP PLC design documents are never part of the public export.
 nccl_ep/docs/plc/**
 
+# Internal NCCL EP review critic skills and evidence tooling are never part of the public export.
+nccl_ep/docs/agents/reviews/**
+
 # Internal NCCL M2N PLC design documents are never part of the public export.
 nccl_m2n/docs/plc/**
