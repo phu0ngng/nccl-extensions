@@ -1,5 +1,5 @@
 # Root pipeline for the standalone NCCL Extensions repository.
-# Build NCCL once, then run the extension child pipelines.
+# Build NCCL once per platform and CUDA major, then run the child pipelines.
 #
 # Child pipelines run selectively: on a merge request pipeline a module's child
 # pipeline is triggered only when that module's own sources changed, or when
@@ -11,9 +11,8 @@ include:
   - local: .gitlab/ci/nccl-build.yml
 
 stages:
-  - build_nccl
-  - build_extensions
-  - test
+  - nccl
+  - extensions
   - downstream
 
 workflow:
@@ -29,14 +28,29 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "web"'
     - when: never
 
-build:nccl:
+build:nccl-x86-cu12:
+  extends: .build-nccl-x86-cu12
+  stage: nccl
+
+build:nccl-x86-cu13:
   extends: .build-nccl
-  stage: build_nccl
+  stage: nccl
+
+build:nccl-arm-cu13:
+  extends: .build-nccl-arm
+  stage: nccl
 
 nccl_m2n:
-  stage: build_extensions
+  stage: extensions
+  # Children define their own checkout and GPU architecture defaults.
+  inherit:
+    variables: false
   needs:
-    - job: build:nccl
+    - job: build:nccl-x86-cu12
+      artifacts: false
+    - job: build:nccl-x86-cu13
+      artifacts: false
+    - job: build:nccl-arm-cu13
       artifacts: false
   rules:
     # Non-merge-request pipelines: always run (no reliable `changes:` context).
@@ -61,9 +75,13 @@ nccl_m2n:
       pipeline_variables: true
 
 nccl_ep:
-  stage: test
+  stage: extensions
+  inherit:
+    variables: false
   needs:
-    - job: build:nccl
+    - job: build:nccl-x86-cu12
+      artifacts: false
+    - job: build:nccl-arm-cu13
       artifacts: false
   rules:
     # Non-merge-request pipelines: always run (no reliable `changes:` context).

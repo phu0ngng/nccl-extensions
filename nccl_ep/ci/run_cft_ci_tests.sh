@@ -9,9 +9,8 @@ case "${MODE}" in
 esac
 : "${SLURM_JOB_ID:?requires a Slurm allocation}"
 : "${CFT_INSTALL_DIR:?must contain the CUDA 13.4 NCCL EP build}"
-: "${CFT_CUDA_HOME:?must select the JIT toolkit inside the container}"
-: "${CFT_CONTAINER_IMAGE:?must select the CI container}"
-: "${CFT_CONTAINER_MOUNTS:?must mount the build and JIT toolkit}"
+: "${CFT_CUDA_HOME:?must select the cluster JIT toolkit}"
+: "${CFT_MPI_HOME:?must select the cluster MPI installation}"
 
 LOG_DIR="${CFT_CI_LOG_DIR:-${PWD}/cft-ci-results}"
 mkdir -p "${LOG_DIR}"
@@ -23,21 +22,21 @@ unset LD_PRELOAD
 
 SRUN=(srun --jobid="${SLURM_JOB_ID}" -N1 -n4 --ntasks-per-node=4
       --mpi=pmix --cpu-bind=none --kill-on-bad-exit=1 --export=ALL
-      --container-image="${CFT_CONTAINER_IMAGE}"
-      --container-mounts="${CFT_CONTAINER_MOUNTS}" --container-workdir="${PWD}")
+      --chdir="${PWD}")
 
-# Use container libraries and tools, not MPI or CUDA inherited from the runner.
+# Select cluster toolkits explicitly, excluding inherited CUDA compatibility or
+# stub libraries so the real host driver determines CFT API availability.
 RANK_ENV=(env -u LD_PRELOAD -u NCCL_EP_LL_CFT -u NCCL_EP_LL_CFT_DEBUG_MIN_DRIVER
-          CUDA_HOME="${CFT_CUDA_HOME}" MPI_HOME=/usr/local/openmpi
+          CUDA_HOME="${CFT_CUDA_HOME}" MPI_HOME="${CFT_MPI_HOME}"
           NCCL_HOME="${CFT_INSTALL_DIR}" NCCL_EP_HOME="${CFT_INSTALL_DIR}"
           NCCL_EP_JIT_NVCC="${CFT_CUDA_HOME}/bin/nvcc"
           NCCL_EP_JIT_SOURCE_DIR="${CFT_INSTALL_DIR}/include/nccl_ep"
           NCCL_EP_JIT_BUILD_INCLUDE_DIR="${CFT_INSTALL_DIR}/include"
           NCCL_EP_JIT_CUDA_INCLUDE_DIR="${CFT_CUDA_HOME}/include"
           NCCL_EP_JIT_CACHE_DIR="${CFT_INSTALL_DIR}/jit-${MODE}-${SLURM_JOB_ID}"
-          PATH="${CFT_CUDA_HOME}/bin:/usr/local/openmpi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          LD_LIBRARY_PATH="${CFT_INSTALL_DIR}/lib:${CFT_CUDA_HOME}/lib64:${CFT_CUDA_HOME}/lib:/usr/local/openmpi/lib"
-          OMPI_MCA_pml=ob1 "OMPI_MCA_btl=self,vader,tcp"
+          PATH="${CFT_CUDA_HOME}/bin:${CFT_MPI_HOME}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          LD_LIBRARY_PATH="${CFT_INSTALL_DIR}/lib:${CFT_CUDA_HOME}/lib64:${CFT_CUDA_HOME}/lib:${CFT_MPI_HOME}/lib:${CFT_MPI_HOME}/lib64"
+          OMPI_MCA_pml=ob1 "OMPI_MCA_btl=self,sm,tcp"
           OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_opal_cuda_support=0
           NCCL_GIN_TYPE=3
           LD_BIND_NOW=1)
@@ -49,11 +48,11 @@ run_step() {
     [[ "${cft}" == 0 ]] || transport=(NCCL_EP_LL_CFT=1 NCCL_EP_DEBUG=1)
     echo "CFT CI: ${MODE} / ${name}"
     timeout --signal=TERM --kill-after=30 "${STEP_TIMEOUT}" \
-        "${SRUN[@]}" "${RANK_ENV[@]}" "${transport[@]}" "$@" \
+        "${SRUN[@]}" "${RANK_ENV[@]}" ${transport[@]+"${transport[@]}"} "$@" \
         2>&1 | tee "${LOG_DIR}/${name}.log"
 }
 
-# shellcheck disable=SC2016 # Expand these variables inside the container.
+# shellcheck disable=SC2016 # Expand these variables in each Slurm rank.
 run_step provenance 0 bash -e -c '
     if [[ ${SLURM_PROCID} == 0 ]]; then
         cd "$NCCL_EP_HOME"

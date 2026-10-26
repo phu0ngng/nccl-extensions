@@ -23,25 +23,30 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
     - when: never
 
-build:nccl_m2n:
+.build_m2n_x86:
   extends: .ipp6-build
   stage: build
   timeout: 1h
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    GIT_SUBMODULE_PATHS: third_party/googletest
+    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13"
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl
+      job: build:nccl-x86-cu13
       artifacts: true
   script:
     - |
       set -euxo pipefail
-      test -s "${CI_PROJECT_DIR}/.ci/nccl/NCCL_COMMIT"
-      echo "Using NCCL commit $(cat "${CI_PROJECT_DIR}/.ci/nccl/NCCL_COMMIT")"
+      test -s "${NCCL_BASE_ARTIFACT_DIR}/NCCL_COMMIT"
+      echo "Using NCCL commit $(cat "${NCCL_BASE_ARTIFACT_DIR}/NCCL_COMMIT")"
       env \
-        NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl/build" \
-        MPI_HOME="/usr/local/openmpi" \
-        make -C "${CI_PROJECT_DIR}/nccl_m2n" -j"$(nproc)" \
+        NCCL_HOME="${NCCL_BASE_ARTIFACT_DIR}/build" \
+        MPI_HOME="/usr/local" \
+        make -C "${CI_PROJECT_DIR}/nccl_m2n" -j"${KUBERNETES_CPU_REQUEST}" \
         NVCC_GENCODE="$NVCC_GENCODE" \
-        GTEST_DIR="${CI_PROJECT_DIR}/.ci/googletest/googletest" \
+        GTEST_DIR="${CI_PROJECT_DIR}/third_party/googletest/googletest" \
         lib tests bench reshard reshard_batch_user_window
       test -x build/bin/multi_dim_geometry_test
       test -x build/bin/multi_dim_test_mpi
@@ -91,99 +96,85 @@ build:nccl_m2n:
       echo "All $(wc -l < "$work/declared") public entry points are annotated and exported."
   artifacts:
     when: always
-    name: "nccl-m2n-${CI_COMMIT_SHORT_SHA}"
+    name: "nccl-m2n-${CI_JOB_NAME_SLUG}-${CI_COMMIT_SHORT_SHA}"
     expire_in: 24 hours
     paths:
       - build/include/
       - build/lib/
       - build/bin/
 
-build_pretyche:
+build:x86-cu13:
+  extends: .build_m2n_x86
+
+build:x86-cu12:
+  extends:
+    - .build_m2n_x86
+    - .ipp6-x86-cu12-build
+  needs:
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: build:nccl-x86-cu12
+      artifacts: true
+  variables:
+    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12"
+
+build:arm-cu13:
+  extends: .ipp6-arm-build
   stage: build
-  tags:
-    - ptyche
   timeout: 2h
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl
+      job: build:nccl-arm-cu13
       artifacts: true
   variables:
-    CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
-    NVIDIA_VISIBLE_DEVICES: "void"
-    SLURM_PARTITION: ""
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    GIT_SUBMODULE_PATHS: third_party/googletest
+    NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"
   script:
     - |
       set -euxo pipefail
-      source "${CI_PROJECT_DIR}/.gitlab/ci/clusters/pre-tyche-config.sh"
-      current_dir="$(realpath .)"
-      build_image_version="$(get_build_image_version)"
-      container_image="$(get_build_tools_image "${build_image_version}")"
-      install_dir="${PRE_TYCHE_INSTALL_DIR}"
-      rm -rf "${install_dir}/build"
-      mkdir -p "${install_dir}/build"
-      cp -a "${CI_PROJECT_DIR}/.gitlab/ci/clusters/pre-tyche-config.sh" "${install_dir}/"
-      container_mounts="${current_dir}:/workspace,${current_dir}/.ci/nccl:/nccl,${install_dir}:/nccl_install"
-
-      srun \
-        --account="$(get_slurm_account)" \
-        -p batch \
-        -J nccl:m2n-build-base \
-        -t 01:00:00 \
-        -n 1 \
-        --exclusive \
-        --container-image="${container_image}" \
-        --container-mounts="${container_mounts}" \
-        env NVCC_GENCODE='-gencode=arch=compute_100,code=sm_100' \
-        bash -lc 'make -C /nccl -j"$(nproc)" BUILDDIR=/nccl_install/build src.build'
-
-      srun \
-        --account="$(get_slurm_account)" \
-        -p batch \
-        -J nccl:m2n-build-tests \
-        -t 01:00:00 \
-        -n 1 \
-        --exclusive \
-        --container-image="${container_image}" \
-        --container-mounts="${container_mounts}" \
-        env NCCL_HOME=/nccl_install/build \
-        MPI_HOME=/usr/local/openmpi \
-        make -C /workspace/nccl_m2n -j"$(nproc)" \
-          BUILDDIR=/nccl_install/build \
-          NVCC_GENCODE='-gencode=arch=compute_100,code=sm_100' \
-          GTEST_DIR=/workspace/.ci/googletest/googletest \
+      test -s "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/NCCL_COMMIT"
+      echo "Using ARM NCCL commit $(cat "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/NCCL_COMMIT")"
+      build_dir="${CI_PROJECT_DIR}/build"
+      env NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build" \
+        MPI_HOME=/usr/local \
+        make -C "${CI_PROJECT_DIR}/nccl_m2n" -j"${KUBERNETES_CPU_REQUEST}" \
+          BUILDDIR="${build_dir}" \
+          NVCC_GENCODE="${NVCC_GENCODE}" \
+          GTEST_DIR="${CI_PROJECT_DIR}/third_party/googletest/googletest" \
           lib tests bench reshard reshard_batch_user_window
 
-      test -x "${install_dir}/build/bin/multi_dim_geometry_test"
-      test -x "${install_dir}/build/bin/multi_dim_test_mpi"
-      test -x "${install_dir}/build/bin/basic_api_test_local"
-      test -x "${install_dir}/build/bin/basic_api_test_mpi"
-      test -x "${install_dir}/build/bin/reshard_bench"
-      test -x "${install_dir}/build/bin/reshard_batch_bench_user_window"
+      test -x "${build_dir}/bin/multi_dim_geometry_test"
+      test -x "${build_dir}/bin/multi_dim_test_mpi"
+      test -x "${build_dir}/bin/basic_api_test_local"
+      test -x "${build_dir}/bin/basic_api_test_mpi"
+      test -x "${build_dir}/bin/reshard_bench"
+      test -x "${build_dir}/bin/reshard_batch_bench_user_window"
       artifact_dir="${NCCL_M2N_ARTIFACT_STAGING:-nccl_m2n_install_artifact}"
       rm -rf "${artifact_dir}"
       mkdir -p "${artifact_dir}/bin" "${artifact_dir}/include" "${artifact_dir}/lib"
-      cp -a "${install_dir}/build/lib/libnccl_m2n.so" "${artifact_dir}/lib/"
-      cp -a "${install_dir}/build/include/nccl_m2n.h" "${artifact_dir}/include/"
-      cp -a "${install_dir}/build/bin/multi_dim_geometry_test" "${artifact_dir}/bin/"
-      cp -a "${install_dir}/build/bin/multi_dim_test_mpi" "${artifact_dir}/bin/"
-      cp -a "${install_dir}/build/bin/basic_api_test_local" "${artifact_dir}/bin/"
-      cp -a "${install_dir}/build/bin/basic_api_test_mpi" "${artifact_dir}/bin/"
-      cp -a "${install_dir}/build/bin/reshard_bench" "${artifact_dir}/bin/"
-      cp -a "${install_dir}/build/bin/reshard_batch_bench_user_window" "${artifact_dir}/bin/"
+      cp -a "${build_dir}/lib/libnccl_m2n.so" "${artifact_dir}/lib/"
+      cp -a "${build_dir}/include/nccl_m2n.h" "${artifact_dir}/include/"
+      cp -a "${build_dir}/bin/multi_dim_geometry_test" "${artifact_dir}/bin/"
+      cp -a "${build_dir}/bin/multi_dim_test_mpi" "${artifact_dir}/bin/"
+      cp -a "${build_dir}/bin/basic_api_test_local" "${artifact_dir}/bin/"
+      cp -a "${build_dir}/bin/basic_api_test_mpi" "${artifact_dir}/bin/"
+      cp -a "${build_dir}/bin/reshard_bench" "${artifact_dir}/bin/"
+      cp -a "${build_dir}/bin/reshard_batch_bench_user_window" "${artifact_dir}/bin/"
   artifacts:
     paths:
       - nccl_m2n_install_artifact/
     expire_in: 48 hours
 
-setup_eos:
+setup:eos:
   stage: setup
   tags:
     - nccl-eos
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl
+      job: build:nccl-x86-cu12
       artifacts: true
-    - job: build:nccl_m2n
+    - job: build:x86-cu12
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
@@ -193,7 +184,7 @@ setup_eos:
       dst="${EOS_INSTALL_DIR}/build"
       rm -rf "${dst}"
       mkdir -p "${dst}/bin" "${dst}/include" "${dst}/lib"
-      cp -a "${CI_PROJECT_DIR}/.ci/nccl/build/." "${dst}/"
+      cp -a "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build/." "${dst}/"
       cp -a "${CI_PROJECT_DIR}/build/lib/libnccl_m2n.so" "${dst}/lib/"
       cp -a "${CI_PROJECT_DIR}/build/include/nccl_m2n.h" "${dst}/include/"
       cp -a "${CI_PROJECT_DIR}/build/bin/multi_dim_geometry_test" "${dst}/bin/"
@@ -203,12 +194,15 @@ setup_eos:
       cp -a "${CI_PROJECT_DIR}/build/bin/reshard_bench" "${dst}/bin/"
       cp -a "${CI_PROJECT_DIR}/build/bin/reshard_batch_bench_user_window" "${dst}/bin/"
 
-setup_pretyche:
+setup:pre-tyche:
   stage: setup
   tags:
     - ptyche
   needs:
-    - job: build_pretyche
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: build:nccl-arm-cu13
+      artifacts: true
+    - job: build:arm-cu13
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
@@ -218,14 +212,16 @@ setup_pretyche:
       artifact_dir="${NCCL_M2N_ARTIFACT_DIR:-${CI_PROJECT_DIR}/nccl_m2n_install_artifact}"
       dst="${PRE_TYCHE_INSTALL_DIR}/build"
       mkdir -p "${dst}/bin" "${dst}/include" "${dst}/lib"
+      cp -a "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build/." "${dst}/"
       cp -a "${artifact_dir}/." "${dst}/"
+      cp -a "${CI_PROJECT_DIR}/.gitlab/ci/clusters/pre-tyche-config.sh" "${PRE_TYCHE_INSTALL_DIR}/"
 
-unit_test_eos:
+unit:eos:
   stage: unit_test
   tags:
     - nccl-eos
   needs:
-    - setup_eos
+    - setup:eos
   variables:
     NCCL_HOME: "${EOS_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
@@ -248,12 +244,12 @@ unit_test_eos:
         -t "${SLURM_TIME}" \
         bash nccl_m2n/ci/run_nccl_m2n_tests.sh
 
-unit_test_pretyche:
+unit:pre-tyche:
   stage: unit_test
   tags:
     - ptyche
   needs:
-    - setup_pretyche
+    - setup:pre-tyche
   variables:
     NCCL_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
@@ -282,22 +278,22 @@ unit_test_pretyche:
         -t "${SLURM_TIME}" \
         bash nccl_m2n/ci/run_nccl_m2n_tests.sh
 
-package:python_m2n:
+package:python:
   extends: .ipp6-build
   stage: package
   timeout: 1h
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl
+      job: build:nccl-x86-cu13
       artifacts: true
-    - job: build:nccl_m2n
+    - job: build:x86-cu13
       artifacts: true
   script:
     - |
       set -euxo pipefail
       env \
         CUDA_HOME=/usr/local/cuda \
-        NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl/build" \
+        NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build" \
         bash "${CI_PROJECT_DIR}/python/ci/verify_m2n_package.sh" \
         "${CI_PROJECT_DIR}/build"
   artifacts:
@@ -306,13 +302,13 @@ package:python_m2n:
     paths:
       - python/dist/
 
-integration_test_eos:
+integration:eos:
   stage: integration_test
   tags:
     - nccl-eos
   needs:
-    - setup_eos
-    - unit_test_eos
+    - setup:eos
+    - unit:eos
   variables:
     NCCL_HOME: "${EOS_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
@@ -339,13 +335,13 @@ integration_test_eos:
         -t "${SLURM_TIME}" \
         bash nccl_m2n/ci/run_nccl_m2n_mpi_tests.sh
 
-integration_test_pretyche:
+integration:pre-tyche:
   stage: integration_test
   tags:
     - ptyche
   needs:
-    - setup_pretyche
-    - unit_test_pretyche
+    - setup:pre-tyche
+    - unit:pre-tyche
   variables:
     NCCL_HOME: "${PRE_TYCHE_INSTALL_DIR}/build"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"

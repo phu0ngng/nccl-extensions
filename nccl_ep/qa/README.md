@@ -106,7 +106,7 @@ repeating `full` everywhere:
 
 - Use the VR/NVL72 target for one normal NVLink `full` run.
 - Run `bench` once for each required RDMA or MNNVL transport topology.
-- Run the dedicated `build_cft_cuda134` and `test_cft_supported` CI jobs. The
+- Run the dedicated `build:cft-cu134` and `integration:cft-polyphe` CI jobs. The
   supported job requires the CUDA 13.4 build to execute CFT successfully with
   a matching driver. These jobs use the Slurm-specific
   `nccl_ep/ci/run_cft_ci_tests.sh` flow and are not part of this standalone

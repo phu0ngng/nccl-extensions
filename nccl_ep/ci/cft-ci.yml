@@ -2,32 +2,27 @@
 .cft_ci:
   variables:
     CI_BUILDS_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/builds/${CI_JOB_SUBPATH}"
-    CFT_CONTAINER_IMAGE: "/lustre/fsw/coreai_libraries_nccl/toolkits/docker_sqsh/nccl_build_tools-2.0.0-c13.0.2-u24.04_arm.sqsh"
     CFT_CUDA_HOME: "/lustre/fsw/coreai_libraries_nccl/toolkits/cuda-13.4"
+    CFT_MPI_HOME: "/lustre/fsw/coreai_libraries_nccl/toolkits/openmpi-5.0.6"
     SLURM_ACCOUNT: "coreai_libraries_nccl"
     SLURM_PARTITION: "batch"
   before_script:
     - export CFT_INSTALL_DIR="${CI_PROJECT_DIR}/cft_install"
-    - export CFT_CONTAINER_MOUNTS="${CI_PROJECT_DIR}:${CI_PROJECT_DIR},/lustre/fsw/coreai_libraries_nccl/toolkits:/lustre/fsw/coreai_libraries_nccl/toolkits"
 
-build_cft_cuda134:
-  extends: .cft_ci
+build:cft-cu134:
+  extends: .ipp6-arm-build
   stage: build
-  tags: [polyphe]
   timeout: 2h
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl
-      artifacts: true
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    CUDA_HOME: "/usr/local/cuda"
+    MPI_HOME: "/usr/local"
+    NVCC_APPEND_FLAGS: "-lstdc++fs"
+    CFT_MOCK_DRIVER_LIB_DIR: "/usr/local/cuda/compat"
   script:
-    - >
-      srun --account="${SLURM_ACCOUNT}" -p "${SLURM_PARTITION}"
-      -N1 -n1 --cpus-per-task=32 --exclusive -t 01:00:00
-      --container-image="${CFT_CONTAINER_IMAGE}"
-      --container-mounts="${CFT_CONTAINER_MOUNTS}"
-      --container-workdir="${CI_PROJECT_DIR}"
-      env CUDA_HOME="${CFT_CUDA_HOME}"
-      bash nccl_ep/ci/build_cft_ci.sh
+    - bash nccl_ep/ci/build_cft_ci.sh
   artifacts:
     paths:
       - cft_install/include/
@@ -42,7 +37,7 @@ build_cft_cuda134:
   stage: integration_test
   timeout: 2h
   needs:
-    - job: build_cft_cuda134
+    - job: build:cft-cu134
       artifacts: true
   script:
     - >
@@ -55,17 +50,16 @@ build_cft_cuda134:
       - cft-ci-results/
     expire_in: 7 days
 
-test_cft_supported:
+integration:cft-polyphe:
   extends: .test_cft_ci
   tags: [polyphe]
   variables:
     CFT_EXPECT: supported
 
-test_cft_older_driver:
+integration:cft-pre-tyche:
   extends: .test_cft_ci
   tags: [ptyche]
   variables:
     CFT_EXPECT: missing-api
-    CFT_CONTAINER_IMAGE: "/lustre/fsw/coreai_libraries_nccl/toolkits/docker_sqsh/nccl_build_tools-2.0.0-c13.0.2-u24.04.sqsh"
     # The artifact retains its CUDA 13.4 runtime; STORE kernels use this JIT toolkit.
-    CFT_CUDA_HOME: "/usr/local/cuda"
+    CFT_CUDA_HOME: "/lustre/fsw/coreai_libraries_nccl/toolkits/cuda-13.0"

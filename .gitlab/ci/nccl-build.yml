@@ -1,4 +1,4 @@
-# Shared NCCL source-build template used independently by each child pipeline.
+# Shared NCCL source-build template; the parent publishes artifacts to children.
 
 default:
   interruptible: true
@@ -16,39 +16,112 @@ variables:
   FF_USE_FASTZIP: "true"
   FF_ENABLE_JOB_CLEANUP: "true"
   FF_TIMESTAMPS: "true"
-  NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_100a,code=sm_100a"
+  # Active x86 downstream tests run on EOS (H100). ARM jobs set sm_100 below.
+  NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90"
 
 .ipp6-build:
-  image: gitlab-master.nvidia.com:5005/nccl/nccl-images/ci:2.32-c12.9.0
+  image: gitlab-master.nvidia.com:5005/nccl/nccl/ci:2.32-c13.4.2
   tags:
     - ipp6-k8s
   variables:
     KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
-    KUBERNETES_CPU_REQUEST: 14
+    KUBERNETES_CPU_REQUEST: 32
     KUBERNETES_CPU_LIMIT: 32
     KUBERNETES_MEMORY_REQUEST: 64Gi
     KUBERNETES_MEMORY_LIMIT: 128Gi
 
+.ipp6-x86-cu12-build:
+  extends: .ipp6-build
+  image: gitlab-master.nvidia.com:5005/nccl/nccl/ci:2.32-c12.9.0
+
+.ipp6-arm-build:
+  extends: .ipp6-build
+  image: gitlab-master.nvidia.com:5005/nccl/nccl/ci:2.32-c13.4.2
+  tags:
+    - ipp6-k8s-arm
+  variables:
+    KUBE_NODE_SELECTOR: kubernetes.io/arch=arm64
+    KUBERNETES_CPU_REQUEST: 96
+    KUBERNETES_CPU_LIMIT: 96
+    KUBERNETES_MEMORY_REQUEST: 450Gi
+    KUBERNETES_MEMORY_LIMIT: 450Gi
+
 .build-nccl:
   extends: .ipp6-build
   timeout: 1h
+  # Share across pipelines, including branches within GitLab's protection boundary.
+  # The script validates the submodule and toolchain before using restored output.
+  # Runner storage must persist (or have distributed caching) for cache hits.
+  cache:
+    key:
+      prefix: nccl-build-x86-cu13-v1
+      files:
+        - .gitlab/ci/nccl-build.yml
+        - .gitlab/ci/build-nccl.sh
+    paths:
+      - .ci/nccl-build-cache/
+    policy: pull-push
+    when: on_success
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
     GIT_SUBMODULE_DEPTH: "1"
+    GIT_SUBMODULE_PATHS: third_party/nccl
+    NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu13
   script:
     - |
       set -euxo pipefail
       NCCL_COMMIT="$(git -C third_party/nccl rev-parse HEAD)"
       echo "Building public NCCL at ${NCCL_COMMIT}"
-      test -f third_party/googletest/googletest/src/gtest-all.cc
-      make -C third_party/nccl -j"$(nproc)" NVCC_GENCODE="${NVCC_GENCODE}" src.build
-      mkdir -p .ci
-      cp -a third_party/nccl .ci/nccl
-      cp -a third_party/googletest .ci/googletest
-      printf '%s\n' "${NCCL_COMMIT}" > .ci/nccl/NCCL_COMMIT
+      bash .gitlab/ci/build-nccl.sh
+      mkdir -p "${NCCL_ARTIFACT_DIR}"
+      cp -a .ci/nccl-build-cache/build "${NCCL_ARTIFACT_DIR}/"
+      printf '%s\n' "${NCCL_COMMIT}" > "${NCCL_ARTIFACT_DIR}/NCCL_COMMIT"
   artifacts:
-    name: "nccl-${CI_COMMIT_SHORT_SHA}"
+    name: "${CI_JOB_NAME_SLUG}-${CI_COMMIT_SHORT_SHA}"
     expire_in: 24 hours
     paths:
-      - .ci/nccl/
-      - .ci/googletest/
+      - "${NCCL_ARTIFACT_DIR}/"
+
+.build-nccl-x86-cu12:
+  extends:
+    - .build-nccl
+    - .ipp6-x86-cu12-build
+  variables:
+    NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu12
+  cache:
+    key:
+      prefix: nccl-build-x86-cu12-v1
+
+.build-nccl-arm:
+  extends: .ipp6-arm-build
+  timeout: 2h
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    GIT_SUBMODULE_PATHS: third_party/nccl
+    # The ARM artifact feeds GB200 jobs on Pre-Tyche.
+    NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"
+  cache:
+    key:
+      prefix: nccl-build-arm-cu13-v1
+      files:
+        - .gitlab/ci/nccl-build.yml
+        - .gitlab/ci/build-nccl.sh
+    paths:
+      - .ci/nccl-build-cache/
+    policy: pull-push
+    when: on_success
+  script:
+    - |
+      set -euxo pipefail
+      NCCL_COMMIT="$(git -C third_party/nccl rev-parse HEAD)"
+      echo "Building public NCCL for ARM at ${NCCL_COMMIT}"
+      bash .gitlab/ci/build-nccl.sh
+      mkdir -p .ci/nccl-arm-cu13
+      cp -a .ci/nccl-build-cache/build .ci/nccl-arm-cu13/
+      printf '%s\n' "${NCCL_COMMIT}" > .ci/nccl-arm-cu13/NCCL_COMMIT
+  artifacts:
+    name: "nccl-arm-cu13-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 24 hours
+    paths:
+      - .ci/nccl-arm-cu13/
