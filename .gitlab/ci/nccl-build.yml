@@ -1,4 +1,7 @@
 # Shared NCCL source-build template; the parent publishes artifacts to children.
+# build-nccl.sh caches finished output in this project's generic package registry
+# (package NCCL_CACHE_PACKAGE, one version per NCCL commit, arch and toolchain
+# fingerprint); NCCL_CACHE=0 builds without restoring or publishing.
 
 default:
   interruptible: true
@@ -49,24 +52,13 @@ variables:
 .build-nccl:
   extends: .ipp6-build
   timeout: 1h
-  # Share across pipelines, including branches within GitLab's protection boundary.
-  # The script validates the submodule and toolchain before using restored output.
-  # Runner storage must persist (or have distributed caching) for cache hits.
-  cache:
-    key:
-      prefix: nccl-build-x86-cu13-v1
-      files:
-        - .gitlab/ci/nccl-build.yml
-        - .gitlab/ci/build-nccl.sh
-    paths:
-      - .ci/nccl-build-cache/
-    policy: pull-push
-    when: on_success
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
     GIT_SUBMODULE_DEPTH: "1"
     GIT_SUBMODULE_PATHS: third_party/nccl
     NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu13
+    NCCL_CACHE: "1"
+    NCCL_CACHE_PACKAGE: nccl-ci-build-cache
   script:
     - |
       set -euxo pipefail
@@ -88,40 +80,13 @@ variables:
     - .ipp6-x86-cu12-build
   variables:
     NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu12
-  cache:
-    key:
-      prefix: nccl-build-x86-cu12-v1
 
 .build-nccl-arm:
-  extends: .ipp6-arm-build
+  extends:
+    - .build-nccl
+    - .ipp6-arm-build
   timeout: 2h
   variables:
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_DEPTH: "1"
-    GIT_SUBMODULE_PATHS: third_party/nccl
+    NCCL_ARTIFACT_DIR: .ci/nccl-arm-cu13
     # The ARM artifact feeds GB200 jobs on Pre-Tyche.
     NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"
-  cache:
-    key:
-      prefix: nccl-build-arm-cu13-v1
-      files:
-        - .gitlab/ci/nccl-build.yml
-        - .gitlab/ci/build-nccl.sh
-    paths:
-      - .ci/nccl-build-cache/
-    policy: pull-push
-    when: on_success
-  script:
-    - |
-      set -euxo pipefail
-      NCCL_COMMIT="$(git -C third_party/nccl rev-parse HEAD)"
-      echo "Building public NCCL for ARM at ${NCCL_COMMIT}"
-      bash .gitlab/ci/build-nccl.sh
-      mkdir -p .ci/nccl-arm-cu13
-      cp -a .ci/nccl-build-cache/build .ci/nccl-arm-cu13/
-      printf '%s\n' "${NCCL_COMMIT}" > .ci/nccl-arm-cu13/NCCL_COMMIT
-  artifacts:
-    name: "nccl-arm-cu13-${CI_COMMIT_SHORT_SHA}"
-    expire_in: 24 hours
-    paths:
-      - .ci/nccl-arm-cu13/

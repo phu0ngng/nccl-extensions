@@ -47,6 +47,26 @@ build:nccl-arm-cu13:
   extends: .build-nccl-arm
   stage: nccl
 
+# Unit tests for the CI scripts under .gitlab/ci/tests; toolchain and registry are shimmed.
+test:ci-unit:
+  stage: nccl
+  image: python:3.12-slim
+  tags:
+    - ipp6-k8s
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+    KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
+    KUBERNETES_CPU_REQUEST: 2
+    KUBERNETES_CPU_LIMIT: 2
+    KUBERNETES_MEMORY_REQUEST: 2Gi
+    KUBERNETES_MEMORY_LIMIT: 2Gi
+  rules:
+    - changes:
+        - .gitlab/ci/**/*
+  script:
+    - python3 -m unittest discover -s .gitlab/ci/tests -v
+
 nccl_m2n:
   stage: extensions
   # Children define their own checkout and GPU architecture defaults.
