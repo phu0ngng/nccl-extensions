@@ -101,6 +101,22 @@ tests:
       - {name_suffix: em_4096_bf16, args: "--algorithm high-throughput --layout em --tokens 4096 ${common} --datatype bf16"}
       - {name_suffix: em_4096_fp16, args: "--algorithm high-throughput --layout em --tokens 4096 ${common} --datatype fp16"}
 
+  - name: ep_bench_high_throughput_metadata
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    args: "--algorithm high-throughput --tokens 128 ${common}"
+    labels: [high_throughput, metadata]
+    matrix:
+      - {name_suffix: flat_fused, args_append: "--layout fl --meta-exchange-policy require-fused"}
+      - {name_suffix: em_fused, args_append: "--layout em --meta-exchange-policy require-fused"}
+      - {name_suffix: flat_unfused, args_append: "--layout fl --unfused-meta-dispatch"}
+      - {name_suffix: em_unfused, args_append: "--layout em --unfused-meta-dispatch"}
+      - {name_suffix: em_force_scan, args_append: "--layout em --meta-exchange-policy force-scan"}
+      - name_suffix: flat_count_unfused
+        args_append: "--layout fl"
+        env:
+          NCCL_EP_HT_COUNT_UNFUSED: "1"
+
   - name: ep_bench_high_throughput_variant
     binary: nccl_ep/ep_bench
     features: [nccl_ep_ht]
@@ -116,16 +132,21 @@ tests:
     args: "--algorithm high-throughput --layout fl --tokens 128 ${common} --dispatch-only --zcopy --dispatch-quantization scales-forward --scales-forward-token-dtype fp4x2 --scales-forward-scale-dtype uint8"
     labels: [high_throughput, quantization, zcopy]
 
+  - name: ep_bench_high_throughput_push_pull
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    args: "--algorithm high-throughput --tokens 4096 ${common} --ht-flow push-pull"
+    labels: [high_throughput, push_pull]
+    matrix:
+      - {name_suffix: em_bf16, args_append: "--layout em"}
+      - {name_suffix: flat_bf16, args_append: "--layout fl"}
+
   - name: ep_bench_high_throughput_pull_push
     binary: nccl_ep/ep_bench
     features: [nccl_ep_ht]
-    args: "--algorithm high-throughput --layout em --tokens 4096 ${common}"
-    env:
-      NCCL_EP_HT_PULL_PUSH: "1"
+    args: "--algorithm high-throughput --layout em --tokens 4096 ${common} --ht-flow pull-push"
     labels: [high_throughput, pull_push]
     matrix:
-      - {name_suffix: bf16}
-      - {name_suffix: flat_bf16, args: "--algorithm high-throughput --layout fl --tokens 4096 ${common}"}
       - {name_suffix: mxfp8, args_append: "--dispatch-only --mxfp8"}
 
   - name: ep_bench_high_throughput_fp32
