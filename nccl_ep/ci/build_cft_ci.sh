@@ -51,7 +51,10 @@ EP_BUILD=(make -C "${ROOT}/nccl_ep" -j"${BUILD_JOBS}" CUDA_HOME="${CUDA_HOME}"
 
 make -C "${ROOT}/nccl_ep/tests" -j"${BUILD_JOBS}" NVCC="${CUDA_HOME}/bin/nvcc" \
   NCCL_HOME="${INSTALL}" BUILDDIR="${INSTALL}" GTEST_DIR="${GTEST_SOURCE}" \
-  NVCC_GENCODE="${GENCODE}" "${INSTALL}/test/nccl_ep/test_cft_driver_api"
+  NVCC_GENCODE="${GENCODE}" "${INSTALL}/test/nccl_ep/test_cft_driver_api" \
+  "${INSTALL}/test/nccl_ep/test_ht_chunk_config"
+NCCL_EP_BUILDDIR="${INSTALL}" TEST_SUITE=test_ht_chunk_config \
+  bash "${ROOT}/nccl_ep/tests/run_tests.sh"
 
 # GPU-free builders still need a loadable driver library for the mocked tests.
 # Scope the compatibility library to this process; real GPU tests use host drivers.
