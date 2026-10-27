@@ -117,6 +117,17 @@ tests:
         env:
           NCCL_EP_HT_COUNT_UNFUSED: "1"
 
+  - name: ep_bench_high_throughput_recv_budget
+    binary: nccl_ep/ep_bench
+    features: [nccl_ep_ht]
+    args: "--algorithm high-throughput --tokens 128 ${common}"
+    labels: [high_throughput, recv_budget]
+    matrix:
+      - {name_suffix: em_aligned, args_append: "--layout em --expert-major-alignment 128"}
+      - {name_suffix: flat_explicit, args_append: "--layout fl --max-recv-token-slots-per-rank 1408"}
+      - {name_suffix: em_explicit, args_append: "--layout em --max-recv-token-slots-per-rank 1408"}
+      - {name_suffix: em_staged_dup, args_append: "--layout em --ht-em-mode local_dup"}
+
   - name: ep_bench_high_throughput_variant
     binary: nccl_ep/ep_bench
     features: [nccl_ep_ht]
