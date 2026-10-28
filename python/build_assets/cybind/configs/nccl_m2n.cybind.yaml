@@ -2,7 +2,7 @@ nccl_m2n:
   module: nccl._extensions.bindings.nccl_m2n
   data:
     versions:
-    - - 0.2.0
+    - - 0.3.1
     headers:
     - nccl_m2n.h
     patterns:
