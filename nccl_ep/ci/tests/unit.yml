@@ -113,6 +113,18 @@ tests:
           NCCL_EP_HT_PULL_PUSH: "1"
           NCCL_LSA_TEAM_SIZE: "4"
 
+  # The LSA-CFT selection switch is read once per process, so both selector rules need their own run.
+  - name: test_ll_kernel_selection
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ll_kernel_selection"
+    matrix:
+      - name_suffix: default
+      - name_suffix: cft_lsa_off
+        env:
+          NCCL_EP_LL_CFT_LSA: "0"
+
   - name: test_public_struct_abi
     binary: "@bash"
     args: >-
