@@ -315,6 +315,25 @@ run_benchmark_suite() {
     --algorithm low-latency --layout rm --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
     --validate --dispatch-only --zcopy --dispatch-quantization scales-forward \
     --scales-forward-token-dtype fp4x2 --scales-forward-scale-dtype uint8
+  # Rank-major forwarded scales through the LSA kernels: staged TMA (8-bit and bf16-typed packed rows),
+  # zero-copy TMA, and the SIMT STORE kernel.
+  run_mpi_case bench-ll-quant-rm-fp8-fp32 "${CASE_TIMEOUT}" "${EP_BENCH}" \
+    --algorithm low-latency --layout rm --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
+    --validate --dispatch-only --dispatch-quantization scales-forward \
+    --scales-forward-token-dtype fp8e4m3 --scales-forward-scale-dtype fp32
+  run_mpi_case bench-ll-quant-rm-bf16-fp16 "${CASE_TIMEOUT}" "${EP_BENCH}" \
+    --algorithm low-latency --layout rm --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
+    --validate --dispatch-only --dispatch-quantization scales-forward \
+    --scales-forward-token-dtype bf16 --scales-forward-scale-dtype fp16
+  run_mpi_case bench-ll-zcopy-rm-bf16-fp16 "${CASE_TIMEOUT}" "${EP_BENCH}" \
+    --algorithm low-latency --layout rm --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
+    --validate --dispatch-only --zcopy --dispatch-quantization scales-forward \
+    --scales-forward-token-dtype bf16 --scales-forward-scale-dtype fp16
+  run_case bench-ll-quant-rm-simt-bf16-fp16 "${CASE_TIMEOUT}" env NCCL_EP_DISPATCH_LSA=simt \
+    "${MPI_CMD[@]}" "${EP_BENCH}" \
+    --algorithm low-latency --layout rm --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
+    --validate --dispatch-only --dispatch-quantization scales-forward \
+    --scales-forward-token-dtype bf16 --scales-forward-scale-dtype fp16
   run_mpi_case bench-ll-ds-fp8 "${CASE_TIMEOUT}" "${EP_BENCH}" \
     --algorithm low-latency --layout em --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
     --validate --dispatch-only --dispatch-quantization ds-fp8e3m4
