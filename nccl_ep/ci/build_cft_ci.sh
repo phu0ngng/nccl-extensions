@@ -11,13 +11,28 @@ export LD_LIBRARY_PATH="${INSTALL}/lib:${CUDA_HOME}/lib64:${MPI_HOME}/lib:${LD_L
 GENCODE='-gencode=arch=compute_100,code=sm_100'
 NCCL_SOURCE="${NCCL_CI_SOURCE:-${ROOT}/third_party/nccl}"
 GTEST_SOURCE="${GTEST_CI_SOURCE:-${ROOT}/third_party/googletest/googletest}"
+# The parent's "build:nccl: [arm, cu13]" artifact (same image and gencode); unset builds NCCL here.
+NCCL_PREBUILT_DIR="${NCCL_PREBUILT_DIR:-}"
 
 BUILD_JOBS="${KUBERNETES_CPU_REQUEST:-$(nproc)}"
 echo "build host: $(uname -m), parallel jobs=${BUILD_JOBS}"
 mkdir -p "${INSTALL}"
 nvcc --version
-make -C "${NCCL_SOURCE}" -j"${BUILD_JOBS}" CUDA_HOME="${CUDA_HOME}" \
-  BUILDDIR="${INSTALL}" NVCC_GENCODE="${GENCODE}" src.build
+if [[ -n "${NCCL_PREBUILT_DIR}" ]]; then
+  mkdir -p "${INSTALL}/include" "${INSTALL}/lib"
+  cp -a "${NCCL_PREBUILT_DIR}/include/." "${INSTALL}/include/"
+  cp -a "${NCCL_PREBUILT_DIR}/lib/." "${INSTALL}/lib/"
+  if [[ -d "${NCCL_PREBUILT_DIR}/bin" ]]; then
+    mkdir -p "${INSTALL}/bin"
+    cp -a "${NCCL_PREBUILT_DIR}/bin/." "${INSTALL}/bin/"
+  fi
+  test -s "${INSTALL}/include/nccl.h"
+  test -e "${INSTALL}/lib/libnccl.so"
+  echo "NCCL restored from prebuilt directory ${NCCL_PREBUILT_DIR}"
+else
+  make -C "${NCCL_SOURCE}" -j"${BUILD_JOBS}" CUDA_HOME="${CUDA_HOME}" \
+    BUILDDIR="${INSTALL}" NVCC_GENCODE="${GENCODE}" src.build
+fi
 # Correctness jobs do not need a CUPTI dependency on the older driver.
 EP_BUILD=(make -C "${ROOT}/nccl_ep" -j"${BUILD_JOBS}" CUDA_HOME="${CUDA_HOME}"
   NCCL_HOME="${INSTALL}" NCCL_SUBMODULE_HOME="${NCCL_SOURCE}"
@@ -49,9 +64,21 @@ LD_LIBRARY_PATH="${mock_library_path}" \
 NCCL_EP_BUILDDIR="${INSTALL}" TEST_SUITE=test_cft_driver_api \
   bash "${ROOT}/nccl_ep/tests/run_tests.sh"
 
+# A prebuilt NCCL is identified by the artifact's NCCL_COMMIT beside its build directory.
+nccl_commit() {
+  local commit_file=""
+  if [[ -n "${NCCL_PREBUILT_DIR}" ]]; then
+    commit_file="$(dirname "${NCCL_PREBUILT_DIR}")/NCCL_COMMIT"
+  fi
+  if [[ -n "${commit_file}" && -s "${commit_file}" ]]; then
+    cat "${commit_file}"
+  else
+    git -C "${NCCL_SOURCE}" rev-parse HEAD
+  fi
+}
 {
   git -C "${ROOT}" rev-parse HEAD
-  git -C "${NCCL_SOURCE}" rev-parse HEAD
+  nccl_commit
   nvcc --version
 } > "${INSTALL}/provenance.txt"
 (

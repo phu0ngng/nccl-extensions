@@ -72,6 +72,13 @@ against that NCCL installation. Otherwise, each source checkout builds and uses
 its own vendored NCCL revision in a temporary directory. Each target is staged
 after its build succeeds.
 
+`--build-dir PATH` builds in `PATH` instead of a temporary directory and keeps
+it, so make's `lib/`, `include/` and `obj/` tree remains for building test
+binaries against the same library; the directory is created if missing and
+reused, never deleted, on later runs. Reuse is make's: a changed `CUDA_HOME`,
+`NVCC_GENCODE` or `NCCL_HOME` is not detected, so use one directory per
+configuration (CI starts every job from an empty tree).
+
 The installed build layout is preserved below each target's package:
 
 ```text

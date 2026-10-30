@@ -1,8 +1,6 @@
-# Standalone port of NCCL's contrib/nccl_ep child pipeline.
-# Reference: NCCL commit 540cf9684e99a7b3444dade0a54e827c68a3adc0.
+# Builds live in the parent pipeline; this child installs and tests its artifacts.
 
 stages:
-  - build
   - setup
   - unit_test
   - integration_test
@@ -26,15 +24,11 @@ variables:
   EOS_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/eos"
   PRE_NYX_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-nyx"
   PRE_TYCHE_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/pre-tyche"
-  IPP6_INSTALL_DIR: "/storage/gitlab-runner/nccl/install/${CI_PIPELINE_ID}"
 
   EOS_NVSUBMIT_LOG_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
   PRE_NYX_NVSUBMIT_LOG_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
   PRE_TYCHE_NVSUBMIT_LOG_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
-  IPP6_NVSUBMIT_LOG_DIR: "/storage/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}"
 
-  IPP6_SLURM_PARTITION: "a100-cicd"
-  IPP6_CUDA_HOME: "/storage/toolkits/cuda-12.9"
   MPI_HOME: "/usr/local/openmpi"
 
   EOS_CUDA_HOME: "/lustre/fsw/coreai_libraries_nccl/toolkits/cuda-12.8.0"
@@ -51,112 +45,6 @@ workflow:
 
 
 ##
-## Stage: build
-##
-
-.build_ep:
-  extends: .ipp6-build
-  stage: build
-  timeout: 2h
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu13
-      artifacts: true
-  variables:
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_DEPTH: "1"
-    GIT_SUBMODULE_PATHS: third_party/googletest
-    NCCL_HOME: "${CI_PROJECT_DIR}/build"
-    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build"
-    MPI_HOME: "/usr/local"
-    # UBI8 needs this library for std::filesystem in shared and static EP links.
-    NVCC_APPEND_FLAGS: "-lstdc++fs"
-    LIBRARY_PATH: "/usr/local/cuda/lib64/stubs"
-  script:
-    - |
-      set -euxo pipefail
-      rm -rf "${NCCL_HOME}"
-      mkdir -p "${NCCL_HOME}"
-      cp -a "${NCCL_BASE_ARTIFACT_DIR}/." "${NCCL_HOME}/"
-
-      EP_BUILD=(make -C "${CI_PROJECT_DIR}/nccl_ep" -j"${KUBERNETES_CPU_REQUEST}"
-        MPI=1 MPI_HOME="${MPI_HOME}" BUILDDIR="${NCCL_HOME}"
-        NVCC_GENCODE="${NVCC_GENCODE}")
-      # Finish shared-library symlinks before parallel executable links start.
-      "${EP_BUILD[@]}" lib
-      "${EP_BUILD[@]}" ep_test ep_bench af_test
-
-      env NCCL_HOME="${NCCL_HOME}" \
-        make -C "${CI_PROJECT_DIR}/nccl_ep/tests" -j"${KUBERNETES_CPU_REQUEST}" \
-          BUILDDIR="${NCCL_HOME}" \
-          GTEST_DIR="${CI_PROJECT_DIR}/third_party/googletest/googletest" \
-          NVCC_GENCODE="${NVCC_GENCODE}"
-
-      ART="${NCCL_EP_ARTIFACT_STAGING:-nccl_ep_install_artifact}"
-      rm -rf "${ART}"
-      mkdir -p "${ART}/lib" "${ART}/include" "${ART}/test/nccl_ep"
-      cp -a "${NCCL_HOME}/lib"/libnccl_ep.* "${ART}/lib/"
-      cp -a "${NCCL_HOME}/include/nccl_ep.h" "${ART}/include/"
-      cp -a "${NCCL_HOME}/include/nccl_ep" "${ART}/include/"
-      cp -a "${NCCL_HOME}/test/nccl_ep/ep_test" "${NCCL_HOME}/test/nccl_ep/ep_bench" "${NCCL_HOME}/test/nccl_ep/af_test" "${ART}/test/nccl_ep/"
-      for unit_test in "${NCCL_HOME}/test/nccl_ep"/test_*; do
-        if [[ -f "${unit_test}" && -x "${unit_test}" ]]; then
-          cp -a "${unit_test}" "${ART}/test/nccl_ep/"
-        fi
-      done
-  artifacts:
-    paths:
-      - nccl_ep_install_artifact/
-    expire_in: 48 hours
-
-build:x86-cu13:
-  extends: .build_ep
-  # EOS consumes x86-cu12; no active job consumes this variant yet.
-  rules:
-    - when: never
-
-build:x86-cu12:
-  extends:
-    - .build_ep
-    - .ipp6-x86-cu12-build
-  # The internal NCCL CI image uses UBI8/GCC 8 and requires the legacy
-  # libstdc++fs archive for std::filesystem. When Python loads that EP library
-  # alongside EOS's newer libstdc++, incompatible filesystem symbols can mix,
-  # causing crashes in std::filesystem::path destruction during JIT setup.
-  # Build EP with Ubuntu 22.04 instead: its standard libstdc++ provides
-  # std::filesystem without that archive. Keep this override scoped to EP;
-  # the NCCL dependency still comes from the internal image's build artifact.
-  image: nvidia/cuda:12.9.2-devel-ubuntu22.04
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu12
-      artifacts: true
-  variables:
-    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build"
-    MPI_HOME: "/usr/lib/x86_64-linux-gnu/openmpi"
-    NVCC_APPEND_FLAGS: ""
-  before_script:
-    - apt-get update
-    - >
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
-      build-essential
-      libopenmpi-dev
-      openmpi-bin
-
-build:arm-cu13:
-  extends:
-    - .build_ep
-    - .ipp6-arm-build
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-arm-cu13
-      artifacts: true
-  variables:
-    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build"
-    NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"
-
-
-##
 ## Stage: setup
 ##
 
@@ -164,13 +52,15 @@ build:arm-cu13:
   stage: setup
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu12
+      job: "build:nccl: [x86, cu12]"
       artifacts: true
-    - job: build:x86-cu12
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: "build:ep: [x86, cu12]"
       artifacts: true
   variables:
     GIT_STRATEGY: clone
     NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build"
+    NCCL_EP_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/ep-x86-cu12"
   script:
     - |
       set -euxo pipefail
@@ -213,15 +103,6 @@ setup:eos:
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
 
-setup:ipp6:
-  extends: .setup_base
-  rules:
-    - when: never
-  tags:
-    - ipp6-nccl
-  variables:
-    NCCL_EP_MERGE_TARGET: "${IPP6_INSTALL_DIR}/${CI_JOB_ID}/build"
-
 setup:pre-nyx:
   extends: .setup_base
   rules:
@@ -238,15 +119,17 @@ setup:pre-tyche:
   extends: .setup_base
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-arm-cu13
+      job: "build:nccl: [arm, cu13]"
       artifacts: true
-    - job: build:arm-cu13
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: "build:ep: [arm, cu13]"
       artifacts: true
   tags:
     - ptyche
   variables:
     NCCL_EP_MERGE_TARGET: "${PRE_TYCHE_INSTALL_DIR}/${CI_JOB_ID}/build"
     NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build"
+    NCCL_EP_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/ep-arm-cu13"
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
     NCCL_CLUSTER_CONFIG_SOURCE: "${CI_PROJECT_DIR}/.gitlab/ci/clusters/pre-tyche-config.sh"
     NCCL_CLUSTER_CONFIG_TARGET: "${PRE_TYCHE_INSTALL_DIR}/${CI_JOB_ID}/pre-tyche-config.sh"
@@ -328,19 +211,6 @@ unit:pre-tyche:
       junit: junit_results.xml
     expire_in: 48 hours
 
-integration:ipp6:
-  extends: .nvsubmit_integration
-  rules:
-    - when: never
-  needs:
-    - job: setup:ipp6
-      artifacts: true
-  tags:
-    - ipp6-nccl
-  variables:
-    NVSUBMIT_CLUSTER_CONFIG: "nccl_ep/ci/systems/ipp6.yml"
-    NVSUBMIT_LOG_DIR: "${IPP6_NVSUBMIT_LOG_DIR}"
-
 integration:eos:
   extends: .nvsubmit_integration
   tags:
@@ -421,7 +291,7 @@ integration:pre-tyche:
       set -euxo pipefail
       : "${CI_PIPELINE_ID:?}"
       : "${CLEANUP_INSTALL_DIR:?}"
-      # Only delete this pipeline's cluster install, including setup/build retries.
+      # Only delete this pipeline's cluster install, including setup retries.
       case "${CLEANUP_INSTALL_DIR}" in
         /*/install/"${CI_PIPELINE_ID}"/eos|\
         /*/install/"${CI_PIPELINE_ID}"/pre-nyx|\
@@ -436,8 +306,6 @@ cleanup:eos:
   tags:
     - nccl-eos
   needs:
-    - job: build:x86-cu12
-      artifacts: false
     - job: setup:eos
       artifacts: false
     - job: unit:eos
@@ -454,10 +322,6 @@ cleanup:pre-tyche:
   tags:
     - ptyche
   needs:
-    - job: build:cft-cu134
-      artifacts: false
-    - job: build:arm-cu13
-      artifacts: false
     - job: setup:pre-tyche
       artifacts: false
     - job: unit:pre-tyche
@@ -476,27 +340,9 @@ cleanup:pre-nyx:
   tags:
     - prenyx
   needs:
-    - job: build:x86-cu12
-      artifacts: false
     - job: setup:pre-nyx
       artifacts: false
     - job: integration:pre-nyx
       artifacts: false
   variables:
     CLEANUP_INSTALL_DIR: "${PRE_NYX_INSTALL_DIR}"
-
-cleanup:ipp6:
-  extends: .cleanup_install
-  rules:
-    - when: never
-  tags:
-    - ipp6-nccl
-  needs:
-    - job: build:x86-cu12
-      artifacts: false
-    - job: setup:ipp6
-      artifacts: false
-    - job: integration:ipp6
-      artifacts: false
-  variables:
-    CLEANUP_INSTALL_DIR: "${IPP6_INSTALL_DIR}"

@@ -97,13 +97,21 @@ class Target:
     resolved_version: Version
     build_dir: Path
 
-    def __init__(self, selection: str, staging_dir: Path) -> None:
-        """Create a target from a validated ``LIB[@VERSION]`` selector."""
+    def __init__(
+        self, selection: str, staging_dir: Path, build_dir: Path | None = None
+    ) -> None:
+        """Create a target from a validated ``LIB[@VERSION]`` selector.
+
+        ``build_dir`` is a caller-owned make tree shared by all targets; without
+        it the target builds under ``staging_dir`` and is discarded with it.
+        """
         name, separator, version_text = selection.partition("@")
         self.name = name
         self.spec = TARGETS[name]
         self.requested_version = Version(version_text) if separator else None
-        self.build_dir = staging_dir / f"{self.name}_build"
+        self.build_dir = (
+            build_dir if build_dir is not None else staging_dir / f"{self.name}_build"
+        )
 
     def resolve_version(self, root: Path) -> None:
         """Resolve and validate this target's version from its source header."""
@@ -340,6 +348,16 @@ def main() -> int:
         default=None,
         help="Path to CUDA installation (default: $CUDA_PATH or $CUDA_HOME)",
     )
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Build in this directory and keep it, in make's lib/, include/ and "
+            "obj/ layout; shared by all selected targets and reused when it "
+            "exists (default: a temporary directory deleted after staging)"
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -377,12 +395,18 @@ def main() -> int:
         logger.info(f">>> Using NCCL_HOME={external_nccl_home} for all targets")
 
     output_dir = args.output_dir.expanduser().resolve()
+    build_dir = args.build_dir.expanduser().resolve() if args.build_dir else None
+    if build_dir is not None:
+        build_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f">>> Building in {build_dir} (kept after staging)")
     targets: list[Target] = []
     prepared_nccl_homes: dict[Path, Path] = {}
+    # The temporary directory still holds release worktrees and vendored NCCL
+    # builds; only the targets' make tree moves to --build-dir.
     with tempfile.TemporaryDirectory(prefix="nccl_extensions_build_") as tmp:
         staging_dir = Path(tmp)
         for selection in args.targets:
-            target = Target(selection, staging_dir)
+            target = Target(selection, staging_dir, build_dir)
             if target.requested_version is None:
                 logger.info(f">>> [{target.name}] using current checkout")
                 source: AbstractContextManager[Path] = nullcontext(REPO_ROOT)

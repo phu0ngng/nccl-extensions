@@ -2,14 +2,13 @@
 
 The EP child pipeline runs all test jobs through nvsubmit 0.3.5 and publishes
 JUnit results. Log paths are configured separately for each cluster through
-`EOS_NVSUBMIT_LOG_DIR`, `PRE_TYCHE_NVSUBMIT_LOG_DIR`, `PRE_NYX_NVSUBMIT_LOG_DIR`,
-and `IPP6_NVSUBMIT_LOG_DIR`. EOS, Pre-Tyche, and Pre-Nyx store job logs under
+`EOS_NVSUBMIT_LOG_DIR`, `PRE_TYCHE_NVSUBMIT_LOG_DIR`, and `PRE_NYX_NVSUBMIT_LOG_DIR`;
+all three store job logs under
 `/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}`.
-IPP6 uses `/storage/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}`.
 Each cluster's setup job installs nvsubmit once in `nvsubmit-venv/` alongside
 the copied `build/` directory and publishes its path to the test jobs.
 Cluster cleanup jobs remove the pipeline's install directory only after that
-cluster's build, setup, and test jobs succeed, including the Pre-Tyche CFT test.
+cluster's setup, unit, and integration jobs succeed, including the Pre-Tyche CFT test.
 Failed runs retain their installs, and logs remain in the separate log directories.
 The suite definitions are in `tests/`:
 
@@ -25,8 +24,8 @@ UID file. The wrapper passes Slurm rank and world size to the existing
 `--rank` and `--nranks` arguments, and supplies `--uid-file` with a path
 containing the binary name and Slurm job and step IDs to isolate concurrent
 runs. Test arguments, including GoogleTest filters, are forwarded unchanged. The LL epoch protocol uses one rank and the LL group
-epoch uses exactly four. Cluster configuration is in `systems/`; IPP6 and
-Pre-Nyx test jobs remain disabled.
+epoch uses exactly four. Cluster configuration is in `systems/`; the
+Pre-Nyx test jobs are disabled.
 
 For local unit runs, build with `make -C nccl_ep/tests`, then run the complete
 matrix with the existing launcher:

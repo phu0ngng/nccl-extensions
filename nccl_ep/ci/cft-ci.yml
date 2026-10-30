@@ -1,4 +1,5 @@
-# Use one CUDA 13.4 build for both driver environments.
+# Use one CUDA 13.4 build for both driver environments; the parent pipeline's
+# build:cft-arm-cu134 job produces it.
 .cft_ci:
   variables:
     CI_BUILDS_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/builds/${CI_JOB_SUBPATH}"
@@ -9,35 +10,13 @@
   before_script:
     - export CFT_INSTALL_DIR="${CI_PROJECT_DIR}/cft_install"
 
-build:cft-cu134:
-  extends: .ipp6-arm-build
-  stage: build
-  timeout: 2h
-  needs: []
-  variables:
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_DEPTH: "1"
-    CUDA_HOME: "/usr/local/cuda"
-    MPI_HOME: "/usr/local"
-    NVCC_APPEND_FLAGS: "-lstdc++fs"
-    CFT_MOCK_DRIVER_LIB_DIR: "/usr/local/cuda/compat"
-  script:
-    - bash nccl_ep/ci/build_cft_ci.sh
-  artifacts:
-    paths:
-      - cft_install/include/
-      - cft_install/lib/
-      - cft_install/test/nccl_ep/
-      - cft_install/provenance.txt
-      - cft_install/SHA256SUMS
-    expire_in: 7 days
-
 .test_cft_ci:
   extends: .cft_ci
   stage: integration_test
   timeout: 2h
   needs:
-    - job: build:cft-cu134
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: build:cft-arm-cu134
       artifacts: true
   script:
     - >

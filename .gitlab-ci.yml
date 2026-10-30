@@ -1,5 +1,8 @@
 # Root pipeline for the standalone NCCL Extensions repository.
-# Build NCCL once per platform and CUDA major, then run the child pipelines.
+# Build NCCL once per platform and CUDA major and every extension module against
+# each of them (one parallel:matrix job each over ARCH x CUDA), then run the
+# child pipelines, which only install and test the parent's artifacts on the
+# clusters.
 #
 # Child pipelines run selectively: on a merge request pipeline a module's child
 # pipeline is triggered only when that module's own sources changed, or when
@@ -18,9 +21,11 @@ variables:
   GITHUB_SIM_PIPELINE_FILE: pipelines/nccl-extensions/.nccl-extensions-filtered-ci.yml
 
 stages:
+  - check
   - nccl
   - extensions
-  - downstream
+  - package
+  - test
 
 workflow:
   rules:
@@ -35,24 +40,49 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "web"'
     - when: never
 
-build:nccl-x86-cu12:
-  extends: .build-nccl-x86-cu12
-  stage: nccl
 
-build:nccl-x86-cu13:
-  extends: .build-nccl
-  stage: nccl
+##
+## Stage: check (image preflight, CI unit tests, github-sim gate)
+##
 
-build:nccl-arm-cu13:
-  extends: .build-nccl-arm
-  stage: nccl
+# Fails before any build when a pinned NCCL CI image tag is missing from the
+# registry, naming the tag; the NCCL builds wait on this check.
+check:images:
+  stage: check
+  needs: []
+  image: gcr.io/go-containerregistry/crane:debug
+  tags:
+    - ipp6-k8s-x86
+  variables:
+    GIT_STRATEGY: none
+    KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
+    KUBERNETES_CPU_REQUEST: 1
+    KUBERNETES_CPU_LIMIT: 1
+    KUBERNETES_MEMORY_REQUEST: 256Mi
+    KUBERNETES_MEMORY_LIMIT: 512Mi
+  script:
+    - |
+      set -eu
+      crane auth login "${CI_REGISTRY}" -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}"
+      for tag in \
+        "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA12_VERSION}${NCCL_CI_IMAGE_SUFFIX}" \
+        "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA13_VERSION}${NCCL_CI_IMAGE_SUFFIX}"; do
+        if crane manifest "${tag}" > /dev/null; then
+          echo "found ${tag}"
+        else
+          echo "ERROR: NCCL CI image tag not found in the registry: ${tag}" >&2
+          echo "Update the NCCL_CI_* pins in .gitlab/ci/nccl-build.yml to a published nccl/nccl CI image." >&2
+          exit 1
+        fi
+      done
 
-# Unit tests for the CI scripts under .gitlab/ci/tests; toolchain and registry are shimmed.
-test:ci-unit:
-  stage: nccl
+# Unit tests for the CI scripts (.gitlab/ci/tests) and the library build script
+# (python/build_assets/tests); toolchain and registry are shimmed.
+check:ci-unit:
+  stage: check
   image: python:3.12-slim
   tags:
-    - ipp6-k8s
+    - ipp6-k8s-x86
   needs: []
   variables:
     GIT_SUBMODULE_STRATEGY: none
@@ -64,20 +94,309 @@ test:ci-unit:
   rules:
     - changes:
         - .gitlab/ci/**/*
+        - python/build_assets/**/*
   script:
     - python3 -m unittest discover -s .gitlab/ci/tests -v
+    - python3 -m unittest discover -s python/build_assets/tests -v
 
-nccl_m2n:
+##
+## Stage: nccl
+##
+
+# Per-variant settings shared by the NCCL and module matrices (YAML anchors, not
+# jobs): image, node selector, pod size and gencode for one ARCH x CUDA entry.
+.variant-x86-cu12: &variant-x86-cu12
+  BUILD_IMAGE: "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA12_VERSION}${NCCL_CI_IMAGE_SUFFIX}"
+  KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
+  KUBERNETES_CPU_REQUEST: 32
+  KUBERNETES_CPU_LIMIT: 32
+  KUBERNETES_MEMORY_REQUEST: 64Gi
+  KUBERNETES_MEMORY_LIMIT: 128Gi
+  NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90"
+
+.variant-x86-cu13: &variant-x86-cu13
+  BUILD_IMAGE: "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA13_VERSION}${NCCL_CI_IMAGE_SUFFIX}"
+  KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
+  KUBERNETES_CPU_REQUEST: 32
+  KUBERNETES_CPU_LIMIT: 32
+  KUBERNETES_MEMORY_REQUEST: 64Gi
+  KUBERNETES_MEMORY_LIMIT: 128Gi
+  NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90"
+
+.variant-arm-cu13: &variant-arm-cu13
+  BUILD_IMAGE: "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA13_VERSION}${NCCL_CI_IMAGE_SUFFIX}"
+  KUBE_NODE_SELECTOR: kubernetes.io/arch=arm64
+  KUBERNETES_CPU_REQUEST: 96
+  KUBERNETES_CPU_LIMIT: 96
+  KUBERNETES_MEMORY_REQUEST: 450Gi
+  KUBERNETES_MEMORY_LIMIT: 450Gi
+  # The ARM artifacts feed GB200 jobs on Pre-Tyche.
+  NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"
+
+# One matrix job over ARCH x CUDA; each generated job ("build:nccl: [x86, cu12]",
+# ...) is the shared build body with that entry's variant anchor and
+# NCCL_ARTIFACT_DIR merged in through its rule.
+build:nccl:
+  extends: .build-nccl
+  stage: nccl
+  # One timeout covers every matrix entry; sized for the arm build.
+  timeout: 2h
+  image: "${BUILD_IMAGE}"
+  tags:
+    - "ipp6-k8s-${ARCH}"
+  parallel:
+    matrix:
+      - ARCH: x86
+        CUDA: [cu12, cu13]
+      - ARCH: arm
+        CUDA: cu13
+  needs:
+    - job: check:images
+      artifacts: false
+  rules:
+    - if: '$ARCH == "x86" && $CUDA == "cu12"'
+      variables:
+        <<: *variant-x86-cu12
+        NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu12
+    - if: '$ARCH == "x86" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-x86-cu13
+        NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu13
+    - if: '$ARCH == "arm" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-arm-cu13
+        NCCL_ARTIFACT_DIR: .ci/nccl-arm-cu13
+
+
+##
+## Stage: extensions
+##
+
+# One parallel:matrix job per module over ARCH x CUDA. Each generated job
+# ("build:ep: [x86, cu12]", ...) compiles against exactly one NCCL artifact
+# and stages its output in ".ci/<module>-<variant>/" (lib/, include/, test
+# binaries), mirroring ".ci/nccl-<variant>/", so package:python unpacks several
+# variants side by side. ARCH is a matrix axis and the runner tag is derived as
+# "ipp6-k8s-${ARCH}" because `tags:` can expand matrix variables but cannot read
+# `rules:variables`; everything else per variant (image, pod size, gencode) is a
+# `.variant-*` anchor (under Stage: nccl) merged into that entry's `rules:variables`.
+# allow_failure keeps one broken variant from blocking the other clusters' child
+# pipelines; a module-build failure surfaces in package:python and in the child
+# `setup:*` job that installs that variant.
+.build-module:
   stage: extensions
+  timeout: 2h
+  allow_failure: true
+  image: "${BUILD_IMAGE}"
+  tags:
+    - "ipp6-k8s-${ARCH}"
+  parallel:
+    matrix:
+      - ARCH: x86
+        CUDA: [cu12, cu13]
+      - ARCH: arm
+        CUDA: cu13
+  # needs:parallel:matrix is static on GitLab 17.7, so every entry waits for all
+  # three NCCL entries (need by base name); the entry's rule picks the one it
+  # compiles against.
+  needs:
+    - job: build:nccl
+      artifacts: true
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    GIT_SUBMODULE_PATHS: third_party/googletest
+    MPI_HOME: "/usr/local"
+  artifacts:
+    name: "${CI_JOB_NAME_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - "${MODULE_ARTIFACT_DIR}/"
+
+build:ep:
+  extends: .build-module
+  variables:
+    # UBI8 needs this library for std::filesystem in shared and static EP links.
+    NVCC_APPEND_FLAGS: "-lstdc++fs"
+    LIBRARY_PATH: "/usr/local/cuda/lib64/stubs"
+  rules:
+    - if: '$ARCH == "x86" && $CUDA == "cu12"'
+      variables:
+        <<: *variant-x86-cu12
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build"
+        MODULE_ARTIFACT_DIR: .ci/ep-x86-cu12
+        # The internal NCCL CI image uses UBI8/GCC 8 and requires the legacy
+        # libstdc++fs archive for std::filesystem. When Python loads that EP library
+        # alongside EOS's newer libstdc++, incompatible filesystem symbols can mix,
+        # causing crashes in std::filesystem::path destruction during JIT setup.
+        # Build EP with Ubuntu 22.04 instead: its standard libstdc++ provides
+        # std::filesystem without that archive. Keep this override scoped to EP;
+        # the NCCL dependency still comes from the internal image's build artifact.
+        BUILD_IMAGE: nvidia/cuda:12.9.2-devel-ubuntu22.04
+        MPI_HOME: "/usr/lib/x86_64-linux-gnu/openmpi"
+        NVCC_APPEND_FLAGS: ""
+    - if: '$ARCH == "x86" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-x86-cu13
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build"
+        MODULE_ARTIFACT_DIR: .ci/ep-x86-cu13
+    - if: '$ARCH == "arm" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-arm-cu13
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build"
+        MODULE_ARTIFACT_DIR: .ci/ep-arm-cu13
+  # Only the Ubuntu cu12 image lacks the toolchain and MPI the NCCL CI image ships.
+  before_script:
+    - |
+      if [[ "${ARCH}/${CUDA}" == "x86/cu12" ]]; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          build-essential libopenmpi-dev openmpi-bin python3 python3-packaging
+      fi
+  script:
+    - bash .gitlab/ci/scripts/build-module.sh ep
+  artifacts:
+    expire_in: 48 hours
+
+build:m2n:
+  extends: .build-module
+  rules:
+    - if: '$ARCH == "x86" && $CUDA == "cu12"'
+      variables:
+        <<: *variant-x86-cu12
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build"
+        MODULE_ARTIFACT_DIR: .ci/m2n-x86-cu12
+    - if: '$ARCH == "x86" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-x86-cu13
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build"
+        MODULE_ARTIFACT_DIR: .ci/m2n-x86-cu13
+    - if: '$ARCH == "arm" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-arm-cu13
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build"
+        MODULE_ARTIFACT_DIR: .ci/m2n-arm-cu13
+  script:
+    - bash .gitlab/ci/scripts/build-module.sh m2n
+  artifacts:
+    when: always
+    expire_in: 48 hours
+
+# make is the product build; this job keeps the consumer CMake path building and
+# exporting the public API (hidden-visibility link of the tests and benches).
+# Nothing from it runs, and m2n's CMake has no WERROR option.
+build:m2n-cmake:
+  extends: .ipp6-x86-cu13-build
+  stage: extensions
+  timeout: 1h
+  needs:
+    - job: build:nccl
+      parallel:
+        matrix:
+          - ARCH: x86
+            CUDA: cu13
+      artifacts: true
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    GIT_SUBMODULE_PATHS: third_party/googletest
+    NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build"
+    MPI_HOME: "/usr/local"
+    CMAKE_CUDA_ARCHITECTURES: "90"
+  script:
+    - bash .gitlab/ci/scripts/build-cmake.sh m2n
+
+# One CUDA 13.4 EP build serves both CFT driver environments (polyphe, pre-tyche);
+# build_cft_ci.sh reuses the prebuilt ARM NCCL through NCCL_PREBUILT_DIR.
+build:cft-arm-cu134:
+  extends: .ipp6-arm-cu13-build
+  stage: extensions
+  timeout: 2h
+  allow_failure: true
+  needs:
+    - job: build:nccl
+      parallel:
+        matrix:
+          - ARCH: arm
+            CUDA: cu13
+      artifacts: true
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_DEPTH: "1"
+    CUDA_HOME: "/usr/local/cuda"
+    MPI_HOME: "/usr/local"
+    NVCC_APPEND_FLAGS: "-lstdc++fs"
+    CFT_MOCK_DRIVER_LIB_DIR: "/usr/local/cuda/compat"
+    NCCL_PREBUILT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build"
+  script:
+    - bash nccl_ep/ci/build_cft_ci.sh
+  artifacts:
+    paths:
+      - cft_install/include/
+      - cft_install/lib/
+      - cft_install/test/nccl_ep/
+      - cft_install/provenance.txt
+      - cft_install/SHA256SUMS
+    expire_in: 7 days
+
+
+##
+## Stage: package
+##
+
+# Builds the Python wheel from the four x86 module artifacts (EP and M2N, CUDA 12
+# and 13); each *_DIR holds that variant's lib/ and include/.
+package:python:
+  extends: .ipp6-x86-cu13-build
+  stage: package
+  timeout: 1h
+  needs:
+    - job: build:ep
+      parallel:
+        matrix:
+          - ARCH: x86
+            CUDA: cu12
+          - ARCH: x86
+            CUDA: cu13
+      artifacts: true
+    - job: build:m2n
+      parallel:
+        matrix:
+          - ARCH: x86
+            CUDA: cu12
+          - ARCH: x86
+            CUDA: cu13
+      artifacts: true
+  variables:
+    EP_CU12_DIR: "${CI_PROJECT_DIR}/.ci/ep-x86-cu12"
+    EP_CU13_DIR: "${CI_PROJECT_DIR}/.ci/ep-x86-cu13"
+    M2N_CU12_DIR: "${CI_PROJECT_DIR}/.ci/m2n-x86-cu12"
+    M2N_CU13_DIR: "${CI_PROJECT_DIR}/.ci/m2n-x86-cu13"
+  script:
+    - bash python/ci/build_ci_wheel.sh
+  artifacts:
+    name: "nccl-extensions-python-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 24 hours
+    paths:
+      - python/dist/
+
+
+##
+## Stage: test (child pipelines; each trigger needs every artifact its child installs)
+##
+
+# Each child starts only after every parent artifact it consumes is final; the
+# needs list is the child's complete input set. A need by matrix base name waits
+# for all of that job's generated entries.
+test:m2n:
+  stage: test
   # Children define their own checkout and GPU architecture defaults.
   inherit:
     variables: false
   needs:
-    - job: build:nccl-x86-cu12
+    - job: build:nccl
       artifacts: false
-    - job: build:nccl-x86-cu13
-      artifacts: false
-    - job: build:nccl-arm-cu13
+    - job: build:m2n
+      optional: true
       artifacts: false
   rules:
     # Non-merge-request pipelines: always run (no reliable `changes:` context).
@@ -101,14 +420,24 @@ nccl_m2n:
       yaml_variables: true
       pipeline_variables: true
 
-nccl_ep:
-  stage: extensions
+test:ep:
+  stage: test
   inherit:
     variables: false
   needs:
-    - job: build:nccl-x86-cu12
+    - job: build:nccl
+      parallel:
+        matrix:
+          - ARCH: x86
+            CUDA: cu12
+          - ARCH: arm
+            CUDA: cu13
       artifacts: false
-    - job: build:nccl-arm-cu13
+    - job: build:ep
+      optional: true
+      artifacts: false
+    - job: build:cft-arm-cu134
+      optional: true
       artifacts: false
   rules:
     # Non-merge-request pipelines: always run (no reliable `changes:` context).
@@ -132,8 +461,9 @@ nccl_ep:
       yaml_variables: true
       pipeline_variables: true
 
+# Public-release gate from cicd-platform; merge-request pipelines only.
 github-sim:prepare:
-  stage: downstream
+  stage: check
 
 github-sim:
-  stage: downstream
+  stage: check

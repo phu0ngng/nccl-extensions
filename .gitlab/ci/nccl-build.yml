@@ -1,4 +1,5 @@
-# Shared NCCL source-build template; the parent publishes artifacts to children.
+# Runner templates and the NCCL source-build body; the parent pipeline publishes
+# the NCCL artifacts to the children.
 # build-nccl.sh caches finished output in this project's generic package registry
 # (package NCCL_CACHE_PACKAGE, one version per NCCL commit, arch and toolchain
 # fingerprint); NCCL_CACHE=0 builds without restoring or publishing.
@@ -19,13 +20,22 @@ variables:
   FF_USE_FASTZIP: "true"
   FF_ENABLE_JOB_CLEANUP: "true"
   FF_TIMESTAMPS: "true"
-  # Active x86 downstream tests run on EOS (H100). ARM jobs set sm_100 below.
+  # Active x86 downstream tests run on EOS (H100). ARM jobs override with sm_100.
   NVCC_GENCODE: "-gencode=arch=compute_90,code=sm_90"
+  # NCCL's versioned build environment; nccl-extensions tracks NCCL's dev
+  # environment deliberately.
+  NCCL_CI_IMAGE: gitlab-master.nvidia.com:5005/nccl/nccl/ci
+  NCCL_CI_IMAGE_VERSION: "1.0.0"
+  NCCL_CI_CUDA12_VERSION: "12.9"
+  NCCL_CI_CUDA13_VERSION: "13.4"
+  NCCL_CI_IMAGE_SUFFIX: "-dev"
 
-.ipp6-build:
-  image: gitlab-master.nvidia.com:5005/nccl/nccl/ci:2.32-c13.4.2
+# One runner template per (arch, CUDA major): image pin, runner tag, node
+# selector and pod size. A job combines one of these with its build body.
+.ipp6-x86-cu12-build:
+  image: "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA12_VERSION}${NCCL_CI_IMAGE_SUFFIX}"
   tags:
-    - ipp6-k8s
+    - ipp6-k8s-x86
   variables:
     KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
     KUBERNETES_CPU_REQUEST: 32
@@ -33,13 +43,19 @@ variables:
     KUBERNETES_MEMORY_REQUEST: 64Gi
     KUBERNETES_MEMORY_LIMIT: 128Gi
 
-.ipp6-x86-cu12-build:
-  extends: .ipp6-build
-  image: gitlab-master.nvidia.com:5005/nccl/nccl/ci:2.32-c12.9.0
+.ipp6-x86-cu13-build:
+  image: "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA13_VERSION}${NCCL_CI_IMAGE_SUFFIX}"
+  tags:
+    - ipp6-k8s-x86
+  variables:
+    KUBE_NODE_SELECTOR: kubernetes.io/arch=amd64
+    KUBERNETES_CPU_REQUEST: 32
+    KUBERNETES_CPU_LIMIT: 32
+    KUBERNETES_MEMORY_REQUEST: 64Gi
+    KUBERNETES_MEMORY_LIMIT: 128Gi
 
-.ipp6-arm-build:
-  extends: .ipp6-build
-  image: gitlab-master.nvidia.com:5005/nccl/nccl/ci:2.32-c13.4.2
+.ipp6-arm-cu13-build:
+  image: "${NCCL_CI_IMAGE}:${NCCL_CI_IMAGE_VERSION}-cu${NCCL_CI_CUDA13_VERSION}${NCCL_CI_IMAGE_SUFFIX}"
   tags:
     - ipp6-k8s-arm
   variables:
@@ -49,14 +65,12 @@ variables:
     KUBERNETES_MEMORY_REQUEST: 450Gi
     KUBERNETES_MEMORY_LIMIT: 450Gi
 
+# Build body only: build:nccl adds the ARCH x CUDA matrix, the timeout and NCCL_ARTIFACT_DIR.
 .build-nccl:
-  extends: .ipp6-build
-  timeout: 1h
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
     GIT_SUBMODULE_DEPTH: "1"
     GIT_SUBMODULE_PATHS: third_party/nccl
-    NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu13
     NCCL_CACHE: "1"
     NCCL_CACHE_PACKAGE: nccl-ci-build-cache
   script:
@@ -73,20 +87,3 @@ variables:
     expire_in: 24 hours
     paths:
       - "${NCCL_ARTIFACT_DIR}/"
-
-.build-nccl-x86-cu12:
-  extends:
-    - .build-nccl
-    - .ipp6-x86-cu12-build
-  variables:
-    NCCL_ARTIFACT_DIR: .ci/nccl-x86-cu12
-
-.build-nccl-arm:
-  extends:
-    - .build-nccl
-    - .ipp6-arm-build
-  timeout: 2h
-  variables:
-    NCCL_ARTIFACT_DIR: .ci/nccl-arm-cu13
-    # The ARM artifact feeds GB200 jobs on Pre-Tyche.
-    NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"

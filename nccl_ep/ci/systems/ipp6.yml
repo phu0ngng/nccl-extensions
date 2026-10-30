@@ -1,8 +1,0 @@
-cluster_name: ipp6
-partition: h100x8-cicd
-account: coreai_libraries_nccl
-ngpus: 8
-cuda_home: /storage/toolkits/cuda-12.9
-mpi_home: /usr/local/openmpi
-env:
-  SLURM_CPU_BIND: none

@@ -1,12 +1,11 @@
 # Standalone NCCL M2N child pipeline, dispatched by the repository root CI.
+# Builds live in the parent pipeline; this child installs and tests its artifacts.
 
 include:
   - local: .gitlab/ci/nccl-build.yml
   - local: .gitlab/cluster-paths.yml
 
 stages:
-  - build
-  - package
   - setup
   - unit_test
   - integration_test
@@ -23,161 +22,20 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
     - when: never
 
-.build_m2n_x86:
-  extends: .ipp6-build
-  stage: build
-  timeout: 1h
-  variables:
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_DEPTH: "1"
-    GIT_SUBMODULE_PATHS: third_party/googletest
-    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13"
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu13
-      artifacts: true
-  script:
-    - |
-      set -euxo pipefail
-      test -s "${NCCL_BASE_ARTIFACT_DIR}/NCCL_COMMIT"
-      echo "Using NCCL commit $(cat "${NCCL_BASE_ARTIFACT_DIR}/NCCL_COMMIT")"
-      env \
-        NCCL_HOME="${NCCL_BASE_ARTIFACT_DIR}/build" \
-        MPI_HOME="/usr/local" \
-        make -C "${CI_PROJECT_DIR}/nccl_m2n" -j"${KUBERNETES_CPU_REQUEST}" \
-        NVCC_GENCODE="$NVCC_GENCODE" \
-        GTEST_DIR="${CI_PROJECT_DIR}/third_party/googletest/googletest" \
-        lib tests bench reshard reshard_batch_user_window
-      test -x build/bin/multi_dim_geometry_test
-      test -x build/bin/multi_dim_test_mpi
-      test -s build/lib/libnccl_m2n.so
-      test -s build/include/nccl_m2n.h
-      test -x build/bin/basic_api_test_local
-      test -x build/bin/basic_api_test_mpi
-      test -x build/bin/reshard_bench
-      test -x build/bin/reshard_batch_bench_user_window
-      # Every function declared in the public header must (a) carry
-      # NCCL_M2N_API and (b) be an exported, defined text symbol. The CMake
-      # build compiles hidden-by-default, so a missing annotation links here
-      # under Make and fails to link there.
-      #
-      # (a) is derived from the UNANNOTATED declaration list on purpose. Deriving
-      # the expected set from annotated declarations only would let the check
-      # shrink silently: remove an annotation and the entry point drops out of
-      # the expected set too, so the check passes while the hidden-by-default
-      # CMake build stops exporting it.
-      hdr=nccl_m2n/src/nccl_m2n.h
-      lib=build/lib/libnccl_m2n.so
-      work=$(mktemp -d)
-      trap 'rm -rf "$work"' EXIT
-      # Leading whitespace is allowed on purpose: deleting just the
-      # NCCL_M2N_API token leaves the declaration indented, and a pattern
-      # anchored hard to column 0 would stop matching the line entirely --
-      # the declaration would vanish from BOTH sets and the check would pass.
-      grep -oE '^[[:space:]]*(NCCL_M2N_API[[:space:]]+)?(const char\*|ncclResult_t)[[:space:]]+nccl[A-Za-z0-9_]+\(' "$hdr" \
-        | sed -E 's/.*[^A-Za-z0-9_](nccl[A-Za-z0-9_]+)\($/\1/' | sort -u > "$work/declared"
-      grep -oE '^[[:space:]]*NCCL_M2N_API[[:space:]]+(const char\*|ncclResult_t)[[:space:]]+nccl[A-Za-z0-9_]+\(' "$hdr" \
-        | sed -E 's/.*[^A-Za-z0-9_](nccl[A-Za-z0-9_]+)\($/\1/' | sort -u > "$work/annotated"
-      test -s "$work/declared"
-      if ! comm -23 "$work/declared" "$work/annotated" > "$work/unannotated"; then exit 1; fi
-      if [ -s "$work/unannotated" ]; then
-        echo "ERROR: public header declarations missing the NCCL_M2N_API annotation:" >&2
-        cat "$work/unannotated" >&2
-        echo "These link under Make and fail to link under the hidden-by-default CMake build." >&2
-        exit 1
-      fi
-      nm -D --defined-only "$lib" | awk '$2 == "T" { print $3 }' | sort -u > "$work/actual"
-      if ! comm -23 "$work/declared" "$work/actual" > "$work/missing"; then exit 1; fi
-      if [ -s "$work/missing" ]; then
-        echo "ERROR: public entry points declared in the header but not exported by $lib:" >&2
-        cat "$work/missing" >&2
-        exit 1
-      fi
-      echo "All $(wc -l < "$work/declared") public entry points are annotated and exported."
-  artifacts:
-    when: always
-    name: "nccl-m2n-${CI_JOB_NAME_SLUG}-${CI_COMMIT_SHORT_SHA}"
-    expire_in: 24 hours
-    paths:
-      - build/include/
-      - build/lib/
-      - build/bin/
-
-build:x86-cu13:
-  extends: .build_m2n_x86
-
-build:x86-cu12:
-  extends:
-    - .build_m2n_x86
-    - .ipp6-x86-cu12-build
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu12
-      artifacts: true
-  variables:
-    NCCL_BASE_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12"
-
-build:arm-cu13:
-  extends: .ipp6-arm-build
-  stage: build
-  timeout: 2h
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-arm-cu13
-      artifacts: true
-  variables:
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_DEPTH: "1"
-    GIT_SUBMODULE_PATHS: third_party/googletest
-    NVCC_GENCODE: "-gencode=arch=compute_100,code=sm_100"
-  script:
-    - |
-      set -euxo pipefail
-      test -s "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/NCCL_COMMIT"
-      echo "Using ARM NCCL commit $(cat "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/NCCL_COMMIT")"
-      build_dir="${CI_PROJECT_DIR}/build"
-      env NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build" \
-        MPI_HOME=/usr/local \
-        make -C "${CI_PROJECT_DIR}/nccl_m2n" -j"${KUBERNETES_CPU_REQUEST}" \
-          BUILDDIR="${build_dir}" \
-          NVCC_GENCODE="${NVCC_GENCODE}" \
-          GTEST_DIR="${CI_PROJECT_DIR}/third_party/googletest/googletest" \
-          lib tests bench reshard reshard_batch_user_window
-
-      test -x "${build_dir}/bin/multi_dim_geometry_test"
-      test -x "${build_dir}/bin/multi_dim_test_mpi"
-      test -x "${build_dir}/bin/basic_api_test_local"
-      test -x "${build_dir}/bin/basic_api_test_mpi"
-      test -x "${build_dir}/bin/reshard_bench"
-      test -x "${build_dir}/bin/reshard_batch_bench_user_window"
-      artifact_dir="${NCCL_M2N_ARTIFACT_STAGING:-nccl_m2n_install_artifact}"
-      rm -rf "${artifact_dir}"
-      mkdir -p "${artifact_dir}/bin" "${artifact_dir}/include" "${artifact_dir}/lib"
-      cp -a "${build_dir}/lib/libnccl_m2n.so" "${artifact_dir}/lib/"
-      cp -a "${build_dir}/include/nccl_m2n.h" "${artifact_dir}/include/"
-      cp -a "${build_dir}/bin/multi_dim_geometry_test" "${artifact_dir}/bin/"
-      cp -a "${build_dir}/bin/multi_dim_test_mpi" "${artifact_dir}/bin/"
-      cp -a "${build_dir}/bin/basic_api_test_local" "${artifact_dir}/bin/"
-      cp -a "${build_dir}/bin/basic_api_test_mpi" "${artifact_dir}/bin/"
-      cp -a "${build_dir}/bin/reshard_bench" "${artifact_dir}/bin/"
-      cp -a "${build_dir}/bin/reshard_batch_bench_user_window" "${artifact_dir}/bin/"
-  artifacts:
-    paths:
-      - nccl_m2n_install_artifact/
-    expire_in: 48 hours
-
 setup:eos:
   stage: setup
   tags:
     - nccl-eos
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu12
+      job: "build:nccl: [x86, cu12]"
       artifacts: true
-    - job: build:x86-cu12
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: "build:m2n: [x86, cu12]"
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
+    NCCL_M2N_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/m2n-x86-cu12"
   script:
     - |
       set -euxo pipefail
@@ -185,14 +43,14 @@ setup:eos:
       rm -rf "${dst}"
       mkdir -p "${dst}/bin" "${dst}/include" "${dst}/lib"
       cp -a "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build/." "${dst}/"
-      cp -a "${CI_PROJECT_DIR}/build/lib/libnccl_m2n.so" "${dst}/lib/"
-      cp -a "${CI_PROJECT_DIR}/build/include/nccl_m2n.h" "${dst}/include/"
-      cp -a "${CI_PROJECT_DIR}/build/bin/multi_dim_geometry_test" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/build/bin/multi_dim_test_mpi" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/build/bin/basic_api_test_local" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/build/bin/basic_api_test_mpi" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/build/bin/reshard_bench" "${dst}/bin/"
-      cp -a "${CI_PROJECT_DIR}/build/bin/reshard_batch_bench_user_window" "${dst}/bin/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/lib/libnccl_m2n.so" "${dst}/lib/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/include/nccl_m2n.h" "${dst}/include/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/bin/multi_dim_geometry_test" "${dst}/bin/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/bin/multi_dim_test_mpi" "${dst}/bin/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/bin/basic_api_test_local" "${dst}/bin/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/bin/basic_api_test_mpi" "${dst}/bin/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/bin/reshard_bench" "${dst}/bin/"
+      cp -a "${NCCL_M2N_ARTIFACT_DIR}/bin/reshard_batch_bench_user_window" "${dst}/bin/"
 
 setup:pre-tyche:
   stage: setup
@@ -200,12 +58,14 @@ setup:pre-tyche:
     - ptyche
   needs:
     - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-arm-cu13
+      job: "build:nccl: [arm, cu13]"
       artifacts: true
-    - job: build:arm-cu13
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: "build:m2n: [arm, cu13]"
       artifacts: true
   variables:
     CI_BUILDS_DIR: "${PRE_TYCHE_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
+    NCCL_M2N_ARTIFACT_DIR: "${CI_PROJECT_DIR}/.ci/m2n-arm-cu13"
   script:
     - |
       set -euxo pipefail
@@ -277,30 +137,6 @@ unit:pre-tyche:
         -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-m2n-unit-pretyche::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
         -t "${SLURM_TIME}" \
         bash nccl_m2n/ci/run_nccl_m2n_tests.sh
-
-package:python:
-  extends: .ipp6-build
-  stage: package
-  timeout: 1h
-  needs:
-    - pipeline: "${PARENT_PIPELINE_ID}"
-      job: build:nccl-x86-cu13
-      artifacts: true
-    - job: build:x86-cu13
-      artifacts: true
-  script:
-    - |
-      set -euxo pipefail
-      env \
-        CUDA_HOME=/usr/local/cuda \
-        NCCL_HOME="${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build" \
-        bash "${CI_PROJECT_DIR}/python/ci/verify_m2n_package.sh" \
-        "${CI_PROJECT_DIR}/build"
-  artifacts:
-    name: "nccl-extensions-python-${CI_COMMIT_SHORT_SHA}"
-    expire_in: 24 hours
-    paths:
-      - python/dist/
 
 integration:eos:
   stage: integration_test
