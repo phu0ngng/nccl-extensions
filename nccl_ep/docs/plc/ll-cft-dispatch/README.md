@@ -1175,12 +1175,12 @@ re-admission, and tile quarantine.
 
 - The extension keeps its own driver-level CFT implementation
   (`cuLogicalEndpoint*` on the host, `fabric.try_put` PTX on the device)
-  to retain its bounded flush, `pendingTxCount`, and explicit endpoint lifecycle.
-  The pinned NCCL 2.32.3 provides the native operations this path depends on
-  (`ncclCft::putCounted`, `ncclCft::waitCounted`, and counted windows through
-  `NCCL_WIN_CFT_COUNTED`). `device/cft.cuh` follows NCCL's API to keep future
-  migration small. The differences and expected migration are described in
-  [CFT API design](../README.md#cft-api-design).
+  because the pinned NCCL submodule (2.30.7) predates NCCL's device CFT API
+  and users below NCCL 2.32.1 need a working path. NCCL 2.32.1 added what this
+  path depends on (`ncclCft::putCounted`, `ncclCft::waitCounted`, counted
+  windows through `NCCL_WIN_CFT_COUNTED`). `device/cft.cuh` follows NCCL's
+  API to keep future migration small. The differences and expected migration
+  are described in [CFT API design](../README.md#cft-api-design).
 - The enabled CFT path supports unquantized, 2-byte token elements
   (`QUANT_NONE`). Quantized recipes and fp32 tokens do not use it: the
   host selects a STORE specialization for those recipes and types while the

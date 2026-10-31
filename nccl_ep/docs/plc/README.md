@@ -26,10 +26,9 @@ exclusion without an explicit review.
 ## CFT API design
 
 We aim to keep the local CFT API as close to NCCL’s API as possible, so future
-migration requires only small changes. The current NCCL dependency is 2.32.3,
-which provides the native device API. The extension retains its local implementation
-in [`device/cft.cuh`](../../device/cft.cuh) for its bounded flush and
-`pendingTxCount` behavior.
+migration requires only small changes. The current NCCL dependency is 2.30.7,
+which does not provide this device API, so this MR provides its own implementation in
+[`device/cft.cuh`](../../device/cft.cuh).
 
 The comparison below uses NCCL 2.32.1 at commit `c32740385`, dated September 15,
 2026. It covers `nccl_device/cft.h`, `impl/cft__funcs.h`, and `impl/cft__types.h`. The LL
