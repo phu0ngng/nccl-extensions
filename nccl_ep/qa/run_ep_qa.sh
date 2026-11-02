@@ -412,13 +412,13 @@ run_benchmark_suite() {
       --experts 256 --validate --dispatch-only --mxfp8 --ht-flow pull-push
     run_mpi_case bench-ht-mxfp8-combine "${CASE_TIMEOUT}" "${EP_BENCH}" \
       --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
-      --validate --combine-quantization mxfp8
+      --ht-flow push-pull --validate --combine-quantization mxfp8
     run_mpi_case bench-ht-mxfp8-end-to-end "${CASE_TIMEOUT}" "${EP_BENCH}" \
       --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
-      --validate --mxfp8
+      --ht-flow push-pull --validate --mxfp8
     run_mpi_case bench-ht-mxfp8-backward "${CASE_TIMEOUT}" "${EP_BENCH}" \
       --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
-      --validate --backward --combine-quantization mxfp8
+      --ht-flow push-pull --validate --backward --combine-quantization mxfp8
 
     # QA multi-node boundary: ten experts per rank and non-power-of-two totals.
     # Pair the two requested hidden/top-k extremes to avoid a redundant cross product.
