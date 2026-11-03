@@ -27,6 +27,7 @@ exclusion without an explicit review.
 - [302: Low-latency 1-sided combine with automatic kernel selection](302-ll-combine-1sided/README.md) — dispatch-push/combine-pull protocol, and dispatch-side on-device auto-mode pick with static/dynamic disqualification.
 - [MR298: LL CFT dispatch on the LSA rank-major kernel](298-ll-cft-lsa-dispatch/README.md) — staged and zero-copy LSA dispatch with per-source counted/ordinary completion and LSA combine.
 - [Counting-warp scan of the top-k table (CFT path)](ll-count-scan/README.md) — pipelined, branch-free per-destination token counting, selected only under `NCCL_EP_LL_CFT`; the store path keeps its scan.
+- [MR401: Low-latency Lamport combine](401-ll-combine-lamport/README.md) — opt-in `NCCL_EP_COMBINE_LSA=lamport`: sentinel-poisoned landing region polled by the receiver, own round counter, per-peer round words, poison restored by `ncclEpMaskClean` and at handle growth.
 
 ## CFT API design
 

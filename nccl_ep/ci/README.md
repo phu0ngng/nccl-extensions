@@ -16,7 +16,7 @@ The suite definitions are in `tests/`:
 
 - `unit.yml`: GoogleTest binaries and the host-only LL dispatch policy test,
   including HT duplication, scan, unfused-count, pull-push, and filtered
-  overflow/drop coverage.
+  overflow/drop coverage, and the Lamport combine.
 - `integration.yml`: the C++ correctness and benchmark matrix.
 - `python.yml`: all 28 Python sanity cases, using the wheel and interpreter
   prepared by `python/ci/prepare_ep_test_env.sh`.

@@ -188,3 +188,18 @@ tests:
     features: [nccl_ep_nvfp4]
     args: "--algorithm low-latency --layout em --tokens 128 ${common} --datatype bf16 --combine-quantization nvfp4 --disable-token-dropping"
     labels: [low_latency, nvfp4]
+
+  # Opt-in barrier-free combine (NCCL_EP_COMBINE_LSA=lamport); the rank-major LSA kernels only.
+  - name: ep_bench_low_latency_lamport_combine
+    binary: nccl_ep/ep_bench
+    args: "--algorithm low-latency --layout rm ${common}"
+    labels: [low_latency, lamport]
+    env:
+      NCCL_EP_COMBINE_LSA: lamport
+    matrix:
+      - {name_suffix: rm_128_bf16, args_append: "--tokens 128 --datatype bf16"}
+      - {name_suffix: rm_128_fp16, args_append: "--tokens 128 --datatype fp16"}
+      - {name_suffix: rm_1024_bf16, args_append: "--tokens 1024 --datatype bf16"}
+      - {name_suffix: rm_1024_fp16, args_append: "--tokens 1024 --datatype fp16"}
+      - {name_suffix: rm_128_fp32, args_append: "--tokens 128 --datatype fp32"}
+      - {name_suffix: rm_1024_fp32, args_append: "--tokens 1024 --datatype fp32"}
