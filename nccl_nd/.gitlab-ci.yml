@@ -1,0 +1,73 @@
+# Standalone NCCL ND child pipeline, dispatched by the repository root CI.
+# Builds live in the parent pipeline; this child installs the x86 cu12 artifact
+# (library, header and the nd_test built against them) on EOS and runs
+# tests/run_tests.sh on one 8xH100 node. Slurm stays in this file.
+
+include:
+  - local: .gitlab/ci/nccl-build.yml
+  - local: .gitlab/cluster-paths.yml
+
+stages:
+  - setup
+  - unit_test
+
+variables:
+  CI_JOB_SUBPATH: "${CI_PIPELINE_ID}/${CI_JOB_ID}"
+  EOS_INSTALL_DIR: "/lustre/fsw/coreai_libraries_nccl/gitlab-runner/install/${CI_PIPELINE_ID}/eos-nd"
+  EOS_CUDA_HOME: "/lustre/fsw/coreai_libraries_nccl/toolkits/cuda-12.8.0"
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "parent_pipeline"'
+    - when: never
+
+setup:eos:
+  stage: setup
+  tags:
+    - nccl-eos
+  needs:
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: "build:nccl: [x86, cu12]"
+      artifacts: true
+    - pipeline: "${PARENT_PIPELINE_ID}"
+      job: "build:nd: [x86, cu12]"
+      artifacts: true
+  variables:
+    CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
+  script:
+    - |
+      set -euxo pipefail
+      dst="${EOS_INSTALL_DIR}/build"
+      rm -rf "${dst}"
+      mkdir -p "${dst}"
+      cp -a "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build/." "${dst}/"
+      cp -a "${CI_PROJECT_DIR}/.ci/nd-x86-cu12/." "${dst}/"
+      test -x "${dst}/test/nd_test"
+
+unit:eos:
+  stage: unit_test
+  tags:
+    - nccl-eos
+  needs:
+    - setup:eos
+  variables:
+    NCCL_HOME: "${EOS_INSTALL_DIR}/build"
+    CI_BUILDS_DIR: "${EOS_CI_BUILDS_DIR}/${CI_JOB_SUBPATH}"
+    SLURM_ACCOUNT: "coreai_libraries_nccl"
+    SLURM_TIME: "30"
+  script:
+    - |
+      set -euxo pipefail
+      export CUDA_HOME="${EOS_CUDA_HOME}"
+      export NCCL_ND_TEST="${NCCL_HOME}/test/nd_test"
+      export LD_LIBRARY_PATH="${NCCL_HOME}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+      # run_tests.sh starts one process per GPU itself; srun only places it on the allocated node.
+      # No step --exclusive: it implies --exact and would confine all ranks to one CPU.
+      salloc \
+        -N 1 \
+        --exclusive \
+        --account="${SLURM_ACCOUNT}" \
+        -J "${SLURM_ACCOUNT}-cicd::${GITLAB_USER_LOGIN:-ci}:nccl-nd-unit-eos::${CI_COMMIT_REF_NAME:-detached}:${CI_COMMIT_SHORT_SHA}" \
+        -t "${SLURM_TIME}" \
+        srun -N 1 -n 1 --cpu-bind=none --export=ALL \
+        bash "${CI_PROJECT_DIR}/nccl_nd/tests/run_tests.sh" 2 8

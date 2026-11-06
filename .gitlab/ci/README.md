@@ -1,9 +1,9 @@
 # nccl-extensions CI
 
-The parent pipeline (`.gitlab-ci.yml` plus `.gitlab/ci/nccl-build.yml`) builds NCCL and the two
-extension libraries, `nccl_ep` and `nccl_m2n`, on the IPP6 Kubernetes runners (`ipp6-k8s-x86`,
+The parent pipeline (`.gitlab-ci.yml` plus `.gitlab/ci/nccl-build.yml`) builds NCCL and the three
+extension libraries, `nccl_ep`, `nccl_m2n` and `nccl_nd`, on the IPP6 Kubernetes runners (`ipp6-k8s-x86`,
 `ipp6-k8s-arm`), packages one Python wheel, and triggers one test child per module (`test:ep`,
-`test:m2n`). A child installs the parent's artifacts on a GPU cluster and runs the tests there;
+`test:m2n`, `test:nd`). A child installs the parent's artifacts on a GPU cluster and runs the tests there;
 nothing is compiled on a GPU cluster.
 
 ## Pipeline
@@ -22,6 +22,8 @@ flowchart LR
     m2n["build:m2n (3 variants)"]
     cft["build:cft-arm-cu134"]
     cmake["build:m2n-cmake"]
+    nd["build:nd (3 variants)"]
+    ndcmake["build:nd-cmake"]
   end
   subgraph package["package"]
     wheel["package:python"]
@@ -29,12 +31,15 @@ flowchart LR
   subgraph test["test"]
     testep["test:ep"]
     testm2n["test:m2n"]
+    testnd["test:nd"]
   end
   images --> ncclbuild
   ncclbuild --> ep
   ncclbuild --> m2n
   ncclbuild --> cft
   ncclbuild --> cmake
+  ncclbuild --> nd
+  ncclbuild --> ndcmake
   ep --> wheel
   m2n --> wheel
   ncclbuild --> testep
@@ -42,6 +47,8 @@ flowchart LR
   cft -.-> testep
   ncclbuild --> testm2n
   m2n -.-> testm2n
+  ncclbuild --> testnd
+  nd -.-> testnd
 ```
 
 Solid edges are `needs`; dotted edges are `needs` with `optional: true`.
@@ -52,24 +59,24 @@ Solid edges are `needs`; dotted edges are `needs` with `optional: true`.
 |---|---|---|
 | check | `check:images`, `check:ci-unit`, `github-sim:prepare`, `github-sim` | verify both pinned NCCL CI image tags exist before anything builds; run the CI unit tests when `.gitlab/ci/` or `python/build_assets/` changes; the public-release gate from `gpucomms/cicd-platform` on merge-request pipelines |
 | nccl | `build:nccl` (three-entry matrix) | build NCCL from `third_party/nccl` once per variant, registry-cached, into `.ci/nccl-<variant>/` |
-| extensions | `build:ep`, `build:m2n` (three-entry matrices, `allow_failure`), `build:m2n-cmake` (blocking), `build:cft-arm-cu134` (`allow_failure`) | build each extension library and its test binaries against the matching NCCL artifact; guard the m2n CMake path; build the CFT variant of EP |
+| extensions | `build:ep`, `build:m2n`, `build:nd` (three-entry matrices, `allow_failure`), `build:m2n-cmake`, `build:nd-cmake` (blocking), `build:cft-arm-cu134` (`allow_failure`) | build each extension library and its test binaries against the matching NCCL artifact; guard the m2n and nd CMake paths; build the CFT variant of EP |
 | package | `package:python` | one cp312 wheel plus sdist from the x86 cu12 and cu13 module artifacts |
-| test | `test:ep`, `test:m2n` (triggers) | start a module's child once every artifact it installs is final; on merge-request pipelines only when that module or shared CI infrastructure changed, on branch, tag and web pipelines always |
+| test | `test:ep`, `test:m2n`, `test:nd` (triggers) | start a module's child once every artifact it installs is final; on merge-request pipelines only when that module or shared CI infrastructure changed, on branch, tag and web pipelines always |
 
 ## Build variants
 
-`build:nccl`, `build:ep` and `build:m2n` are `parallel:matrix` jobs over ARCH x CUDA, so the
+`build:nccl`, `build:ep`, `build:m2n` and `build:nd` are `parallel:matrix` jobs over ARCH x CUDA, so the
 generated names are `build:nccl: [x86, cu12]`, `build:nccl: [x86, cu13]`, `build:nccl: [arm, cu13]`
-and likewise for `build:ep` and `build:m2n`; the children reference them verbatim in
+and likewise for the module builds; the children reference them verbatim in
 `needs: pipeline:`. Each entry's rule merges a `.variant-*` anchor (image,
 node selector, pod size, gencode) and the artifact directories into the job. An NCCL artifact holds
 `build/` (`include/`, `lib/`) and `NCCL_COMMIT`; module jobs point `NCCL_HOME` at that `build/`.
 
 | Entry | Runner tag | Image | Gencode | NCCL artifact | Module artifacts |
 |---|---|---|---|---|---|
-| `[x86, cu12]` | `ipp6-k8s-x86` (amd64) | NCCL CI image, `cu${NCCL_CI_CUDA12_VERSION}`; `build:ep` uses `nvidia/cuda:12.9.2-devel-ubuntu22.04` | `sm_90` | `.ci/nccl-x86-cu12` | `.ci/ep-x86-cu12`, `.ci/m2n-x86-cu12` |
-| `[x86, cu13]` | `ipp6-k8s-x86` (amd64) | NCCL CI image, `cu${NCCL_CI_CUDA13_VERSION}` | `sm_90` | `.ci/nccl-x86-cu13` | `.ci/ep-x86-cu13`, `.ci/m2n-x86-cu13` |
-| `[arm, cu13]` | `ipp6-k8s-arm` (arm64) | NCCL CI image, `cu${NCCL_CI_CUDA13_VERSION}` | `sm_100` | `.ci/nccl-arm-cu13` | `.ci/ep-arm-cu13`, `.ci/m2n-arm-cu13` |
+| `[x86, cu12]` | `ipp6-k8s-x86` (amd64) | NCCL CI image, `cu${NCCL_CI_CUDA12_VERSION}`; `build:ep` uses `nvidia/cuda:12.9.2-devel-ubuntu22.04` | `sm_90` | `.ci/nccl-x86-cu12` | `.ci/ep-x86-cu12`, `.ci/m2n-x86-cu12`, `.ci/nd-x86-cu12` |
+| `[x86, cu13]` | `ipp6-k8s-x86` (amd64) | NCCL CI image, `cu${NCCL_CI_CUDA13_VERSION}` | `sm_90` | `.ci/nccl-x86-cu13` | `.ci/ep-x86-cu13`, `.ci/m2n-x86-cu13`, `.ci/nd-x86-cu13` |
+| `[arm, cu13]` | `ipp6-k8s-arm` (arm64) | NCCL CI image, `cu${NCCL_CI_CUDA13_VERSION}` | `sm_100` | `.ci/nccl-arm-cu13` | `.ci/ep-arm-cu13`, `.ci/m2n-arm-cu13`, `.ci/nd-arm-cu13` |
 
 ## Recipes
 
@@ -100,6 +107,15 @@ package files). The tests and benches link the hidden-visibility library, so a p
 missing `NCCL_M2N_API` fails the link here instead of at a consumer. The job blocks the pipeline;
 nothing it produces is consumed or executed. `nccl_ep/CMakeLists.txt` is not a standalone project,
 so there is no EP guard.
+
+**ND.** nccl_nd is not part of the Python package, so it has no `build_lib.py` recipe. `build:nd`
+runs `.gitlab/ci/scripts/build-nd.sh make`: `make lib tests` and `make install` into
+`${MODULE_ARTIFACT_DIR}`, then `nd_test` compiled against that installed prefix only. The artifact
+holds `lib/libnccl_nd.so*`, `include/nccl_nd.h` and `test/nd_test`; the ND child runs it on EOS
+through `nccl_nd/tests/run_tests.sh`. `build:nd-cmake` runs `build-nd.sh cmake` against the x86 cu13
+NCCL artifact: configure with `NCCL_ND_BUILD_TESTS=ON`, build, install and check the installed
+library and header. Both modes assert that the library exports exactly the four `ncclNd*` entry
+points and does not link `libcuda` directly.
 
 **CFT.** `build:cft-arm-cu134` runs `nccl_ep/ci/build_cft_ci.sh`: the CFT
 variant of EP for `sm_100` without CUPTI, `ep_test`, `ep_bench`, `test_cft_compatibility` and
@@ -166,5 +182,5 @@ python3 -m unittest discover -s python/build_assets/tests -v
 ```
 
 `check:ci-unit` runs the same two suites on `python:3.12-slim`; toolchain and registry are shimmed.
-`build-module.sh`, `build-cmake.sh` and `build_ci_wheel.sh` document their inputs in their header
+`build-module.sh`, `build-cmake.sh`, `build-nd.sh` and `build_ci_wheel.sh` document their inputs in their header
 comments and run outside CI with those variables set.

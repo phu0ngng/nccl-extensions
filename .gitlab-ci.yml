@@ -311,6 +311,52 @@ build:m2n-cmake:
   script:
     - bash .gitlab/ci/scripts/build-cmake.sh m2n
 
+# ND builds with Make, installs, and compiles nd_test against the installed
+# prefix only; that prefix is the artifact test:nd installs.
+build:nd:
+  extends: .build-module
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  rules:
+    - if: '$ARCH == "x86" && $CUDA == "cu12"'
+      variables:
+        <<: *variant-x86-cu12
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build"
+        MODULE_ARTIFACT_DIR: .ci/nd-x86-cu12
+    - if: '$ARCH == "x86" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-x86-cu13
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build"
+        MODULE_ARTIFACT_DIR: .ci/nd-x86-cu13
+    - if: '$ARCH == "arm" && $CUDA == "cu13"'
+      variables:
+        <<: *variant-arm-cu13
+        NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-arm-cu13/build"
+        MODULE_ARTIFACT_DIR: .ci/nd-arm-cu13
+  script:
+    - bash .gitlab/ci/scripts/build-nd.sh make
+  artifacts:
+    expire_in: 48 hours
+
+# Keeps the consumer CMake path (library, nd_test, install) building; nothing
+# from it runs.
+build:nd-cmake:
+  extends: .ipp6-x86-cu13-build
+  stage: extensions
+  timeout: 1h
+  needs:
+    - job: build:nccl
+      parallel:
+        matrix:
+          - ARCH: x86
+            CUDA: cu13
+      artifacts: true
+  variables:
+    NCCL_HOME: "${CI_PROJECT_DIR}/.ci/nccl-x86-cu13/build"
+    CMAKE_CUDA_ARCHITECTURES: "90"
+  script:
+    - bash .gitlab/ci/scripts/build-nd.sh cmake
+
 # One CUDA 13.4 EP build serves both CFT driver environments (polyphe, pre-tyche);
 # build_cft_ci.sh reuses the prebuilt ARM NCCL through NCCL_PREBUILT_DIR.
 build:cft-arm-cu134:
@@ -470,6 +516,44 @@ test:ep:
   trigger:
     include:
       - local: nccl_ep/.gitlab-ci.yml
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: true
+
+test:nd:
+  stage: test
+  inherit:
+    variables: false
+  needs:
+    - job: build:nccl
+      parallel:
+        matrix:
+          - ARCH: x86
+            CUDA: cu12
+      artifacts: false
+    - job: build:nd
+      optional: true
+      artifacts: false
+  rules:
+    # Non-merge-request pipelines: always run (no reliable `changes:` context).
+    - if: '$CI_PIPELINE_SOURCE != "merge_request_event"'
+    # Merge request pipelines: run only when this module or shared infra changed.
+    # ND builds through the shared makefiles, so they count as its sources.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - nccl_nd/**/*
+        - makefiles/**/*
+        - Makefile
+        - .gitlab-ci.yml
+        - .gitlab/**/*
+        - .gitmodules
+        - third_party/**/*
+  variables:
+    PARENT_PIPELINE_ID: "${CI_PIPELINE_ID}"
+  trigger:
+    include:
+      - local: nccl_nd/.gitlab-ci.yml
     strategy: depend
     forward:
       yaml_variables: true
