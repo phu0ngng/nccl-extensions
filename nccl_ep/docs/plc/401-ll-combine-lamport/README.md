@@ -229,8 +229,14 @@ A masked rank is re-admitted only through `ncclEpMaskClean`: `ncclEpMaskUpdate`
 alone leaves a late peer's payload and the old round state in the region, and the
 next combine would consume them as data.
 
-**Handle creation and top-k growth.** A handle with a larger top-k than the
-region's capacity grows it. In an auto-sized group that reallocates the RDMA
+**Handle creation and top-k growth.** A group that declares a top-k bound
+(`ncclEpGroupConfig_t::num_topk`) gets the region at that capacity from the
+start: in a user-specified buffer at group creation (a buffer too small to hold
+it is rejected there), in an auto-sized buffer at the first Lamport handle, whose
+first allocation is also sized for the bound. No handle may exceed the bound
+(`ncclEpInitHandle` rejects it, as for HT), so the region never grows. Without a
+declared bound the capacity follows the handles: a handle with a larger top-k
+than the region's capacity grows it. In an auto-sized group that reallocates the RDMA
 buffer; with a user-specified size the region is created at the tail in place if
 it fits, and the handle is rejected otherwise. Either way the region is
 re-created: both segments poisoned, round words and counter zeroed, on every rank.
