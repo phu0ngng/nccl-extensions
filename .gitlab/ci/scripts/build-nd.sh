@@ -4,7 +4,8 @@
 #
 #   make   build and install the library with Make, compile nd_test against the
 #          installed prefix only, and stage that prefix (lib/, include/, test/)
-#          as the artifact the test child installs.
+#          as the artifact the test child installs. test/ also holds
+#          nd_fault_test, which compiles the library source with fault hooks.
 #   cmake  configure with NCCL_ND_BUILD_TESTS=ON, build, install, and check the
 #          installed layout. Nothing built here runs.
 #
@@ -88,6 +89,7 @@ if [[ "${mode}" == make ]]; then
     "${CI_PROJECT_DIR}/nccl_nd/tests/nd_test.cu" \
     -L"${MODULE_ARTIFACT_DIR}/lib" -lnccl_nd -L"${NCCL_HOME}/lib" -lnccl \
     -o "${MODULE_ARTIFACT_DIR}/test/nd_test"
+  install -m 755 "${ND_BUILD_DIR}/test/nccl_nd/nd_fault_test" "${MODULE_ARTIFACT_DIR}/test/"
   echo ">>> [nd] staged ${MODULE_ARTIFACT_DIR}"
   exit 0
 fi
@@ -115,7 +117,9 @@ echo ">>> [nd] cmake configure (sm ${CMAKE_CUDA_ARCHITECTURES}, prefix ${CMAKE_I
   -DCMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}" \
   -DCMAKE_INSTALL_LIBDIR=lib
 "${CMAKE[@]}" --build "${ND_BUILD_DIR}" --parallel "${BUILD_JOBS}"
-[[ -x "${ND_BUILD_DIR}/test/nccl_nd/nd_test" ]] || fail "cmake build left no executable test/nccl_nd/nd_test"
+for built in test/nccl_nd/nd_test test/nccl_nd/nd_fault_test; do
+  [[ -x "${ND_BUILD_DIR}/${built}" ]] || fail "cmake build left no executable ${built}"
+done
 "${CMAKE[@]}" --install "${ND_BUILD_DIR}"
 [[ -s "${CMAKE_INSTALL_PREFIX}/include/nccl_nd.h" ]] || fail "cmake --install left no include/nccl_nd.h"
 check_library "${CMAKE_INSTALL_PREFIX}/lib/libnccl_nd.so"

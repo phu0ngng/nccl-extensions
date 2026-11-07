@@ -111,11 +111,12 @@ so there is no EP guard.
 **ND.** nccl_nd is not part of the Python package, so it has no `build_lib.py` recipe. `build:nd`
 runs `.gitlab/ci/scripts/build-nd.sh make`: `make lib tests` and `make install` into
 `${MODULE_ARTIFACT_DIR}`, then `nd_test` compiled against that installed prefix only. The artifact
-holds `lib/libnccl_nd.so*`, `include/nccl_nd.h` and `test/nd_test`; the ND child runs it on EOS
-through `nccl_nd/tests/run_tests.sh`. `build:nd-cmake` runs `build-nd.sh cmake` against the x86 cu13
-NCCL artifact: configure with `NCCL_ND_BUILD_TESTS=ON`, build, install and check the installed
-library and header. Both modes assert that the library exports exactly the public `ncclNd*` entry
-points (`AllToAll`, `Create`, `Destroy`, `GetVersion`, `GroupStart`, `GroupEnd`) and does not link
+holds `lib/libnccl_nd.so*`, `include/nccl_nd.h`, `test/nd_test` and `test/nd_fault_test` (the
+library source compiled with test-only fault hooks); the ND child runs both on EOS through
+`nccl_nd/tests/run_tests.sh`. `build:nd-cmake` runs `build-nd.sh cmake` against the x86 cu13 NCCL
+artifact: configure with `NCCL_ND_BUILD_TESTS=ON`, build, install and check the installed library
+and header. Both modes assert that the library exports exactly the public `ncclNd*` entry points
+(`AllToAll`, `Create`, `Destroy`, `GetVersion`, `GroupStart`, `GroupEnd`) and does not link
 `libcuda` directly.
 
 **CFT.** `build:cft-arm-cu134` runs `nccl_ep/ci/build_cft_ci.sh`: the CFT

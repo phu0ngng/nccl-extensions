@@ -1,6 +1,6 @@
 # Standalone NCCL ND child pipeline, dispatched by the repository root CI.
 # Builds live in the parent pipeline; this child installs the x86 cu12 artifact
-# (library, header and the nd_test built against them) on EOS and runs
+# (library, header, the nd_test built against them and nd_fault_test) on EOS and runs
 # tests/run_tests.sh on one 8xH100 node. Slurm stays in this file.
 
 include:
@@ -43,6 +43,7 @@ setup:eos:
       cp -a "${CI_PROJECT_DIR}/.ci/nccl-x86-cu12/build/." "${dst}/"
       cp -a "${CI_PROJECT_DIR}/.ci/nd-x86-cu12/." "${dst}/"
       test -x "${dst}/test/nd_test"
+      test -x "${dst}/test/nd_fault_test"
 
 unit:eos:
   stage: unit_test
