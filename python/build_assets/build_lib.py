@@ -184,11 +184,11 @@ class Target:
         """Copy this target's owned artifacts into its Python package."""
         headers = self.installed_headers()
         package_dir = output_dir / self.spec.package_relpath
-        library_destination = (
-            package_dir / "lib" / f"cu{cuda_major}" / self.spec.library
-        )
-        library_destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self.library, library_destination, follow_symlinks=True)
+        # Match the bundled EP SONAME expected by the loader and wheel manifest.
+        filename = "libnccl_ep.so.0" if self.name == "nccl_ep" else self.spec.library
+        destination = package_dir / "lib" / f"cu{cuda_major}"
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.library, destination / filename)
 
         headers_destination = package_dir / "include"
         if headers_destination.is_symlink() or headers_destination.is_file():

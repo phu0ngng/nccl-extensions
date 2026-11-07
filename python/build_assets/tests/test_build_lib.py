@@ -122,7 +122,10 @@ class BuildDirTest(unittest.TestCase):
         self.assertTrue(build_dir.startswith(str(self.tmpdir)), build_dir)
         self.assertFalse(Path(build_dir).exists())
         self.assertEqual(list(self.tmpdir.iterdir()), [])
-        self.assertTrue((self.output / "nccl/ep/lib/cu12/libnccl_ep.so").is_file())
+        self.assertFalse((self.output / "nccl/ep/lib/cu12/libnccl_ep.so").exists())
+        soname = self.output / "nccl/ep/lib/cu12/libnccl_ep.so.0"
+        self.assertTrue(soname.is_file())
+        self.assertFalse(soname.is_symlink())
         self.assertTrue(
             (self.output / "nccl/ep/include/nccl_ep/device/ll/ll_common.cuh").is_file())
 
@@ -133,7 +136,10 @@ class BuildDirTest(unittest.TestCase):
         for relative in ("lib/libnccl_ep.so", "lib/libnccl_ep.a", "include/nccl_ep.h",
                          "include/nccl_ep/ep_enums.h", "obj/nccl_ep/nccl_ep.o"):
             self.assertTrue((build / relative).exists(), relative)
-        self.assertTrue((self.output / "nccl/ep/lib/cu12/libnccl_ep.so").is_file())
+        self.assertFalse((self.output / "nccl/ep/lib/cu12/libnccl_ep.so").exists())
+        soname = self.output / "nccl/ep/lib/cu12/libnccl_ep.so.0"
+        self.assertTrue(soname.is_file())
+        self.assertFalse(soname.is_symlink())
         self.assertTrue((self.output / "nccl/ep/include/nccl_ep.h").is_file())
         # The staging temporary directory is still cleaned up in this mode.
         self.assertEqual(list(self.tmpdir.iterdir()), [])

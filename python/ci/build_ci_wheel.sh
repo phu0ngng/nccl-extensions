@@ -57,13 +57,18 @@ cleanup() {
     rm -rf "${WORK_DIR}"
 }
 
-# stage_library <build dir> <package dir> <variant> <library>: the loader opens
-# lib/<variant>/<library>, so the symlink chain is flattened into that one file.
+# stage_library <build dir> <package dir> <variant> <library>:
+# copy to lib/<variant>/ using EP's SONAME or M2N's existing filename.
 stage_library() {
     local build_dir=$1 package_dir=$2 variant=$3 library=$4
     test -s "${build_dir}/lib/${library}"
+    local filename="${library}"
+    # Match the bundled EP SONAME expected by the loader and wheel manifest.
+    if [[ "${library}" == libnccl_ep.so ]]; then
+        filename=libnccl_ep.so.0
+    fi
     mkdir -p "${package_dir}/lib/${variant}"
-    cp -L "${build_dir}/lib/${library}" "${package_dir}/lib/${variant}/${library}"
+    cp -L "${build_dir}/lib/${library}" "${package_dir}/lib/${variant}/${filename}"
 }
 
 # stage_headers <include dir> <destination> <pattern>...: every pattern must match a file.
@@ -103,7 +108,7 @@ check_headers_match() {
 }
 
 # Stage the four libraries and the cu12 headers where the release puts them:
-#   nccl/ep/lib/{cu12,cu13}/libnccl_ep.so    nccl/ep/include/{nccl_ep.h,nccl_ep/**}
+#   nccl/ep/lib/{cu12,cu13}/libnccl_ep.so.MAJOR nccl/ep/include/{nccl_ep.h,nccl_ep/**}
 #   nccl/m2n/lib/{cu12,cu13}/libnccl_m2n.so  nccl/m2n/include/nccl_m2n.h
 stage_libs() {
     local ep_cu12 ep_cu13 m2n_cu12 m2n_cu13
@@ -180,24 +185,43 @@ check_dists() {
 
     "${PYTHON}" - "${WHEEL}" "${PACKAGE_DIR}" <<'PY'
 import os
+from pathlib import Path
+import re
+import subprocess
 import sys
 import zipfile
 
 wheel_path, package_dir = sys.argv[1:3]
 expected = {
-    "nccl/ep/lib/cu12/libnccl_ep.so",
-    "nccl/ep/lib/cu13/libnccl_ep.so",
     "nccl/m2n/lib/cu12/libnccl_m2n.so",
     "nccl/m2n/lib/cu13/libnccl_m2n.so",
     "nccl/ep/include/nccl_ep.h",
     "nccl/m2n/include/nccl_m2n.h",
 }
+for variant in ("cu12", "cu13"):
+    directory = Path(package_dir) / "nccl/ep/lib" / variant
+    libraries = list(directory.glob("libnccl_ep.so*"))
+    if len(libraries) != 1:
+        raise SystemExit(f"expected one EP SONAME file in {directory}: {libraries}")
+    library = str(libraries[0])
+    dynamic = subprocess.check_output(
+        ["readelf", "-d", library], text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    soname = re.search(r"\(SONAME\).*\[(libnccl_ep\.so\.\d+)\]", dynamic)
+    if soname is None:
+        raise SystemExit(f"missing EP SONAME: {library}")
+    if libraries[0].name != soname.group(1):
+        raise SystemExit(f"EP filename does not match SONAME: {library}")
+    expected.add(f"nccl/ep/lib/{variant}/{soname.group(1)}")
 for staged in ("nccl/ep/lib", "nccl/ep/include", "nccl/m2n/lib", "nccl/m2n/include"):
     for dirpath, _, files in os.walk(os.path.join(package_dir, staged)):
         for name in files:
             expected.add(os.path.relpath(os.path.join(dirpath, name), package_dir))
 with zipfile.ZipFile(wheel_path) as wheel:
     names = set(wheel.namelist())
+    if any(name.endswith("/libnccl_ep.so") for name in names):
+        raise SystemExit("wheel contains an unversioned EP library copy")
     missing = sorted(expected - names)
     if missing:
         raise SystemExit("wheel is missing: " + ", ".join(missing))

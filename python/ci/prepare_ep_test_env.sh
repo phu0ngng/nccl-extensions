@@ -35,11 +35,12 @@ trap cleanup_package_artifacts EXIT
 rm -rf "${WORK_DIR}" "${DIST_DIR}"
 cleanup_package_artifacts
 mkdir -p \
-    "${EP_PACKAGE_DIR}/lib" \
+    "${EP_PACKAGE_DIR}/lib/cu12" \
     "${EP_PACKAGE_DIR}/include" \
     "${DIST_DIR}" \
     "${WORK_DIR}"
-cp "${LIBRARY}" "${EP_PACKAGE_DIR}/lib/libnccl_ep.so"
+# Copy under the bundled SONAME, following the native build symlink.
+cp -L "${LIBRARY}" "${EP_PACKAGE_DIR}/lib/cu12/libnccl_ep.so.0"
 cp "${HEADER}" "${EP_PACKAGE_DIR}/include/nccl_ep.h"
 cp -a "${JIT_HEADERS}" "${EP_PACKAGE_DIR}/include/nccl_ep"
 

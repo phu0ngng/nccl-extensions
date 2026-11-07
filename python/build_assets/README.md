@@ -79,14 +79,20 @@ reused, never deleted, on later runs. Reuse is make's: a changed `CUDA_HOME`,
 `NVCC_GENCODE` or `NCCL_HOME` is not detected, so use one directory per
 configuration (CI starts every job from an empty tree).
 
-The installed build layout is preserved below each target's package:
+The native artifacts are staged below each target's package:
 
 ```text
-build/lib/libnccl_ep.so   -> nccl/ep/lib/cu<major>/libnccl_ep.so
+build/lib/libnccl_ep.so   -> nccl/ep/lib/cu<major>/libnccl_ep.so.0
 build/include/**          -> nccl/ep/include/**
 build/lib/libnccl_m2n.so  -> nccl/m2n/lib/cu<major>/libnccl_m2n.so
 build/include/nccl_m2n.h  -> nccl/m2n/include/nccl_m2n.h
 ```
+
+Staging copies EP under the fixed bundled SONAME `libnccl_ep.so.0`, matching
+its Python loader and wheel manifest. The copy follows the native build
+symlink and produces a regular file. M2N retains its unversioned filename.
+See the [Python package README](../README.md) for runtime loading and native
+linking instructions.
 
 `build_lib.py` obtains `<major>` from the Toolkit selected by `--cuda-home`
 (or `CUDA_PATH` / `CUDA_HOME`) and currently accepts CUDA 12 and CUDA 13.

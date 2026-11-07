@@ -77,7 +77,7 @@ check:images:
       done
 
 # Unit tests for the CI scripts (.gitlab/ci/tests) and the library build script
-# (python/build_assets/tests); toolchain and registry are shimmed.
+# (python/build_assets/tests), including a host-only ELF/wheel loader regression.
 check:ci-unit:
   stage: check
   image: python:3.12-slim
@@ -95,7 +95,13 @@ check:ci-unit:
     - changes:
         - .gitlab/ci/**/*
         - python/build_assets/**/*
+        - python/pyproject.toml
+        - python/setup.py
+        - python/nccl/_extensions/_runtime.py
+        - python/ci/**/*
   script:
+    - apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev binutils
+    - python3 -m pip install 'setuptools>=77.0.3'
     - python3 -m unittest discover -s .gitlab/ci/tests -v
     - python3 -m unittest discover -s python/build_assets/tests -v
 

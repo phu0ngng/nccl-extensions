@@ -182,9 +182,9 @@ export CIBW_BEFORE_ALL="git config --global --add safe.directory $QUOTED_REPO_RO
         --cuda-home \"\$CUDA13_HOME\" --output-dir \"\$NATIVE_STAGING/cu13\" && \
     echo \">>> Finished native build with CUDA 13: \$CUDA13_HOME\" && \
     if readelf -d \
-        \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so\" \
+        \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so.0\" \
         \"\$NATIVE_STAGING/cu12/nccl/m2n/lib/cu12/libnccl_m2n.so\" \
-        \"\$NATIVE_STAGING/cu13/nccl/ep/lib/cu13/libnccl_ep.so\" \
+        \"\$NATIVE_STAGING/cu13/nccl/ep/lib/cu13/libnccl_ep.so.0\" \
         \"\$NATIVE_STAGING/cu13/nccl/m2n/lib/cu13/libnccl_m2n.so\" | \
         grep -q 'libcudart\\.so'; then \
         echo 'Error: native libraries must not dynamically link libcudart' >&2; \
@@ -198,10 +198,10 @@ export CIBW_BEFORE_ALL="git config --global --add safe.directory $QUOTED_REPO_RO
         \"\$NATIVE_STAGING/cu13/nccl/m2n/include\" && \
     mkdir -p \"{package}/nccl/ep/lib/cu12\" \"{package}/nccl/ep/lib/cu13\" \
         \"{package}/nccl/m2n/lib/cu12\" \"{package}/nccl/m2n/lib/cu13\" && \
-    cp \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so\" \
-        \"{package}/nccl/ep/lib/cu12/libnccl_ep.so\" && \
-    cp \"\$NATIVE_STAGING/cu13/nccl/ep/lib/cu13/libnccl_ep.so\" \
-        \"{package}/nccl/ep/lib/cu13/libnccl_ep.so\" && \
+    cp \"\$NATIVE_STAGING/cu12/nccl/ep/lib/cu12/libnccl_ep.so.0\" \
+        \"{package}/nccl/ep/lib/cu12/\" && \
+    cp \"\$NATIVE_STAGING/cu13/nccl/ep/lib/cu13/libnccl_ep.so.0\" \
+        \"{package}/nccl/ep/lib/cu13/\" && \
     cp \"\$NATIVE_STAGING/cu12/nccl/m2n/lib/cu12/libnccl_m2n.so\" \
         \"{package}/nccl/m2n/lib/cu12/libnccl_m2n.so\" && \
     cp \"\$NATIVE_STAGING/cu13/nccl/m2n/lib/cu13/libnccl_m2n.so\" \
