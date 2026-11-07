@@ -114,8 +114,9 @@ runs `.gitlab/ci/scripts/build-nd.sh make`: `make lib tests` and `make install` 
 holds `lib/libnccl_nd.so*`, `include/nccl_nd.h` and `test/nd_test`; the ND child runs it on EOS
 through `nccl_nd/tests/run_tests.sh`. `build:nd-cmake` runs `build-nd.sh cmake` against the x86 cu13
 NCCL artifact: configure with `NCCL_ND_BUILD_TESTS=ON`, build, install and check the installed
-library and header. Both modes assert that the library exports exactly the four `ncclNd*` entry
-points and does not link `libcuda` directly.
+library and header. Both modes assert that the library exports exactly the public `ncclNd*` entry
+points (`AllToAll`, `Create`, `Destroy`, `GetVersion`, `GroupStart`, `GroupEnd`) and does not link
+`libcuda` directly.
 
 **CFT.** `build:cft-arm-cu134` runs `nccl_ep/ci/build_cft_ci.sh`: the CFT
 variant of EP for `sm_100` without CUPTI, `ep_test`, `ep_bench`, `test_cft_compatibility` and

@@ -8,7 +8,7 @@
 #   cmake  configure with NCCL_ND_BUILD_TESTS=ON, build, install, and check the
 #          installed layout. Nothing built here runs.
 #
-# Both modes assert that the library exports exactly the four ncclNd* entry
+# Both modes assert that the library exports exactly the public ncclNd* entry
 # points and does not link libcuda directly.
 #
 # Inputs (environment):
@@ -55,8 +55,8 @@ check_library() {
   local lib="$1" exported
   [[ -s "${lib}" ]] || fail "no library at ${lib}"
   exported="$(nm -D --defined-only "${lib}" | awk '$2 == "T" && $3 ~ /^ncclNd/ { print $3 }' | sort | tr '\n' ' ')"
-  [[ "${exported}" == "ncclNdAllToAll ncclNdCreate ncclNdDestroy ncclNdGetVersion " ]] ||
-    fail "${lib} exports '${exported}', expected the four ncclNd* entry points"
+  local expected="ncclNdAllToAll ncclNdCreate ncclNdDestroy ncclNdGetVersion ncclNdGroupEnd ncclNdGroupStart "
+  [[ "${exported}" == "${expected}" ]] || fail "${lib} exports '${exported}', expected '${expected}'"
   if readelf -d "${lib}" | grep -q 'NEEDED.*libcuda\.so'; then
     fail "${lib} links libcuda directly"
   fi

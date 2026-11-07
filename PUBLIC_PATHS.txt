@@ -43,3 +43,6 @@ nccl_ep/docs/agents/reviews/**
 
 # Internal NCCL M2N PLC design documents are never part of the public export.
 nccl_m2n/docs/plc/**
+
+# The internal NCCL ND PLC design document and its figures are never part of the public export.
+nccl_nd/docs/plc*
