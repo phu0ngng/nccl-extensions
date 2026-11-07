@@ -6,8 +6,9 @@
 #          installed prefix only, and stage that prefix (lib/, include/, test/)
 #          as the artifact the test child installs. test/ also holds
 #          nd_fault_test, which compiles the library source with fault hooks.
-#   cmake  configure with NCCL_ND_BUILD_TESTS=ON, build, install, and check the
-#          installed layout. Nothing built here runs.
+#   cmake  configure with NCCL_ND_BUILD_TESTS=ON and NCCL_ND_BUILD_BENCH=ON,
+#          build, install, and check the installed layout. Nothing built here
+#          runs.
 #
 # Both modes assert that the library exports exactly the public ncclNd* entry
 # points and does not link libcuda directly.
@@ -73,8 +74,8 @@ if [[ "${mode}" == make ]]; then
   : "${MODULE_ARTIFACT_DIR:?MODULE_ARTIFACT_DIR must name the directory to stage the artifact in}"
   MODULE_ARTIFACT_DIR="$(abs "${MODULE_ARTIFACT_DIR}")"
   rm -rf "${MODULE_ARTIFACT_DIR}"
-  echo ">>> [nd] make lib tests (${NVCC_GENCODE})"
-  make -C "${CI_PROJECT_DIR}/nccl_nd" -j "${BUILD_JOBS}" lib tests \
+  echo ">>> [nd] make lib tests bench (${NVCC_GENCODE})"
+  make -C "${CI_PROJECT_DIR}/nccl_nd" -j "${BUILD_JOBS}" lib tests bench \
     BUILDDIR="${ND_BUILD_DIR}" NCCL_HOME="${NCCL_HOME}" CUDA_HOME="${CUDA_HOME}" NVCC_GENCODE="${NVCC_GENCODE}"
   echo ">>> [nd] make install: ${MODULE_ARTIFACT_DIR}"
   make -C "${CI_PROJECT_DIR}/nccl_nd" install \
@@ -114,10 +115,11 @@ echo ">>> [nd] cmake configure (sm ${CMAKE_CUDA_ARCHITECTURES}, prefix ${CMAKE_I
   -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
   -DNCCL_HOME="${NCCL_HOME}" \
   -DNCCL_ND_BUILD_TESTS=ON \
+  -DNCCL_ND_BUILD_BENCH=ON \
   -DCMAKE_INSTALL_PREFIX="${CMAKE_INSTALL_PREFIX}" \
   -DCMAKE_INSTALL_LIBDIR=lib
 "${CMAKE[@]}" --build "${ND_BUILD_DIR}" --parallel "${BUILD_JOBS}"
-for built in test/nccl_nd/nd_test test/nccl_nd/nd_fault_test; do
+for built in test/nccl_nd/nd_test test/nccl_nd/nd_fault_test bench/nccl_nd/qkv_bench; do
   [[ -x "${ND_BUILD_DIR}/${built}" ]] || fail "cmake build left no executable ${built}"
 done
 "${CMAKE[@]}" --install "${ND_BUILD_DIR}"
