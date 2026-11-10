@@ -14,6 +14,7 @@ exclusion without an explicit review.
 - [HT EM pull dispatch + push combine](ht-em-pull-push/README.md) — local `recv_x_em`, fused local permute, sparse weights end-to-end.
 - [Relative rank slot addressing for the LL dispatch staging buffer](ll-relative-rank-slot/README.md) — spreads per-rank write offsets to avoid receive-side camping.
 - [MXFP8 combine](mxfp8-combine/README.md) — FP8 E4M3 + E8M0 block scales fused into the local permute reduce; packed NVLink row, BF16 RDMA hop.
+- [MR343: HT EM push combine MXFP8](343-ht-em-combine-push-mxfp8/README.md) — MXFP8 quantize fused into the push combine reduce epilogue, dequantized in the final reduce; follow-up to the local-permute MXFP8 combine.
 - [HT EM dispatch push count-exchange](ht-em-dispatch-push-count-exchange/README.md) — count-row exchange replaces per-token bitmap AllGather + global scan; receiver s2d/LERM rebuilt inside dispatch.
 - [HT EM dispatch pull count-exchange](ht-em-dispatch-pull-count-exchange/README.md) — same count-exchange idea ported to pull-push: CTA 0 pushes count+top-k to peer inboxes, MAP warps rebuild receiver maps locally instead of a scan.
 - [MR171: HT compact top-k weights and IDs](mr171-ht-compact-prob-wire/README.md) — automatic compact push dispatch with original-order weights and inline expert IDs, compact FP32 gradients for backward combine; pull-push keeps its existing sparse-direct path.

@@ -371,12 +371,31 @@ tests:
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_mxfp8_combine"
+    matrix:
+      - name_suffix: default
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+        args_append: "--gtest_filter=*Push*"
 
   - name: test_mxfp8_combine_conversion
     binary: "@bash"
     args: >-
       "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
       "${NCCL_HOME}/test/nccl_ep/test_mxfp8_combine_conversion"
+    matrix:
+      - name_suffix: default
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
 
   # Only these local-permute cases support pull-count with the existing budgets.
   - name: test_ht_overflow_drop_pull_count

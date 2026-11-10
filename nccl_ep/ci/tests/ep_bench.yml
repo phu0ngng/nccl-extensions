@@ -159,6 +159,15 @@ tests:
     labels: [high_throughput, pull_push]
     matrix:
       - {name_suffix: mxfp8, args_append: "--dispatch-only --mxfp8"}
+      - {name_suffix: mxfp8_combine, args_append: "--combine-quantization mxfp8"}
+      - name_suffix: mxfp8_combine_unfused_sync
+        args_append: "--combine-quantization mxfp8"
+        env:
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+      - name_suffix: mxfp8_combine_partial_round
+        args: "--algorithm high-throughput --layout em --tokens 4096 --hidden 1536 --top-k 8 --experts 256 --validate --combine-quantization mxfp8"
+        env:
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
 
   - name: ep_bench_high_throughput_fp32
     binary: nccl_ep/ep_bench
