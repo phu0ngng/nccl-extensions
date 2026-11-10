@@ -320,6 +320,40 @@ INSTANTIATE_TEST_SUITE_P(Sizing, CombinePushChunkingTest, ::testing::ValuesIn(kC
                               return info.param.name;
                           });
 
+// Multi-chunk row (hidden_int4=896, two-tile chunks): teams below kCombinePushTmaStoreMinTeam store it
+// directly, with every warp, no dynamic smem and no chunk limit; the TMA store sizes the block by its
+// chunk buffer and rejects a chunk wider than the cap.
+TEST(CombinePushLaunchShape, DirectStoreHasNoChunkBuffer) {
+    constexpr int kHiddenInt4 = 896;
+    constexpr int kTeam = ht_ep::kCombinePushTmaStoreMinTeam;
+    const int chunk = ht_ep::combine_push_chunk_size(kHiddenInt4, 200);
+    const int chunk_bytes = ht_ep::combine_push_buf_int4(kHiddenInt4, chunk) * 16;
+    ASSERT_EQ(chunk_bytes, 4096);
+    EXPECT_TRUE(ht_ep::combine_push_direct_store(kTeam - 1, kHiddenInt4, chunk));
+    EXPECT_FALSE(ht_ep::combine_push_direct_store(kTeam - 1, kHiddenInt4, 0));  // single chunk
+    EXPECT_FALSE(ht_ep::combine_push_direct_store(kTeam, kHiddenInt4, chunk));
+
+    const int tight_cap = ht_ep::combine_push_meta_reserve_bytes() + chunk_bytes / 2;  // half a chunk
+    struct Case {
+        bool direct;
+        int cap, slots, smem;
+        bool fits;
+    };
+    const Case cases[] = {
+        {true, 232448, ht_ep::kCombinePushMaxSlots, 0, true},
+        {true, tight_cap, ht_ep::kCombinePushMaxSlots, 0, true},
+        {false, 232448, ht_ep::kCombinePushMaxSlots, ht_ep::kCombinePushMaxSlots * chunk_bytes, true},
+        {false, tight_cap, 1, chunk_bytes, false},
+    };
+    for (const Case& c : cases) {
+        const auto shape =
+            ht_ep::combine_push_launch_shape(false, c.direct, kHiddenInt4 * 16, kHiddenInt4, chunk, c.cap);
+        EXPECT_EQ(shape.slots, c.slots) << "direct " << c.direct << " cap " << c.cap;
+        EXPECT_EQ(shape.dynamic_smem_bytes, c.smem) << "direct " << c.direct << " cap " << c.cap;
+        EXPECT_EQ(shape.chunk_fits, c.fits) << "direct " << c.direct << " cap " << c.cap;
+    }
+}
+
 static float bf16_val(nv_bfloat16 v) {
     return __bfloat162float(v);
 }

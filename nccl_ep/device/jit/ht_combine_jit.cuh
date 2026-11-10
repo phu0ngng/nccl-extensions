@@ -579,17 +579,21 @@ inline ncclResult_t launch_combine_push(
     }
     const int chunk_size = ::ht_ep::combine_push_chunk_size(row_int4, requested_int4);
     const int kernel_chunk_size = mxfp8 ? 0 : chunk_size;
-    const int slots = param.flat
-        ? std::min(::ht_ep::kCombinePushMaxSlots, smem_cap / (row_bytes + 16))
-        : ::ht_ep::combine_push_slots_per_block(row_int4, smem_cap, chunk_size);
+    // Test only: NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE keeps the TMA store in teams below the direct-store threshold.
+    const bool direct_store = !param.flat &&
+        ::ht_ep::combine_push_direct_store(param.lsa_team_size, hidden_int4, kernel_chunk_size) &&
+        !::nccl_ep::jit::env_flag_enabled("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE");
+    const ::ht_ep::combine_push_launch_shape_t shape = ::ht_ep::combine_push_launch_shape(
+        param.flat, direct_store, row_bytes, row_int4, chunk_size, smem_cap);
+    const int slots = shape.slots;
     if (slots == 0) {
         std::fprintf(stderr, "[nccl_ep] combine push: a %d-byte row exceeds the %d-byte shared memory budget\n",
                      row_bytes, smem_cap);
         return ncclInvalidArgument;
     }
     const int block_dim = slots * 32;
-    const int chunk_bytes = ::ht_ep::combine_push_buf_int4(row_int4, chunk_size) * 16;
-    if (!param.flat && chunk_bytes > smem_cap - ::ht_ep::combine_push_meta_reserve_bytes()) {
+    if (!shape.chunk_fits) {
+        const int chunk_bytes = ::ht_ep::combine_push_buf_int4(row_int4, chunk_size) * 16;
         std::fprintf(stderr,
                      "[nccl_ep] combine push: a %d-byte chunk does not fit the %d-byte shared memory cap; "
                      "set NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE to a smaller chunk\n",
@@ -598,7 +602,7 @@ inline ncclResult_t launch_combine_push(
     }
 
     int ring = 0;
-    if (!param.flat && !mxfp8 && (force_ring || ::nccl_ep::ht_combine_push_ring_enabled(device_sm))) {
+    if (!param.flat && !mxfp8 && !direct_store && (force_ring || ::nccl_ep::ht_combine_push_ring_enabled(device_sm))) {
         ring = ::ht_ep::combine_push_ring_depth(row_int4, smem_cap, chunk_size, slots, top_k, param.lsa_team_size);
     }
 
@@ -610,7 +614,7 @@ inline ncclResult_t launch_combine_push(
              << ::nccl_ep::jit::token_dtype_name_tag(token_dtype) << ::nccl_ep::jit::combine_recipe_name_tag(recipe)
              << (backward ? "_bwd" : "")
              << "_c" << chunk_size << (param.claim_dynamic ? "_dyn" : "") << (param.flat ? "_flat" : "")
-             << "_w" << slots;
+             << "_w" << slots << (direct_store ? "_direct" : "");
         if (ring > 0) {
             name << "_r" << ring;
         }
@@ -631,7 +635,8 @@ inline ncclResult_t launch_combine_push(
         src << "  extern __shared__ uint8_t smem_bytes[];\n"
             << "  ::ht_ep::combine_push<" << top_k << ", " << hidden_int4 << ", " << token_dtype_literal
             << ", " << recipe_literal << ", " << backward_literal << ", " << kernel_chunk_size << ", "
-            << (param.claim_dynamic ? "true" : "false") << ", " << ring << ">(\n"
+            << (param.claim_dynamic ? "true" : "false") << ", " << ring << ", "
+            << ::nccl_ep::jit::bool_literal(direct_store) << ">(\n"
             << "      p.peer_staging_ptrs,\n"
             << "      reinterpret_cast<const uint8_t*>(p.recv_x_em),\n"
             << "      p.flat2em_slot_map,\n"
@@ -667,8 +672,9 @@ inline ncclResult_t launch_combine_push(
     variant.runtime_key = static_cast<std::uint64_t>(std::hash<std::string>{}(variant_name));
     variant.num_blocks = num_blocks;
     variant.block_dim = block_dim;
-    variant.dynamic_smem_bytes = param.flat ? slots * (row_bytes + 16) : static_cast<int>(
-        ::ht_ep::combine_push_dynamic_smem_bytes(row_int4, slots, chunk_size, ring));
+    variant.dynamic_smem_bytes = ring > 0 ? static_cast<int>(::ht_ep::combine_push_dynamic_smem_bytes(
+                                                row_int4, slots, chunk_size, ring))
+                                          : shape.dynamic_smem_bytes;
     variant.nucs = nucs;
 
     std::string error;
@@ -681,7 +687,7 @@ inline ncclResult_t launch_combine_push(
         return ncclInternalError;
     }
     if (launch_record != nullptr) {
-        *launch_record = {chunk_size, device_sm, ring};
+        *launch_record = {chunk_size, device_sm, ring, direct_store};
     }
     return ncclSuccess;
 }

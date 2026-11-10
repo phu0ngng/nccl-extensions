@@ -6615,6 +6615,35 @@ __host__ __device__ constexpr int combine_push_ring_depth(
     }
     return ring;
 }
+// A multi-chunk row in an LSA team below this size is stored int4 by int4 to the peer, which skips the smem buffer
+// and its per-chunk TMA wait; from this size the TMA store is kept.
+constexpr int kCombinePushTmaStoreMinTeam = 8;
+__host__ __device__ constexpr bool combine_push_direct_store(int lsa_team_size, int hidden_int4, int chunk_size) {
+    return lsa_team_size < kCombinePushTmaStoreMinTeam && combine_push_num_chunks(hidden_int4, chunk_size) > 1;
+}
+// Block shape and dynamic smem of a combine_push launch. FLAT and buffered EM size both by their per-warp smem buffer
+// (slots is 0 when a FLAT row does not fit; chunk_fits is false when a buffered EM chunk does not fit). A direct EM
+// store has no buffer: every warp, no dynamic smem, and no chunk limit.
+struct combine_push_launch_shape_t {
+    int slots;
+    int dynamic_smem_bytes;
+    bool chunk_fits;
+};
+__host__ __device__ constexpr combine_push_launch_shape_t combine_push_launch_shape(
+    bool flat, bool direct_store, int row_bytes, int row_int4, int chunk_size, int smem_cap) {
+    if (flat) {
+        const int fit = smem_cap / (row_bytes + 16);
+        const int slots = fit < kCombinePushMaxSlots ? fit : kCombinePushMaxSlots;
+        return {slots, slots * (row_bytes + 16), true};
+    }
+    if (direct_store) {
+        return {kCombinePushMaxSlots, 0, true};
+    }
+    const int slots = combine_push_slots_per_block(row_int4, smem_cap, chunk_size);
+    const int chunk_bytes = combine_push_buf_int4(row_int4, chunk_size) * 16;
+    return {slots, static_cast<int>(combine_push_dynamic_smem_bytes(row_int4, slots, chunk_size, 0)),
+            chunk_bytes <= smem_cap - combine_push_meta_reserve_bytes()};
+}
 struct local_permute_dup_param_t {
     void* recv_x_em;
     float* recv_topk_weights_em;
@@ -8628,10 +8657,66 @@ struct combine_push_ring_t {
     }
 };
 
+// Store of one chunk of a combine_push row: the reduced int4s go to the warp's smem chunk buffer, which
+// one TMA store pushes to the destination staging row. kDirectStore stores each int4 straight to the destination
+// row instead (see combine_push_direct_store); it uses no buffer.
+template <bool kDirectStore>
+struct combine_push_chunk_store_t {
+    int4* buf;  // the warp's chunk buffer
+    int4* dst;  // the chunk's first int4 in the destination staging row
+
+    // Before a row; lane 0 waits until the warp's previous TMA store has read the buffer.
+    __device__ __forceinline__ static void wait_row(int wlane) {
+        if constexpr (!kDirectStore) {
+            if (wlane == 0) {
+                nccl_ep::tma_store_wait<0>();
+            }
+        }
+    }
+
+    // After the warp's last row; lane 0 waits until every TMA store of the warp has written the destination.
+    __device__ __forceinline__ static void drain(int wlane) {
+        if constexpr (!kDirectStore) {
+            if (wlane == 0) {
+                nccl_ep::tma_store_wait_complete<0>();
+            }
+        }
+    }
+
+    // Before the chunk's first put; when pending, lane 0 waits until the previous chunk's store has read the buffer.
+    __device__ __forceinline__ void wait_buffer(int wlane, bool pending) const {
+        if constexpr (!kDirectStore) {
+            if (pending && wlane == 0) {
+                nccl_ep::tma_store_wait<0>();
+            }
+            __syncwarp();
+        }
+    }
+
+    __device__ __forceinline__ void put(int j, const int4& v) const {
+        if constexpr (kDirectStore) {
+            nccl_ep::st_na_global(dst + j, v);
+        } else {
+            buf[j] = v;
+        }
+    }
+
+    // After the chunk's last put: pushes its first num_int4 int4s.
+    __device__ __forceinline__ void flush(int wlane, int num_int4) const {
+        if constexpr (!kDirectStore) {
+            nccl_ep::tma_store_fence();
+            __syncwarp();
+            if (wlane == 0) {
+                nccl_ep::tma_store_1d(buf, dst, num_int4 * 16);
+            }
+        }
+    }
+};
+
 // One recv slot per warp (kSlotsPerBlock in parallel), identical
 // gather-reduce to local_permute_reduce; the reduced row is assembled in a per-warp smem buffer
 // and pushed to the remote destination staging slot [t*team_size + R], one TMA store per row
-// chunk (see combine_push_buf_int4).
+// chunk (see combine_push_buf_int4); kDirectStore skips the buffer.
 //   kChunkSize - chunk width in int4 (combine_push_chunk_size, resolved host-side in
 //                launch_combine_push); a chunk covering the whole row takes the single-chunk path,
 //                whose prefetch-pipelined reduce needs extra registers. The multi-chunk path stays
@@ -8640,8 +8725,10 @@ struct combine_push_ring_t {
 //                in place in the smem row buffer and pushes the packed [FP8 H | E8M0 H/32] row.
 //   kRing - chunked one-tile path only (combine_push_ring_depth): TMA-load source chunks into kRing
 //                smem stages ahead of the reduce instead of LDG gathers. 0 keeps the LDG gather.
+//   kDirectStore - the multi-chunk path stores the row int4 by int4 to the destination, without
+//                the smem buffer (combine_push_direct_store).
 template <int MaxTopK, int HiddenInt4, ncclDataType_t kTokenDtype, ncclEpCombQuant_t kCombineRecipe,
-          bool BACKWARD_COMBINE = false, int kChunkSize = 0, bool kClaimDynamic, int kRing>
+          bool BACKWARD_COMBINE = false, int kChunkSize = 0, bool kClaimDynamic, int kRing, bool kDirectStore>
 __device__ __forceinline__ void combine_push(
     void* const* __restrict__ peer_staging_ptrs,
     const uint8_t* __restrict__ recv_x_em,
@@ -8697,8 +8784,8 @@ __device__ __forceinline__ void combine_push(
     // word per slot (see combine_push_slots_per_block).
     constexpr int kWarpMbars = kSingleChunk || kRing == 0 ? 1 : kRing;
     __shared__ uint64_t s_mbar[kCombinePushMaxSlots * kWarpMbars];
-    // Dynamic smem: one per-warp chunk buffer for the TMA push (kBufInt4 int4 each), then the
-    // per-warp load ring (kRing stages of kBufInt4 int4).
+    // Dynamic smem: one per-warp chunk buffer for the TMA push (kBufInt4 int4 each; none for
+    // kDirectStore), then the per-warp load ring (kRing stages of kBufInt4 int4).
     int4* const s_rows = reinterpret_cast<int4*>(smem_bytes);
     // Backward co-locates the prob in the token staging row's trailing pad (offset kRowBytes),
     // so no separate prob destination is needed.
@@ -8706,12 +8793,14 @@ __device__ __forceinline__ void combine_push(
     const int tid = threadIdx.x;
     const int slot_in_block = tid / kThreadsPerSlot;
     const int wlane = tid % kThreadsPerSlot;
-    // This warp's push staging buffer (one chunk of the row).
+    // This warp's push staging buffer (one chunk of the row); null for kDirectStore.
     constexpr int kBufInt4 =
         kMxfp8 ? combine_push_mxfp8_fused_int4(HiddenInt4) : combine_push_buf_int4(HiddenInt4, kChunkSize);
     static_assert(kRing == 0 || (!kMxfp8 && combine_push_ring_supported(HiddenInt4, kChunkSize)),
                   "load ring needs the multi-chunk one-tile path");
-    int4* const my_row = s_rows + static_cast<size_t>(slot_in_block) * kBufInt4;
+    static_assert(!kDirectStore || !kSingleChunk, "the direct store serves the multi-chunk path only");
+    static_assert(kRing == 0 || !kDirectStore, "the load ring serves the TMA store only");
+    int4* const my_row = kDirectStore ? nullptr : s_rows + static_cast<size_t>(slot_in_block) * kBufInt4;
 
     const int num_recv = *num_recv_tokens_dev;
     // Rows are claimed dynamically (see combine_push_claim_t). The pool counter is the
@@ -8808,9 +8897,7 @@ __device__ __forceinline__ void combine_push(
             // Wait for this warp's prior push to drain before reusing its single row buffer. The ring
             // path waits just before writing the buffer, so its loads overlap the drain.
             if constexpr (kRing == 0) {
-                if (wlane == 0) {
-                    nccl_ep::tma_store_wait<0>();
-                }
+                combine_push_chunk_store_t<kDirectStore>::wait_row(wlane);
                 __syncwarp();
             }
             auto src_j = [&](int tile, int u) { return wlane + (tile * kHiddenVec + u) * kThreadsPerSlot; };
@@ -8823,12 +8910,13 @@ __device__ __forceinline__ void combine_push(
             auto tile_j = [&](int t) { const int j = t * kHiddenVec * kThreadsPerSlot; return j < HiddenInt4 ? j : HiddenInt4; };
 
             // Chunked staging, kNumChunks iterations per token:
-            //   - reduce the chunk's tiles into the smem buffer (n copies summed per tile)
-            //   - push the chunk with one TMA store
-            //   - reuse the same buffer for the next chunk
+            //   - reduce the chunk's tiles (n copies summed per tile)
+            //   - store them (combine_push_chunk_store_t: smem buffer plus one TMA store, or direct int4
+            //     stores below kCombinePushTmaStoreMinTeam)
+            //   - the buffered store reuses its buffer for the next chunk
             // No copy-0 prefetch: at this occupancy the warps hide the gather latency, and dropping
-            // it frees registers for the tighter per-thread budget. The reuse-wait (tma_store_wait
-            // below) is hidden by other warps' concurrent gathers at this occupancy, not by this
+            // it frees registers for the tighter per-thread budget. With the buffered store, the reuse-wait
+            // (tma_store_wait below) is hidden by other warps' concurrent gathers at this occupancy, not by this
             // warp's own next chunk. n==1 folds through the same reduce (lossless for finite values;
             // NaN payload/-0 sign are not preserved through the float round-trip).
             // combine_push_tile_int4 must match the tile size the kernel computes here.
@@ -8939,11 +9027,9 @@ __device__ __forceinline__ void combine_push(
                 const int tile1 = tile0 + kChunkTiles < kNTiles ? tile0 + kChunkTiles : kNTiles;
                 const int base_j = tile_j(tile0);
                 const int end_j = tile_j(tile1);
+                const combine_push_chunk_store_t<kDirectStore> store{my_row, dst_int4 + base_j};
                 if constexpr (kRing == 0) {
-                    if (chunk > 0 && wlane == 0) {
-                        nccl_ep::tma_store_wait<0>();  // reuse buffer after prior chunk push
-                    }
-                    __syncwarp();
+                    store.wait_buffer(wlane, chunk > 0);  // reuse buffer after prior chunk push
                 }
                 for (int tile = tile0; tile < tile1; tile++) {
                     const int32_t* const f2e = smem_flat2em_slot_map[slot_in_block];
@@ -8960,8 +9046,10 @@ __device__ __forceinline__ void combine_push(
                         }
                         __syncwarp();
                     } else {
-                        // Copies in ascending order; each batch's loads are all issued before any is summed.
-                        constexpr int kCopyBatch = 8 / kHiddenVec;
+                        // Copies in ascending order; each batch's loads are all issued before any is summed. A
+                        // multi-tile chunk spills at the wider batch under the 24-warp register cap; only the
+                        // direct store narrows it.
+                        constexpr int kCopyBatch = (kDirectStore && kChunkTiles > 1 ? 4 : 8) / kHiddenVec;
 #pragma unroll
                         for (int kb = 0; kb < MaxTopK; kb += kCopyBatch) {
                             if (kb > 0 && kb >= n) {
@@ -9007,14 +9095,10 @@ __device__ __forceinline__ void combine_push(
                         for (int p = 0; p < kPairs; p++) {
                             nccl_ep::st_token_pair<kTokenDtype>(&out, p, acc[u][p]);
                         }
-                        my_row[src_j(tile, u) - base_j] = out;
+                        store.put(src_j(tile, u) - base_j, out);
                     }
                 }
-                nccl_ep::tma_store_fence();
-                __syncwarp();
-                if (wlane == 0) {
-                    nccl_ep::tma_store_1d(my_row, dst_int4 + base_j, (end_j - base_j) * 16);
-                }
+                store.flush(wlane, end_j - base_j);
             }
             }
 
@@ -9033,8 +9117,8 @@ __device__ __forceinline__ void combine_push(
         __syncwarp();
     }
     // Drain all outstanding bulk pushes (global writes complete) before the tail sync makes them
-    // visible to combine_reduce.
-    if (wlane == 0) nccl_ep::tma_store_wait_complete<0>();
+    // visible to combine_reduce. A direct store issues no bulk push.
+    combine_push_chunk_store_t<kDirectStore>::drain(wlane);
     __syncwarp();
 
     // ---- TAIL SYNC: all peer pushes globally visible before combine_reduce reads ----

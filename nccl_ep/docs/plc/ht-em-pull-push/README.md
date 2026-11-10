@@ -190,12 +190,14 @@ the `n` rows into an FP32 accumulator tiled by `kHiddenVec int4` lanes. The
 row can be split into chunks of `kChunkSize` int4 (a whole number of tiles of
 `kHiddenVec * 32` int4, `combine_push_buf_int4`), each reduced into the *same*
 per-warp smem buffer and pushed with its own TMA store, so the buffer only
-holds one chunk, not the whole row (see "Chunking" below). In the
-backward pass the pushed row carries a co-located pad: after the full row is
-pushed, `prob_dst[srcpos[k]] = topk_weights_em[k]`.
+holds one chunk, not the whole row (see "Chunking" below). The diagram shows
+this buffered path; the direct store of small LSA teams is under "Store" below.
+In the backward pass the pushed row carries a co-located pad: after the full
+row is pushed, `prob_dst[srcpos[k]] = topk_weights_em[k]`.
 
 ```text
-Per warp (one claimed recv slot per iteration, n <= top_k valid EM copies)
+Per warp, buffered TMA path
+(one claimed recv slot per iteration, n <= top_k valid EM copies)
 
   +----------------------------------------------------------------------+
   | [1] ballot-compact flat2em_slot_map[slot,*] -> smem[slot_in_block]   |
@@ -238,7 +240,8 @@ Other values are rounded up to whole tiles and clamped to the row,
 and the chunk count is `ceil(hidden / chunk_size)`. A one-tile chunk gives a
 2KB per-warp buffer, so the block keeps all `kCombinePushMaxSlots = 24` warps
 (`combine_push_slots_per_block`) at any hidden size. The chunk body has a
-compile-time copy bound and loads `8 / kHiddenVec` copies per batch before
+compile-time copy bound and loads `8 / kHiddenVec` copies per batch
+(`4 / kHiddenVec` for a multi-tile chunk stored directly, see Store) before
 summing them, and the next claimed slot's routing metadata is loaded one
 iteration ahead and decoded with a multiply-high divide. The chunk size (`kChunkSize`) is
 a compile-time template parameter of `combine_push`, so each value is its own
@@ -285,6 +288,15 @@ correctly. Whole-row, multi-tile-chunk and MXFP8 pushes do not use the ring.
 The ring is on for Rubin (SM107) only (`ht_combine_push_ring_enabled`); on
 GB300 it measured slower at EP 8. The ring unit tests force it on any GPU
 (`ncclEpGroup_test_forceCombinePushRing`).
+
+**Store.** In an LSA team of fewer than 8 ranks (`kCombinePushTmaStoreMinTeam`),
+a row of more than one chunk skips the smem buffer: each lane stores its reduced
+int4s straight to `s_dst` (`combine_push_direct_store`, variant suffix
+`_direct`). The warp neither stages a chunk nor waits for its previous TMA store,
+and the block needs no dynamic smem, so it keeps all 24 warps at any chunk width.
+Larger teams and single-chunk rows keep the TMA store; the 8-rank cutoff is
+not a hardware bound. A direct store does not use the load ring above, so the
+ring runs only in teams of 8 or more ranks.
 
 **Row claiming.** Rows with several valid EM copies cost more than single-copy
 rows, and peer NVLink links differ in speed, so static per-warp row ranges

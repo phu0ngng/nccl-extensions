@@ -840,10 +840,10 @@ TEST_F(HtBwdTopK2Test, CombineWithGradExpertMajor) {
 //
 // combine_push's chunked (multi-chunk) branch needs a row wider than one tile; the shared kHidden=16
 // group's row is a single tile. This fixture runs wide rows through the backward combine-with-grad round
-// trip CombineWithGradExpertMajor uses (one case runs a forward combine): whole-row, forced chunk, default
-// and reused whole-row combines of the same inputs must match each other and an analytic reference,
-// combined_x included; each pass checks the chunk width and load ring the launcher resolved (launch
-// record). Only meaningful under push-combine (NCCL_EP_HT_PULL_PUSH); skips otherwise.
+// trip CombineWithGradExpertMajor uses (one case runs a forward combine): whole-row, forced chunk, default,
+// reused whole-row and TMA-store combines of the same inputs must match each other and an analytic reference,
+// combined_x included; each pass checks the chunk width, store mode and load ring the launcher resolved
+// (launch record). Only meaningful under push-combine (NCCL_EP_HT_PULL_PUSH); skips otherwise.
 
 // Sets an env var for its scope and restores the prior value (or unsets it) on destruction, even
 // if an ASSERT_* mid-scope returns early -- gtest keeps running later tests in the same process.
@@ -1090,23 +1090,28 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
         (c.force_ring || nccl_ep::ht_combine_push_ring_enabled(device_sm)) &&
         ht_ep::combine_push_ring_depth(hidden_int4, smem_cap, kTileInt4, tile_slots, c.top_k, g_nranks) > 0;
 
-    // One combine under a forced chunk size (null: unset); checks the launcher resolved
-    // expected_chunk_int4 for this device, and returns combined_x/w as float.
-    auto combine_pass = [&](const char* chunk_env, int expected_chunk_int4, CombineResult& out) {
+    // One combine under a forced chunk size (null: unset) and store mode ("1" keeps the TMA store where
+    // the direct store is eligible); checks the launcher resolved expected_chunk_int4 and the store mode
+    // for this device, and returns combined_x/w as float.
+    auto combine_pass = [&](const char* chunk_env, const char* tma_store_env, int expected_chunk_int4,
+                            bool expect_direct, CombineResult& out) {
         CUDA_ASSERT(cudaMemset(d_combined_x, 0, tok_elems * eb));
         CUDA_ASSERT(cudaMemset(d_combined_w, 0, c.tokens * c.top_k * sizeof(float)));
         {
             ScopedEnvOverride force_chunk("NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE", chunk_env);
+            ScopedEnvOverride force_store("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE", tma_store_env);
             NCCL_ASSERT(ncclEpCombine(h, &c_in, &c_out, &ccfg, g_stream));
             CUDA_ASSERT(cudaStreamSynchronize(g_stream));
         }
         int chunk_int4 = 0;
         unsigned int launched_sm = 0;
-        ncclEpGroup_test_getLastCombinePushLaunch(group_, &chunk_int4, &launched_sm, &out.ring);
+        bool direct = false;
+        ncclEpGroup_test_getLastCombinePushLaunch(group_, &chunk_int4, &launched_sm, &out.ring, &direct);
         EXPECT_EQ(chunk_int4, expected_chunk_int4)
             << c.name << " chunk env " << (chunk_env != nullptr ? chunk_env : "(unset)");
+        EXPECT_EQ(direct, expect_direct) << c.name << " store mode, TMA store env " << tma_store_env;
         EXPECT_EQ(launched_sm, device_sm) << c.name << " launcher resolved the chunk for the wrong architecture";
-        EXPECT_EQ(out.ring > 0, ring_fits && expected_chunk_int4 == kTileInt4)
+        EXPECT_EQ(out.ring > 0, ring_fits && !expect_direct && expected_chunk_int4 == kTileInt4)
             << c.name << " chunk_int4 " << expected_chunk_int4 << " ring " << out.ring;
         std::vector<uint8_t> raw_x(tok_elems * eb);
         CUDA_ASSERT(cudaMemcpy(raw_x.data(), d_combined_x, raw_x.size(), cudaMemcpyDeviceToHost));
@@ -1121,13 +1126,19 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
     // Whole row, forced multi-chunk, the unset default (one tile at this EP size on every
     // architecture), then whole row again: the last pass reuses the first pass's cached JIT
     // variant while alternating the chunk setting, so a stale cached kernel variant would
-    // surface as a reuse mismatch.
+    // surface as a reuse mismatch. Teams below 8 ranks store multi-chunk rows directly, so a
+    // further pass forces the TMA store used from 8 ranks; ring cases keep it on the default pass too,
+    // since the ring runs on the TMA store only.
     const std::string chunk_req = std::to_string(c.chunk_tiles * tile_elems);
-    CombineResult whole, forced, by_default, reuse;
-    combine_pass("0", whole_row_int4, whole);
-    combine_pass(chunk_req.c_str(), c.chunk_tiles * kTileInt4, forced);
-    combine_pass(nullptr, kTileInt4, by_default);
-    combine_pass("0", whole_row_int4, reuse);
+    const int chunk_req_int4 = c.chunk_tiles * kTileInt4;
+    const bool small_team = g_nranks < ht_ep::kCombinePushTmaStoreMinTeam;
+    CombineResult whole, forced, by_default, reuse, tma;
+    combine_pass("0", "0", whole_row_int4, false, whole);
+    combine_pass(chunk_req.c_str(), "0", chunk_req_int4, small_team, forced);
+    const char* default_store_env = c.force_ring ? "1" : "0";
+    combine_pass(nullptr, default_store_env, kTileInt4, small_team && !c.force_ring, by_default);
+    combine_pass("0", "0", whole_row_int4, false, reuse);
+    combine_pass(chunk_req.c_str(), "1", chunk_req_int4, false, tma);
 
     for (int i = 0; c.backward && i < c.tokens; ++i) {
         for (int k = 0; k < c.top_k; ++k) {
@@ -1181,7 +1192,8 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
         const CombineResult* result;
     };
     for (const Variant& v : {Variant{"multi-chunk", &forced}, Variant{"default", &by_default},
-                             Variant{"reused whole-row (stale JIT variant?)", &reuse}}) {
+                             Variant{"reused whole-row (stale JIT variant?)", &reuse},
+                             Variant{"TMA-store multi-chunk", &tma}}) {
         EXPECT_EQ(count_mismatches(v.label, *v.result), 0) << c.name << " " << v.label << " != whole-row combine";
     }
 
@@ -1212,6 +1224,11 @@ INSTANTIATE_TEST_SUITE_P(
         CombineChunkCase{ncclFloat32, 2048, "fp32_exact"},
         CombineChunkCase{ncclFloat32, 1792, "fp32_partial"},
         CombineChunkCase{ncclFloat16, 3584, "fp16_partial"},
+        // Two-tile chunks over 4.5 and 5 tiles end in a short chunk; top_k 2 gives some rows two
+        // local copies (up to 4 ranks).
+        CombineChunkCase{ncclBfloat16, 4608, "bf16_two_tile_chunk_partial", 2},
+        CombineChunkCase{ncclBfloat16, 4096, "bf16_one_tile_chunk_two_copies", 1, 2},
+        CombineChunkCase{ncclBfloat16, 5120, "bf16_two_tile_chunk_two_copies", 2, 2},
         // top_k 4 at 4 ranks (one copy per row on average) with the ring forced on any device engages
         // the load ring: on the one-tile default here, not on the forced two-tile chunk. The reuse cases
         // run 32 tokens on one combine SM, so each warp refills its ring across rows. With 16 experts, a
