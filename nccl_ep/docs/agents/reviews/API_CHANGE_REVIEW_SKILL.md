@@ -138,6 +138,8 @@ contract, inconsistent error code or hang on misuse is `major`.
   - A required field left at zero is rejected with a returned error naming the field.
   - Where an env variable can also set the value, an explicit API value is authoritative
     and the env variable applies only under AUTO. State this in the field's comment.
+    SM budgets are the documented exception: an operation's env variable and
+    `NCCL_EP_COMM_SMS` beat its field (README SM-budget controls).
 - A newer caller on an older library has its unknown tail dropped. If a field is a pure
   hint, dropping it is fine. If it changes semantics, the caller must be able to detect
   that, and a warning shown only under verbose logging does not satisfy this. Use the

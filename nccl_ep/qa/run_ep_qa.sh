@@ -431,6 +431,13 @@ run_benchmark_suite() {
     run_mpi_case bench-ht-independent-sm-counts "${CASE_TIMEOUT}" "${EP_BENCH}" \
       --algorithm high-throughput --layout fl --tokens 128 --hidden 7168 --top-k 8 --experts 256 \
       --dispatch-num-sms 15 --combine-num-sms 17 --validate
+    # Backward budgets below and above forward; the RDMA lane runs the per-pass tail signals.
+    run_mpi_case bench-ht-backward-sm-counts "${CASE_TIMEOUT}" "${EP_BENCH}" \
+      --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
+      --backward --validate --dispatch-bwd-num-sms 12 --combine-bwd-num-sms 48
+    run_mpi_case bench-ht-backward-sm-counts-wide "${CASE_TIMEOUT}" "${EP_BENCH}" \
+      --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
+      --backward --validate --dispatch-bwd-num-sms 48 --combine-bwd-num-sms 12
     run_mpi_case bench-ht-meta-force-scan "${CASE_TIMEOUT}" "${EP_BENCH}" \
       --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
       --meta-exchange-policy force-scan --validate
