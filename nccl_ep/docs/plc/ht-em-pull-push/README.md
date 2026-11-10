@@ -126,6 +126,60 @@ contiguous window per warp would cluster each wave's reads on one peer. Pull
 uses `token = gwarp * num_waves + wave` so each wave stripes across all
 source ranks, spreading NVLink read bandwidth.
 
+**Dynamic chunk claim (fused count).** With the fused count exchange, the MAP
+warps of each block build per-chunk row ranges (32 tokens, one source rank)
+that the pull warps of the same block consume. A static chunk range per CTA
+leaves CTAs finishing tens of us apart (rows per chunk and link rates vary),
+which is a 30-37 us kernel tail at EP16/32 on Rubin. MAP warps claim chunks
+dynamically instead:
+
+- **Static first chunk.** Every MAP warp takes its first chunk statically
+  (`blockIdx * 2 + map_idx`), so no claim atomic sits on its critical path.
+- **Grid-wide claim.** A MAP warp takes its next chunk with
+  `atomicAdd(chunk_claim, 1)`; a value at or past `nRanks * ceil(tokens / 32)`
+  ends the warp. `chunk_claim` is the word after `layout_ready` in
+  `pull_recv_cursor` (one int larger) and is zeroed with `layout_ready`: by the
+  head leader before the head gate on the fused flow, by
+  `lsa_map_publish_kernel` on the unfused flow. Row placement is unchanged
+  (the layout scan fixes it); only which warp handles a chunk varies.
+- **Per-block throttle.** A MAP warp claims only while its next unit is below
+  `next / 32 + kPullDispatchChunkLookahead * kPullDispatchMapWarps`, where
+  `next` is the block pull-warp ticket counter, so the last chunks go to the
+  CTAs that drain first.
+- **Fixed ring.** Chunk ranges live in a per-warp ring of
+  `kPullDispatchChunkRing` entries instead of a buffer sized for the worst-case
+  per-CTA chunk count; a `static_assert` keeps it above the lookahead.
+- **Read acks.** Each ring slot has a read counter (`chunks_read`). A pull warp
+  adds one (release) after it copies the slot's `first` and `count`; a chunk's
+  `kPullDispatchChunkTokens / kPullDispatchSlotBatch` tickets are its readers.
+  A MAP warp reusing a slot waits (acquire) until the counter shows every
+  reader of the previous chunk, so a delayed pull warp never sees a newer chunk
+  in its entry.
+- **Done flags.** Each MAP warp sets a done flag (release) after its last
+  `ready` store. `dispatch_pull_wait_chunk` returns `kReady`, `kSkip` (the unit
+  is never produced; take a new ticket) or `kFinished` (every MAP warp is done
+  and none produces this unit).
+
+A pull warp blocks only on a unit `v <= next / 32`; the owner MAP warp of `v`
+has its next unit `u <= v`, which the throttle always admits, so the owner is
+never throttled while a pull warp waits on it. A CTA whose MAP warps claim
+nothing sets all done flags and its pull warps leave on `kFinished`. The ring
+wait cannot deadlock: the throttle admits a MAP warp's chunk only after the
+tickets of the chunk that last used its slot are all claimed, and a claimed
+ticket reads an already published entry without blocking. The ring size is a
+performance knob, not a correctness bound. Ordering: the MAP warp waits for
+the slot's reads, stores the range, then releases `ready` at block scope; the
+pull warp acquires `ready`, reads the range, then releases a read ack; the grid
+counter publishes no data. `test_ht_pull_chunk_ring` wraps the ring and delays
+one pull ticket per block. Row contents
+are identical; only the run-to-run row order changes, as it already does with
+the `rank_cursor` and `expert_cursor` atomics.
+
+`NCCL_EP_HT_DISPATCH_DYNAMIC_CLAIM_MIN_TOKENS` (default 2048, 0 always claims)
+selects the mode per call from the handle's tokens per rank. Below it the MAP
+warps keep the static chunk assignment (chunk `round * stride + blockIdx * 2 +
+map_idx`), because claiming costs more than it balances there.
+
 ### Push combine
 
 `combine_push` (`ht_ep.cuh:5943`) is one warp per recv slot, with slots
@@ -456,6 +510,35 @@ Pull-push stacks with MXFP8 — row and scale are both pulled over NVLink:
 MXFP8 wins compound because the scale row is small enough to load once into
 registers (or through the second `PullTmaStage`) and scatter alongside the
 token, so the dispatch pipeline stays the same width.
+
+### Dispatch chunk claim, BF16 (MR !378)
+
+DS.v3 (experts=256, topk=8, h=7168, t=4096/rank), `comm_num_sms = 32`, full
+mode, pull-push + fused count + unfused sync. Dispatch kernel (us), `main` vs
+the dynamic chunk claim, run alternately on the same nodes in one job.
+
+| Cluster | EP | main | chunk claim | delta |
+| :------ | -: | ---: | ----------: | ----: |
+| Rubin   |  4 | 299.2 | 264.9 | -11.5% |
+| Rubin   |  8 | 315.9 | 295.8 |  -6.3% |
+| Rubin   | 16 | 379.5 | 369.7 |  -2.6% |
+| Rubin   | 32 | 433.8 | 421.1 |  -2.9% |
+| GB300   |  4 | 282.6 | 281.1 |  -0.5% |
+| GB300   |  8 | 436.4 | 428.4 |  -1.8% |
+| GB300   | 16 | 722.1 | 710.0 |  -1.7% |
+| GB300   | 32 | 647.3 | 637.6 |  -1.5% |
+
+Combine is unchanged. The six guard lanes (other tokens, hidden and top-k)
+improve by 2.5-7.4% on Rubin and 1.0-1.5% on GB300. Gains shrink at EP16/32
+and on GB300 because the pull path is NVLink-bound there: the change removes
+the tail, not the link-rate limit. The flat (non-fused) dispatch variant is
+not changed.
+
+Token sweep, GB300 EP4, h=7168, `Dispatch: total`, `main` vs the default
+threshold (median paired delta, 6-8 alternating runs): 768 tokens/rank -0.3%,
+1024 +0.3%, 1536 +1.3% (static path), 2048 -1.5%, 3072 -4.9%, 4096 -3.7% (claim
+path). Always claiming costs +4% at 1024 tokens/rank and +2-6% at h=3584
+between 1024 and 2048, hence the 2048 default.
 
 ## Validation
 

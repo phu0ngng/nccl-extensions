@@ -300,6 +300,22 @@ tests:
           NCCL_EP_HT_AG_SCAN_MODE: "1"
           NCCL_LSA_TEAM_SIZE: "4"
 
+  - name: test_ht_pull_chunk_ring
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_pull_chunk_ring"
+    matrix:
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_unfused_sync
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_UNFUSED_SYNC: "1"
+
   - name: test_tensor_create
     binary: "@bash"
     args: >-
