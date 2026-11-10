@@ -128,7 +128,8 @@ source ranks, spreading NVLink read bandwidth.
 
 ### Push combine
 
-`combine_push` (`ht_ep.cuh:5943`) is one warp per recv slot. The warp
+`combine_push` (`ht_ep.cuh:5943`) is one warp per recv slot, with slots
+claimed dynamically (see "Row claiming" below). The warp
 ballot-compacts `flat2em_slot_map[slot,*]` to get the `n <= top_k` valid EM
 copies, decodes `(dst_rank, t)` from `recv_slot_to_src[slot]`, and reduces
 the `n` rows into an FP32 accumulator tiled by `kHiddenVec int4` lanes. The
@@ -140,7 +141,7 @@ backward pass the pushed row carries a co-located pad: after the full row is
 pushed, `prob_dst[srcpos[k]] = topk_weights_em[k]`.
 
 ```text
-Per warp (one recv slot per wave, n <= top_k valid EM copies)
+Per warp (one claimed recv slot per iteration, n <= top_k valid EM copies)
 
   +----------------------------------------------------------------------+
   | [1] ballot-compact flat2em_slot_map[slot,*] -> smem[slot_in_block]   |
@@ -182,8 +183,8 @@ and the chunk count is `ceil(hidden / chunk_size)`. A one-tile chunk gives a
 2KB per-warp buffer, so the block keeps all `kCombinePushMaxSlots = 24` warps
 (`combine_push_slots_per_block`) at any hidden size. The chunk body has a
 compile-time copy bound and loads `8 / kHiddenVec` copies per batch before
-summing them, and the next recv slot's routing metadata is loaded one wave
-ahead and decoded with a multiply-high divide. The chunk size (`kChunkSize`) is
+summing them, and the next claimed slot's routing metadata is loaded one
+iteration ahead and decoded with a multiply-high divide. The chunk size (`kChunkSize`) is
 a compile-time template parameter of `combine_push`, so each value is its own
 JIT binary, keyed by the `_c<int4>` suffix of the variant name. A whole-row
 chunk that does not fit the shared memory cap is rejected with a message asking
@@ -210,6 +211,30 @@ wash at EP 16, and neutral-to-slower and run-to-run unstable at EP 32 (DSv3 up t
 +37%) -- from EP 16 up the combine already runs at the NVLink bandwidth plateau
 with no gather latency left to hide. The auto default therefore chunks one tile
 for EP < 16 and pushes the whole row for EP >= 16.
+
+**Row claiming.** Rows with several valid EM copies cost more than single-copy
+rows, and peer NVLink links differ in speed, so static per-warp row ranges
+finish unevenly (40-70 us cross-SM skew at EP 32). Warps instead claim rows
+through `combine_push_claim_t`:
+
+- Each block owns a contiguous region of `ceil(num_recv / grid)` rows and its
+  warps claim rows from it one at a time through a shared-memory counter, so a
+  block keeps streaming to one peer.
+- The last 1/4 of every region is a grid-wide pool claimed by global ticket.
+  Ticket `t` maps to region `t % grid`, pool position `t / grid`, so the pool
+  drains evenly across regions and idle SMs pick up rows from slow ones.
+- Rows up to 8KB skip the pool and use only the block-owned region: the pool
+  atomic costs more than the balance gains on small rows.
+- Region assignment is rotated by the rank's LSA index, so concurrent senders
+  start on different destinations.
+- Below `NCCL_EP_HT_COMBINE_DYNAMIC_CLAIM_MIN_TOKENS` tokens per rank
+  (default 512, 0 always claims) claiming is skipped: each warp walks a
+  contiguous static range. At 128-256 tokens/rank the claim atomics cost 1-3
+  us more than the balance gains; from 512 tokens claiming is faster at every
+  row size measured.
+
+Which warp reduces which row changes, but each row is still reduced in the
+fixed `k = 0..n-1` order, so the output is unchanged.
 
 `combine_reduce` (`ht_ep.cuh:6292`) is one attn token per 128-thread sub-warp.
 It derives which `(t, R)` partials exist from this rank's own `topk_idx` — no
@@ -304,6 +329,11 @@ Counter cross-recycling: dispatch's head gate uses the *combine* counter
 (idle during dispatch) and its tail barrier uses the *dispatch* counter;
 combine swaps them. No extra allocation.
 
+`combine_push` additionally uses the second word of its counter block (the
+`combine_head_sync_counter` slot, which pull-push combine does not otherwise
+use) as the row-claim pool counter. `lsa_grid_tail_barrier` zeroes it together
+with the barrier counter, so it starts at 0 on the next call.
+
 ### Buffer model
 
 | Buffer                                 | `kLocalPermute`                                          | `kPullPush`                              | Role change                                        |
@@ -393,6 +423,24 @@ Same config as forward. `UpdateHandle` reuses the forward routing and is omitted
 | Dispatch (D)            |           737 |            767 |     -0.04 |
 | DispatchEpilogue (LP)   |           225 |          fused |         - |
 | **D-side total (D+LP)** |       **962** |        **767** | **1.25x** |
+
+### Combine row claiming, BF16
+
+GB300 MNNVL, 32 comm SMs, 4096 tokens/rank, BF16 combine. Combine total =
+CP+C+CE (us), best of 3, static ranges (`main`) vs row claiming:
+
+| Model   | EP | Static ranges | Row claiming |  Delta |
+| :------ | -: | ------------: | -----------: | -----: |
+| DS.v3   |  4 |           355 |          331 |  -6.6% |
+| DS.v3   |  8 |           541 |          486 | -10.3% |
+| DS.v3   | 16 |           659 |          636 |  -3.5% |
+| DS.v3   | 32 |           741 |          739 |  -0.3% |
+| Qwen3.6 |  4 |           134 |          123 |  -8.1% |
+| Qwen3.6 |  8 |           176 |          163 |  -7.3% |
+| Qwen3.6 | 16 |           214 |          201 |  -6.1% |
+| Qwen3.6 | 32 |           232 |          227 |  -2.1% |
+
+Gains shrink at high EP because the push is NVLink-bound there.
 
 ### Dispatch-only, MXFP8 vs BF16
 
