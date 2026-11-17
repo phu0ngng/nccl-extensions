@@ -86,7 +86,7 @@ workflow:
       done
       NVSUBMIT_VENV="${INSTALL_ROOT}/nvsubmit-venv"
       python3 -m venv "${NVSUBMIT_VENV}"
-      "${NVSUBMIT_VENV}/bin/pip" install nvsubmit==0.3.5 \
+      "${NVSUBMIT_VENV}/bin/pip" install nvsubmit==0.3.7 \
         --index-url https://gitlab-master.nvidia.com/api/v4/projects/231609/packages/pypi/simple
       # Downstream jobs consume the setup producer's path through dotenv.
       printf 'NCCL_HOME=%s\nNCCL_EP_HOME=%s\nNCCL_EP_BUILDDIR=%s\nNCCL_EP_INSTALL_ROOT=%s\nNVSUBMIT_VENV=%s\n' \
@@ -149,11 +149,13 @@ setup:pre-tyche:
       "${NVSUBMIT_VENV}/bin/nvsubmit" --verbose --testsuite "${NVSUBMIT_TESTSUITE}"
       --cluster-config "${NVSUBMIT_CLUSTER_CONFIG}" --nccl-home "${NCCL_HOME}"
       --log-dir "${NVSUBMIT_LOG_DIR}"
+      --failed-testsuite failed-testsuite.yml
       --junit-xml junit_results.xml
   artifacts:
     when: always
     paths:
       - junit_results.xml
+      - failed-testsuite.yml
     reports:
       junit: junit_results.xml
     expire_in: 48 hours
@@ -201,12 +203,14 @@ unit:pre-tyche:
       --log-dir "${NVSUBMIT_LOG_DIR}"
       --perf-regression-config nccl_ep/ci/perf-regression.yml
       --perf-regression-pdf performance-regression.pdf
+      --failed-testsuite failed-testsuite.yml
       --junit-xml junit_results.xml
   artifacts:
     when: always
     paths:
       - junit_results.xml
       - performance-regression.pdf
+      - failed-testsuite.yml
     reports:
       junit: junit_results.xml
     expire_in: 48 hours

@@ -1,7 +1,9 @@
 # CI test suites
 
-The EP child pipeline runs all test jobs through nvsubmit 0.3.5 and publishes
-JUnit results. Log paths are configured separately for each cluster through
+The EP child pipeline runs all test jobs through nvsubmit 0.3.7 and publishes
+JUnit results. Each nvsubmit job uses `--failed-testsuite failed-testsuite.yml`
+to write a suite only when tests fail, and archives the file when present.
+Log paths are configured separately for each cluster through
 `EOS_NVSUBMIT_LOG_DIR`, `PRE_TYCHE_NVSUBMIT_LOG_DIR`, and `PRE_NYX_NVSUBMIT_LOG_DIR`;
 all three store job logs under
 `/lustre/fsw/coreai_libraries_nccl/gitlab-runner/logs/nccl_ep/${CI_PIPELINE_ID}/${CI_JOB_ID}`.
