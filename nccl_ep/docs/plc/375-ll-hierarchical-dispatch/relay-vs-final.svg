@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="335" viewBox="0 0 1200 335" role="img" aria-labelledby="title desc">
+<title id="title">Relay forwards between GPUs; final copying fills the destination output</title>
+<desc id="desc">A token travels from source GPU zero to relay staging on GPU eight, then over LSA to an internal final slot on GPU ten. A local memory copy on GPU ten compacts the token into recv_x and receive metadata. An alternative Direct path skips relay staging but still needs the final local copy.</desc>
+<defs>
+<marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#15803d"/></marker>
+<marker id="purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#7c3aed"/></marker>
+</defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:24px;font-weight:700}.heading{font-size:18px;font-weight:650}.body{font-size:15px}.small{font-size:13px;fill:#526176}</style>
+<rect width="1200" height="335" rx="18" fill="white"/>
+
+<text x="600" y="35" text-anchor="middle" class="title">Relay work delivers to internal slots; final work produces the output.</text>
+<rect x="30" y="100" width="180" height="90" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="120.0" y="125" text-anchor="middle" class="heading">GPU 0</text>
+<text x="120.0" y="153" text-anchor="middle" class="body">Remote source</text>
+<text x="120.0" y="179" text-anchor="middle" class="small">Outgoing token</text>
+<rect x="270" y="100" width="250" height="90" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="395.0" y="125" text-anchor="middle" class="heading">GPU 8 · relay</text>
+<text x="395.0" y="153" text-anchor="middle" class="body">RDMA relay staging</text>
+<text x="395.0" y="179" text-anchor="middle" class="small">Forward + publish done</text>
+<rect x="600" y="100" width="250" height="90" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="725.0" y="125" text-anchor="middle" class="heading">GPU 10</text>
+<text x="725.0" y="153" text-anchor="middle" class="body">Internal final slot</text>
+<text x="725.0" y="179" text-anchor="middle" class="small">Payload + ready tag</text>
+<rect x="930" y="100" width="240" height="90" rx="10" fill="#ede9fe" stroke="#c4b5fd"/>
+<text x="1050.0" y="125" text-anchor="middle" class="heading">GPU 10 · recv_x</text>
+<text x="1050.0" y="153" text-anchor="middle" class="body">Compacted output row</text>
+<text x="1050.0" y="179" text-anchor="middle" class="small">Source/expert metadata</text>
+<path d="M210 145 H264" stroke="#2563eb" stroke-width="3" marker-end="url(#blue)"/>
+<text x="237.0" y="86" text-anchor="middle" class="small">RDMA</text>
+<path d="M520 145 H594" stroke="#15803d" stroke-width="3" marker-end="url(#green)"/>
+<text x="557.0" y="86" text-anchor="middle" class="small">LSA</text>
+<path d="M850 145 H924" stroke="#7c3aed" stroke-width="3" marker-end="url(#purple)"/>
+<text x="887.0" y="86" text-anchor="middle" class="small">Local copy</text>
+<text x="480" y="220" text-anchor="middle" class="small" style="fill:#15803d">Relay job: move packets to required GPUs</text>
+<text x="950" y="220" text-anchor="middle" class="small" style="fill:#7c3aed">Final job: extract completed local rows</text>
+<path d="M120 190 V270 H725 V196" stroke="#2563eb" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#blue)"/>
+<text x="425" y="296" text-anchor="middle" class="small" style="fill:#2563eb">Alternative Direct path: bypass relay; final copying still happens.</text>
+<text x="600" y="325" text-anchor="middle" class="small">A relay also performs final copying for itself if it needs the token; a relay-only GPU creates no output row.</text>
+</svg>

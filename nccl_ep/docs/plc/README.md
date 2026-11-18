@@ -6,6 +6,8 @@ exclusion without an explicit review.
 
 ## PLCs
 
+- [375: Hierarchical dispatch](375-ll-hierarchical-dispatch/README.md) — illustrated design, shared protocol, selection policy, kernel walkthrough, and performance evidence.
+
 - [HT scan workspace ownership](ht-scan-workspace.md) — group-shared update-only metadata scan buffers.
 - [Attention-FFN Disaggregation (AFD) for Low-Latency EP](attention-ffn-disaggregation/README.md) — partitions one LL communicator into token-owning attention ranks and expert-owning FFN ranks, with role-checked C/Python APIs.
 - [271: Low latency LSA FP8 dispatch optimization](271-ll-lsa-fp8-dispatch/README.md) — shared quantization reuse, compact block geometry, vector stores, and capacity fallback.

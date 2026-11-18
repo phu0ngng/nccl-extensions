@@ -14,7 +14,7 @@ cluster's setup, unit, and integration jobs succeed, including the Pre-Tyche CFT
 Failed runs retain their installs, and logs remain in the separate log directories.
 The suite definitions are in `tests/`:
 
-- `unit.yml`: all 19 GoogleTest binaries, expanded into 70 binary/mode cases,
+- `unit.yml`: GoogleTest binaries and the host-only LL dispatch policy test,
   including HT duplication, scan, unfused-count, pull-push, and filtered
   overflow/drop coverage.
 - `integration.yml`: the C++ correctness and benchmark matrix.
@@ -35,3 +35,22 @@ matrix with the existing launcher:
 ```bash
 bash nccl_ep/tests/run_tests.sh 4
 ```
+
+## Hierarchical dispatch: CI versus QA
+
+CI checks deterministic invariants without multi-node performance gates:
+
+- `test_ll_dispatch_policy` runs once per unit job without a communicator. It
+  covers fitted choices, extrapolation, input bounds, and restricted-QP fallback.
+  The current GPU-oriented runner still reserves one GPU for this host-only case.
+- `test_ll_kernel_selection` includes the host policy/protocol checks: capacity
+  geometry, receive selection, local send selection, delivery masks, epochs,
+  completion counts, and peer/context indexing.
+- `test_ll_epoch_protocol` uses one GPU for epoch rollover and bounded shared
+  control reuse stress. It makes no network or timing assertion.
+
+Multi-node transport correctness, mixed sender modes, QP reuse, graph replay,
+and paired performance comparisons belong to the opt-in
+[`hier` QA suite](../qa/README.md#hierarchical-dispatch-qualification).
+Existing integration CI remains unchanged; the new suite is not added to every
+merge-request pipeline.

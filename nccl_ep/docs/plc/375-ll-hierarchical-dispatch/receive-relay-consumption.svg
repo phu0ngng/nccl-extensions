@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="365" viewBox="0 0 1200 365" role="img" aria-labelledby="title desc">
+<title id="title">Consume relay packets before publishing final done</title><desc id="desc">Probe the relay signal, transfer acquired readiness to the copying group, forward the available packet prefix, and only reset the signal and publish done after terminal arrival and all published packets are consumed. Fixed receive cooperates with a CTA, Round Robin with a warp.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#64748b"/></marker></defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:24px;font-weight:700}.heading{font-size:18px;font-weight:650}.body{font-size:15px}.small{font-size:13px;fill:#526176}</style>
+<rect width="1200" height="365" rx="18" fill="white"/>
+<text x="600" y="35" text-anchor="middle" class="title">Relay consumption · forward the published prefix before closing the task</text>
+<text x="600" y="65" text-anchor="middle" class="small">Fixed: hierDrainRelay with a CTA · Round Robin: hierReceiveTaskRelay with a selected warp</text>
+<rect x="30" y="105" width="255" height="110" rx="10" fill="#eff6ff" stroke="#cbd5e1"/>
+<text x="157.5" y="134" text-anchor="middle" class="heading">Probe publication</text>
+<text x="157.5" y="163" text-anchor="middle" class="small">net.readSignal / readiness probe</text>
+<text x="157.5" y="187" text-anchor="middle" class="small">Packet count + terminal state</text>
+<rect x="325" y="105" width="255" height="110" rx="10" fill="#fef3c7" stroke="#cbd5e1"/>
+<text x="452.5" y="134" text-anchor="middle" class="heading">Hand off readiness</text>
+<text x="452.5" y="163" text-anchor="middle" class="small">CTA control snapshot or warp.sync()</text>
+<text x="452.5" y="187" text-anchor="middle" class="small">All copying members participate</text>
+<rect x="620" y="105" width="255" height="110" rx="10" fill="#f0fdf4" stroke="#cbd5e1"/>
+<text x="747.5" y="134" text-anchor="middle" class="heading">Forward available packets</text>
+<text x="747.5" y="163" text-anchor="middle" class="small">hierForward → ncclLsaCopy</text>
+<text x="747.5" y="187" text-anchor="middle" class="small">Write destination ready tags</text>
+<rect x="915" y="105" width="255" height="110" rx="10" fill="#ede9fe" stroke="#cbd5e1"/>
+<text x="1042.5" y="134" text-anchor="middle" class="heading">Close only when drained</text>
+<text x="1042.5" y="163" text-anchor="middle" class="small">Terminal seen AND consumed = count</text>
+<text x="1042.5" y="187" text-anchor="middle" class="small">resetSignal → hierPublishDone</text>
+<path d="M285 160 H319" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M580 160 H614" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M875 160 H909" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M747 215 V255 H157 V221" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="455" y="278" text-anchor="middle" class="small">No terminal yet? Keep the consumed count and return for later publications.</text>
+<text x="600" y="316" text-anchor="middle" class="body">Direct, inactive, or completed elsewhere: retire relay work without waiting for a signal on this GPU.</text>
+<text x="600" y="346" text-anchor="middle" class="small">Empty terminal: no payload copy, but signal reset and final completion are still required on the responsible relay.</text>
+</svg>

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+<title id="title">Host family selection, then rank-local device delivery selection</title>
+<desc id="desc">The host uses shared configuration and capacity to choose the ordinary baseline or the new family from fitted expected gain and eligibility. Only the new family enters the fused kernel, where each rank independently selects Direct or hierarchical sending from its actual token count. Both device paths share the same protocol.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#64748b"/></marker></defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:24px;font-weight:700}.heading{font-size:18px;font-weight:650}.body{font-size:15px}.small{font-size:13px;fill:#526176}</style>
+<rect width="1200" height="540" rx="18" fill="white"/>
+
+<text x="600" y="37" text-anchor="middle" class="title">First select a compatible family; then adapt each rank’s send path.</text>
+<text x="600" y="68" text-anchor="middle" class="small">HOST · shared configuration and capacity · same family across ranks</text>
+<rect x="310" y="87" width="580" height="80" rx="12" fill="#eef2ff" stroke="#a5b4fc"/>
+<text x="600" y="116" text-anchor="middle" class="heading">Eligibility + fitted expected gain + promotion margin</text>
+<text x="600" y="145" text-anchor="middle" class="small">Uses topology, capacity, payload, experts, top-k, and context restrictions</text>
+<path d="M455 167 V191 H220 V216" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M745 167 V216" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="222" width="320" height="95" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="220" y="252" text-anchor="middle" class="heading">Ordinary baseline</text>
+<text x="220" y="280" text-anchor="middle" class="body">Retain its existing wire protocol</text>
+<text x="220" y="303" text-anchor="middle" class="small">No rank-local substitution into the other family</text>
+<rect x="445" y="222" width="695" height="95" rx="12" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="792" y="250" text-anchor="middle" class="heading">New compatible family · one fused kernel</text>
+<text x="792" y="278" text-anchor="middle" class="body">DEVICE · actual local count N · independent per rank</text>
+<text x="792" y="301" text-anchor="middle" class="small">cutoff = min(32, logical RDMA send CTAs − 1)</text>
+<path d="M620 317 V342 H600 V367" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M965 317 V367" fill="none" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="445" y="373" width="320" height="80" rx="12" fill="#dbeafe" stroke="#60a5fa"/>
+<text x="605" y="402" text-anchor="middle" class="heading">Direct</text>
+<text x="605" y="430" text-anchor="middle" class="body">Positive cutoff and N ≤ cutoff</text>
+<rect x="820" y="373" width="320" height="80" rx="12" fill="#dcfce7" stroke="#4ade80"/>
+<text x="980" y="402" text-anchor="middle" class="heading">Hierarchical</text>
+<text x="980" y="430" text-anchor="middle" class="body">Larger N, or Direct disabled</text>
+<text x="792" y="485" text-anchor="middle" class="body">Same packet layout, completion interface, and FULL connections</text>
+<text x="792" y="512" text-anchor="middle" class="small">Capacity 512: a one-token rank can send Direct while a 256-token rank sends hierarchical.</text>
+</svg>

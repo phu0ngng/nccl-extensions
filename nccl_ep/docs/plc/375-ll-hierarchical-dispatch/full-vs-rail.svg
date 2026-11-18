@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="790" viewBox="0 0 1200 790" role="img" aria-labelledby="title desc">
+<title id="title">RAIL hierarchical versus FULL hierarchical</title>
+<desc id="desc">Both panels show hierarchical delivery from GPU 1 to GPUs 8, 10, 13 and 15. RAIL must land on fixed rail peer GPU 9, which is not a destination, then forward to all four GPUs. FULL chooses required destination GPU 8 as relay and forwards to the other three destinations. Both use one network copy. FULL additionally permits Direct delivery in other calls.</desc>
+<defs>
+<marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10Z" fill="#2563eb"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10Z" fill="#15803d"/></marker>
+</defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.heading{font-size:23px;font-weight:700}.sub{font-size:14px;fill:#526176}.domain{font-size:15px;font-weight:650}.gpu{font-size:15px;font-weight:650}.note{font-size:13px}.network{fill:none;stroke:#2563eb;stroke-width:3;marker-end:url(#blue)}.local{fill:none;stroke:#15803d;stroke-width:3;marker-end:url(#green)}</style>
+
+<rect width="1200" height="790" rx="18" fill="white"/>
+<path d="M600 25V600" stroke="#e2e8f0"/>
+<g transform="translate(0,0)">
+<text x="300" y="46" class="heading" text-anchor="middle">RAIL: hierarchical</text>
+<text x="300" y="72" class="sub" text-anchor="middle">Land on the fixed rail peer</text>
+<rect x="30" y="105" width="175" height="465" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="117.5" y="134" class="domain" text-anchor="middle">LSA domain 0</text>
+<rect x="395" y="105" width="175" height="465" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="482.5" y="134" class="domain" text-anchor="middle">LSA domain 1</text>
+<rect x="72" y="164" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="190" class="gpu" text-anchor="middle">GPU 0</text>
+<rect x="438" y="164" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="190" class="gpu" text-anchor="middle">GPU 8</text>
+<rect x="72" y="213" width="95" height="42" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+<text x="119.5" y="239" class="gpu" text-anchor="middle">GPU 1</text>
+<rect x="438" y="213" width="95" height="42" rx="9" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+<text x="485.5" y="239" class="gpu" text-anchor="middle">GPU 9</text>
+<rect x="72" y="262" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="288" class="gpu" text-anchor="middle">GPU 2</text>
+<rect x="438" y="262" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="288" class="gpu" text-anchor="middle">GPU 10</text>
+<rect x="72" y="311" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="337" class="gpu" text-anchor="middle">GPU 3</text>
+<rect x="438" y="311" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="337" class="gpu" text-anchor="middle">GPU 11</text>
+<rect x="72" y="360" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="386" class="gpu" text-anchor="middle">GPU 4</text>
+<rect x="438" y="360" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="386" class="gpu" text-anchor="middle">GPU 12</text>
+<rect x="72" y="409" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="435" class="gpu" text-anchor="middle">GPU 5</text>
+<rect x="438" y="409" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="435" class="gpu" text-anchor="middle">GPU 13</text>
+<rect x="72" y="458" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="484" class="gpu" text-anchor="middle">GPU 6</text>
+<rect x="438" y="458" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="484" class="gpu" text-anchor="middle">GPU 14</text>
+<rect x="72" y="507" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="533" class="gpu" text-anchor="middle">GPU 7</text>
+<rect x="438" y="507" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="533" class="gpu" text-anchor="middle">GPU 15</text>
+<path class="network" d="M167 234 H434"/>
+<text x="302" y="218" class="note" text-anchor="middle" style="fill:#2563eb">1 × RDMA</text>
+<path d="M438 234 H416 M416 185 V528" fill="none" stroke="#15803d" stroke-width="3"/>
+<path class="local" d="M416 185 H434"/>
+<path class="local" d="M416 283 H434"/>
+<path class="local" d="M416 430 H434"/>
+<path class="local" d="M416 528 H434"/>
+<text x="302" y="270" class="note" text-anchor="middle" style="fill:#b45309">GPU 9: relay only</text>
+<text x="302" y="380" class="note" text-anchor="middle" style="fill:#15803d">4 × local copies</text>
+<path d="M358 375 H406" stroke="#15803d" stroke-width="1.5" fill="none"/>
+<text x="119" y="592" class="sub" text-anchor="middle">Token source</text>
+<text x="483" y="592" class="sub" text-anchor="middle">Same token destinations</text>
+</g>
+<g transform="translate(600,0)">
+<text x="300" y="46" class="heading" text-anchor="middle">FULL: hierarchical</text>
+<text x="300" y="72" class="sub" text-anchor="middle">Choose a required destination as relay</text>
+<rect x="30" y="105" width="175" height="465" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="117.5" y="134" class="domain" text-anchor="middle">LSA domain 0</text>
+<rect x="395" y="105" width="175" height="465" rx="16" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="482.5" y="134" class="domain" text-anchor="middle">LSA domain 1</text>
+<path d="M167 234 C285 234 318 185 434 185" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 234 434 234" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 283 434 283" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 332 434 332" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 381 434 381" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 430 434 430" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 479 434 479" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<path d="M167 234 C285 234 318 528 434 528" fill="none" stroke="#b8c9e2" stroke-width="1.5" stroke-dasharray="5 5"/>
+<rect x="72" y="164" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="190" class="gpu" text-anchor="middle">GPU 0</text>
+<rect x="438" y="164" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="190" class="gpu" text-anchor="middle">GPU 8</text>
+<rect x="72" y="213" width="95" height="42" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+<text x="119.5" y="239" class="gpu" text-anchor="middle">GPU 1</text>
+<rect x="438" y="213" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="239" class="gpu" text-anchor="middle">GPU 9</text>
+<rect x="72" y="262" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="288" class="gpu" text-anchor="middle">GPU 2</text>
+<rect x="438" y="262" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="288" class="gpu" text-anchor="middle">GPU 10</text>
+<rect x="72" y="311" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="337" class="gpu" text-anchor="middle">GPU 3</text>
+<rect x="438" y="311" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="337" class="gpu" text-anchor="middle">GPU 11</text>
+<rect x="72" y="360" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="386" class="gpu" text-anchor="middle">GPU 4</text>
+<rect x="438" y="360" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="386" class="gpu" text-anchor="middle">GPU 12</text>
+<rect x="72" y="409" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="435" class="gpu" text-anchor="middle">GPU 5</text>
+<rect x="438" y="409" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="435" class="gpu" text-anchor="middle">GPU 13</text>
+<rect x="72" y="458" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="484" class="gpu" text-anchor="middle">GPU 6</text>
+<rect x="438" y="458" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="485.5" y="484" class="gpu" text-anchor="middle">GPU 14</text>
+<rect x="72" y="507" width="95" height="42" rx="9" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="119.5" y="533" class="gpu" text-anchor="middle">GPU 7</text>
+<rect x="438" y="507" width="95" height="42" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+<text x="485.5" y="533" class="gpu" text-anchor="middle">GPU 15</text>
+<path class="network" d="M167 234 C285 234 318 185 434 185"/>
+<text x="302" y="177" class="note" text-anchor="middle" style="fill:#2563eb">1 × RDMA</text>
+<path d="M485 206 V218 H416 V528" fill="none" stroke="#15803d" stroke-width="3"/>
+<path class="local" d="M416 283 H434"/>
+<path class="local" d="M416 430 H434"/>
+<path class="local" d="M416 528 H434"/>
+<text x="302" y="380" class="note" text-anchor="middle" style="fill:#15803d">3 × local copies</text>
+<text x="485" y="157" class="note" text-anchor="middle" style="fill:#15803d">Relay + destination</text>
+<path d="M358 375 H406" stroke="#15803d" stroke-width="1.5" fill="none"/>
+<text x="119" y="592" class="sub" text-anchor="middle">Token source</text>
+<text x="483" y="592" class="sub" text-anchor="middle">Same token destinations</text>
+</g>
+<path d="M310 625 H355" class="network"/>
+<text x="369" y="630" class="note" text-anchor="start">Network / RDMA</text>
+<path d="M650 625 H695" class="local"/>
+<text x="709" y="630" class="note" text-anchor="start">Local fabric / LSA</text>
+<rect x="30" y="653" width="540" height="96" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="300" y="679" class="domain" text-anchor="middle">RAIL: one fixed remote peer</text>
+<text x="300" y="705" class="note" text-anchor="middle">GPU 1 must send to GPU 9, even when GPU 9 needs no token.</text>
+<text x="300" y="730" class="note" text-anchor="middle">Every required GPU receives a local forwarded copy.</text>
+<rect x="630" y="653" width="540" height="96" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="900" y="679" class="domain" text-anchor="middle">FULL: eight eligible remote peers</text>
+<text x="900" y="705" class="note" text-anchor="middle">GPU 1 chooses GPU 8, which already needs the token.</text>
+<text x="900" y="730" class="note" text-anchor="middle">The same connections also permit Direct delivery.</text>
+<text x="600" y="778" class="note" text-anchor="middle" style="fill:#526176">Both panels use hierarchical delivery. Current implementation uses FULL; RAIL is deferred.</text>
+</svg>

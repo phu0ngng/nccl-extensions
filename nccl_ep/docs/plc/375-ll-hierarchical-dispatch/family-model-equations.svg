@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="820.8pt" height="106.56pt" viewBox="0 0 820.8 106.56" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.9.4, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 106.56 
+L 820.8 106.56 
+L 820.8 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="text_1">
+   <!-- $\Delta=\mathrm{domain\ overhead}+\mathrm{forwarding\ cost}-\mathrm{saved\ RDMA\ cost}$ -->
+   <g style="fill: #172033" transform="translate(143.28 35.064783)">
+    <text>
+     <tspan style="font: 18px 'DejaVu Sans'" x="0 15.820312 34.40918 45.834961 56.847656 74.381836 85.412109 90.413086 107.665957 118.678652 129.330996 140.405215 147.805606 159.213809 170.288027 181.318301 196.250918 214.839785 221.176699 232.189395 239.589785 254.311465 265.341738 272.742129 284.16791 289.168887 300.57709 317.847539 327.744024 338.756719 348.134649 358.699102 377.287969 386.665899 397.696172 408.348516 419.422735 436.693184 449.20002 463.060372 478.590645 496.74879 506.645274 517.657969 527.035899" y="-0.328125">Δ=domainoverhead+forwardingcost−savedRDMAcost</tspan>
+    </text>
+   </g>
+  </g>
+  <g id="text_2">
+   <!-- $\mathrm{score}=\Delta+\max(5\,\mu s,\;0.02\,B)\qquad \mathrm{select\ family\ if\ score}&lt;0$ -->
+   <g style="fill: #172033" transform="translate(151.11 81.395217)">
+    <text>
+     <tspan style="font: 18px 'DejaVu Sans'" x="0 9.37793 19.274414 30.287109 37.6875 52.268555 70.857422 86.677734 105.266602 122.800781 133.831055 144.483398 151.505859 186.710508 200.809668 212.261816 217.983496 229.435644 256.158847 298.249668 307.627597 318.701816 323.702793 334.777011 344.673496 357.575781 363.912695 374.942969 392.477148 397.478125 402.479101 418.976113 423.97709 436.158672 445.536602 455.433086 466.445781 473.846172 488.427227 507.016094" y="-0.328125">score=Δ+max(5,0.02)selectfamilyifscore&lt;0</tspan>
+     <tspan style="font: oblique 18px 'DejaVu Sans'" x="165.88043 177.332578 243.810214" y="-0.328125">μsB</tspan>
+    </text>
+   </g>
+  </g>
+ </g>
+</svg>

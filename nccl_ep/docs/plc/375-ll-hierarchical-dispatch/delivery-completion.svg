@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1060" viewBox="0 0 1200 1060" role="img" aria-labelledby="title desc">
+<title id="title">Two publication paths converge on one final-completion location</title><desc id="desc">Both Direct and hierarchical delivery publish done at the same bank, source rank and send CTA index on each final receiver. Direct uses a sender GIN write bundled with a strong VA counter update. Hierarchical uses a relay LSA store with release ordering after forwarding. Its earlier sender-to-relay strong GIN signal is separate from final done.</desc>
+<defs>
+<marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#15803d"/></marker>
+</defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:25px;font-weight:700}.heading{font-size:20px;font-weight:650}.body{font-size:16px}.small{font-size:14px;fill:#526176}.field{font-size:18px;font-weight:650}.bits{font-size:14px;fill:#526176;font-family:ui-monospace,SFMono-Regular,monospace}.blue{fill:#2563eb}.green{fill:#15803d}</style>
+<rect width="1200" height="1060" rx="18" fill="white"/>
+<text x="600" y="37" class="title" text-anchor="middle">Two publication paths. One final-completion location.</text>
+<text x="322" y="82" class="heading blue" text-anchor="middle">DIRECT</text>
+<text x="877" y="82" class="heading green" text-anchor="middle">HIERARCHICAL</text>
+<rect x="60" y="103" width="525" height="70" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="322" y="131" class="body" text-anchor="middle">Sender puts packet + full ready tag</text>
+<text x="322" y="157" class="small" text-anchor="middle">Final destination is reached directly</text>
+<rect x="615" y="103" width="525" height="70" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="877" y="131" class="body" text-anchor="middle">Sender signals packet arrival to relay</text>
+<text x="877" y="157" class="small" text-anchor="middle">Separate strong GIN signal — not final completion</text>
+<path d="M322 173 V196" stroke="#93c5fd" stroke-width="2" marker-end="url(#blue)"/>
+<path d="M877 173 V196" stroke="#86efac" stroke-width="2" marker-end="url(#green)"/>
+<rect x="60" y="202" width="525" height="90" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="322" y="229" class="field" text-anchor="middle">Sender writes done via GIN</text>
+<text x="322" y="255" class="small" text-anchor="middle">Bundled with a strong VA counter update</text>
+<text x="322" y="279" class="small" text-anchor="middle">Ordered after packet and ready-tag puts</text>
+<rect x="615" y="202" width="525" height="90" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="877" y="229" class="field" text-anchor="middle">Relay acquires, forwards, then writes done</text>
+<text x="877" y="255" class="small" text-anchor="middle">LSA store with release ordering</text>
+<text x="877" y="279" class="small" text-anchor="middle">Consumed sender-to-relay GIN signal is reset</text>
+<path d="M322 292 V321 H430 V344" stroke="#2563eb" stroke-width="3" fill="none" marker-end="url(#blue)"/>
+<path d="M877 292 V321 H770 V344" stroke="#15803d" stroke-width="3" fill="none" marker-end="url(#green)"/>
+<rect x="100" y="350" width="1000" height="82" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+<text x="600" y="379" class="heading" text-anchor="middle">On each final receiver: done[bank][sourceRank][sendCta]</text>
+<text x="600" y="408" class="body" text-anchor="middle">Same address and logical indices for either mode; the writer and publication mechanism differ.</text>
+<path d="M600 432 V459" stroke="#2563eb" stroke-width="2" marker-end="url(#blue)"/>
+<rect x="100" y="465" width="1000" height="75" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="600" y="493" class="body" text-anchor="middle">Receiver acquires done and decodes its epoch, count, and completion type</text>
+<text x="600" y="520" class="small" text-anchor="middle">Direct also requires VA counter = e + 1; then check full ready tags before copying live payloads.</text>
+<rect x="60" y="562" width="1080" height="70" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+<text x="600" y="589" class="body" text-anchor="middle">Capacity 512, 256 send CTAs, source count 3 → count field 5 → only send CTAs 0, 1, 2 are active</text>
+<text x="600" y="616" class="small" text-anchor="middle">Source count 0 → count field 2; CTA 0 still publishes an empty completion. Untouched zero is not completion.</text>
+<g transform="translate(0,200)">
+<text x="60" y="488" class="heading" text-anchor="start">Packed completion · 64 bits</text>
+<text x="60" y="514" class="small" text-anchor="start">Remote Direct: packed done per active send CTA. Sparse relay/local: packed count in send CTA 0.</text>
+<text x="87.5" y="548" class="bits" text-anchor="middle">63</text>
+<rect x="60" y="560" width="55" height="65" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="87.5" y="600" class="field" text-anchor="middle">1</text>
+<text x="157.5" y="548" class="bits" text-anchor="middle">62</text>
+<rect x="115" y="560" width="85" height="65" rx="0" fill="#dbeafe" stroke="#93c5fd"/>
+<text x="157.5" y="600" class="field" text-anchor="middle">D</text>
+<text x="420.0" y="548" class="bits" text-anchor="middle">61…32</text>
+<rect x="200" y="560" width="440" height="65" rx="0" fill="#fef3c7" stroke="#fcd34d"/>
+<text x="420.0" y="588" class="field" text-anchor="middle">30 epoch bits</text>
+<text x="420.0" y="612" class="small" text-anchor="middle">e &amp; 0x3fffffff</text>
+<text x="890.0" y="548" class="bits" text-anchor="middle">31…0</text>
+<rect x="640" y="560" width="500" height="65" rx="0" fill="#eef2ff" stroke="#a5b4fc"/>
+<text x="890.0" y="588" class="field" text-anchor="middle">Source token count + 2</text>
+<text x="890.0" y="612" class="small" text-anchor="middle">Count encoding reserves values 0 and 1</text>
+<text x="60" y="653" class="small" text-anchor="start">1 = packed-count marker. D = 1 only for remote Direct completion; relay/local packed counts use D = 0.</text>
+<rect x="60" y="678" width="1080" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="600" y="707" class="body" text-anchor="middle">Dense relay done uses the full e + 1 instead of this packed count.</text>
+<text x="600" y="735" class="small" text-anchor="middle">Send CTA 0 reveals the source count; other active send CTAs still require their own completion checks.</text>
+<text x="600" y="791" class="body" text-anchor="middle">After all readers retire, clear packed source-count words before the bank can be reused.</text>
+<text x="600" y="818" class="small" text-anchor="middle">This prevents truncated-epoch aliasing. Preserve cumulative Direct VA counters and sender history.</text>
+</g>
+</svg>

@@ -1,0 +1,309 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1195" viewBox="0 0 1200 1195" role="img" aria-labelledby="title desc">
+<title id="title">Two 32-bit words: top-k entry mask and control</title><desc id="desc">Both example tokens select six distinct experts on the same destination GPUs as the topology example: GPUs 8, 10, 13 and 15. Each top-k entry has its own color, repeated on its enabled mask bit. Relay and Direct masks are both 0x3f. The Direct control bit is zero for relay and one for Direct.</desc>
+<defs>
+<marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#15803d"/></marker>
+</defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:25px;font-weight:700}.heading{font-size:20px;font-weight:650}.body{font-size:16px}.small{font-size:14px;fill:#526176}.field{font-size:18px;font-weight:650}.bits{font-size:14px;fill:#526176;font-family:ui-monospace,SFMono-Regular,monospace}.blue{fill:#2563eb}.green{fill:#15803d}</style>
+<rect width="1200" height="1195" rx="18" fill="white"/>
+<text x="600" y="37" class="title" text-anchor="middle">Same top-k entries. Same destination GPUs. Two delivery modes.</text>
+<rect x="60" y="68" width="360" height="62" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="240.0" y="94" class="field" text-anchor="middle">Existing dispatch header</text>
+<text x="240.0" y="117" class="small" text-anchor="middle">Token ID · expert IDs · weights</text>
+<rect x="420" y="68" width="300" height="62" rx="10" fill="#eef2ff" stroke="#cbd5e1"/>
+<text x="570.0" y="94" class="field" text-anchor="middle">Delivery extension</text>
+<text x="570.0" y="117" class="small" text-anchor="middle">8 bytes · two 32-bit words</text>
+<rect x="720" y="68" width="420" height="62" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="930.0" y="94" class="field" text-anchor="middle">Token payload</text>
+<text x="930.0" y="117" class="small" text-anchor="middle">Starts at padded header boundary</text>
+<path d="M570 130 V150" stroke="#a5b4fc" stroke-width="2" stroke-dasharray="4 3"/>
+<rect x="60" y="155" width="540" height="70" rx="0" fill="#eef2ff" stroke="#a5b4fc"/>
+<text x="330" y="183" class="field" text-anchor="middle">Word 0: deliveryEntries</text>
+<text x="330" y="211" class="small" text-anchor="middle">32 bits · extension bytes 0–3 · offset 0</text>
+<rect x="600" y="155" width="540" height="70" rx="0" fill="#eff6ff" stroke="#a5b4fc"/>
+<text x="870" y="183" class="field" text-anchor="middle">Word 1: control</text>
+<text x="870" y="211" class="small" text-anchor="middle">32 bits · extension bytes 4–7 · offset 4</text>
+<g transform="translate(0,100)">
+<text x="60" y="164" class="body" text-anchor="start">The same top-k 6 routing table is used for both token examples (24 experts per GPU).</text>
+<rect x="60" y="185" width="170" height="90" rx="10" fill="#dbeafe" stroke="#60a5fa"/>
+<text x="145" y="209" class="field" text-anchor="middle">Top-k entry 0</text>
+<text x="145" y="237" class="body" text-anchor="middle">Expert 192</text>
+<text x="145" y="261" class="body" text-anchor="middle">GPU 8</text>
+<rect x="240" y="185" width="170" height="90" rx="10" fill="#dcfce7" stroke="#4ade80"/>
+<text x="325" y="209" class="field" text-anchor="middle">Top-k entry 1</text>
+<text x="325" y="237" class="body" text-anchor="middle">Expert 240</text>
+<text x="325" y="261" class="body" text-anchor="middle">GPU 10</text>
+<rect x="420" y="185" width="170" height="90" rx="10" fill="#f3e8ff" stroke="#c084fc"/>
+<text x="505" y="209" class="field" text-anchor="middle">Top-k entry 2</text>
+<text x="505" y="237" class="body" text-anchor="middle">Expert 312</text>
+<text x="505" y="261" class="body" text-anchor="middle">GPU 13</text>
+<rect x="600" y="185" width="170" height="90" rx="10" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="685" y="209" class="field" text-anchor="middle">Top-k entry 3</text>
+<text x="685" y="237" class="body" text-anchor="middle">Expert 360</text>
+<text x="685" y="261" class="body" text-anchor="middle">GPU 15</text>
+<rect x="780" y="185" width="170" height="90" rx="10" fill="#ccfbf1" stroke="#2dd4bf"/>
+<text x="865" y="209" class="field" text-anchor="middle">Top-k entry 4</text>
+<text x="865" y="237" class="body" text-anchor="middle">Expert 241</text>
+<text x="865" y="261" class="body" text-anchor="middle">GPU 10</text>
+<rect x="960" y="185" width="170" height="90" rx="10" fill="#ffe4e6" stroke="#fb7185"/>
+<text x="1045" y="209" class="field" text-anchor="middle">Top-k entry 5</text>
+<text x="1045" y="237" class="body" text-anchor="middle">Expert 193</text>
+<text x="1045" y="261" class="body" text-anchor="middle">GPU 8</text>
+<text x="60" y="310" class="body" text-anchor="start">Word 0 (32 bits) · relay token · deliveryEntries = 0x0000003f</text>
+<text x="73" y="336" class="bits" text-anchor="middle">31</text>
+<rect x="56" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="73" y="379" class="field" text-anchor="middle">0</text>
+<text x="107" y="336" class="bits" text-anchor="middle">30</text>
+<rect x="90" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="107" y="379" class="field" text-anchor="middle">0</text>
+<text x="141" y="336" class="bits" text-anchor="middle">29</text>
+<rect x="124" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="141" y="379" class="field" text-anchor="middle">0</text>
+<text x="175" y="336" class="bits" text-anchor="middle">28</text>
+<rect x="158" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="175" y="379" class="field" text-anchor="middle">0</text>
+<text x="209" y="336" class="bits" text-anchor="middle">27</text>
+<rect x="192" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="209" y="379" class="field" text-anchor="middle">0</text>
+<text x="243" y="336" class="bits" text-anchor="middle">26</text>
+<rect x="226" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="243" y="379" class="field" text-anchor="middle">0</text>
+<text x="277" y="336" class="bits" text-anchor="middle">25</text>
+<rect x="260" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="277" y="379" class="field" text-anchor="middle">0</text>
+<text x="311" y="336" class="bits" text-anchor="middle">24</text>
+<rect x="294" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="311" y="379" class="field" text-anchor="middle">0</text>
+<text x="345" y="336" class="bits" text-anchor="middle">23</text>
+<rect x="328" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="345" y="379" class="field" text-anchor="middle">0</text>
+<text x="379" y="336" class="bits" text-anchor="middle">22</text>
+<rect x="362" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="379" y="379" class="field" text-anchor="middle">0</text>
+<text x="413" y="336" class="bits" text-anchor="middle">21</text>
+<rect x="396" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="413" y="379" class="field" text-anchor="middle">0</text>
+<text x="447" y="336" class="bits" text-anchor="middle">20</text>
+<rect x="430" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="447" y="379" class="field" text-anchor="middle">0</text>
+<text x="481" y="336" class="bits" text-anchor="middle">19</text>
+<rect x="464" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="481" y="379" class="field" text-anchor="middle">0</text>
+<text x="515" y="336" class="bits" text-anchor="middle">18</text>
+<rect x="498" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="515" y="379" class="field" text-anchor="middle">0</text>
+<text x="549" y="336" class="bits" text-anchor="middle">17</text>
+<rect x="532" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="549" y="379" class="field" text-anchor="middle">0</text>
+<text x="583" y="336" class="bits" text-anchor="middle">16</text>
+<rect x="566" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="583" y="379" class="field" text-anchor="middle">0</text>
+<text x="617" y="336" class="bits" text-anchor="middle">15</text>
+<rect x="600" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="617" y="379" class="field" text-anchor="middle">0</text>
+<text x="651" y="336" class="bits" text-anchor="middle">14</text>
+<rect x="634" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="651" y="379" class="field" text-anchor="middle">0</text>
+<text x="685" y="336" class="bits" text-anchor="middle">13</text>
+<rect x="668" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="685" y="379" class="field" text-anchor="middle">0</text>
+<text x="719" y="336" class="bits" text-anchor="middle">12</text>
+<rect x="702" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="719" y="379" class="field" text-anchor="middle">0</text>
+<text x="753" y="336" class="bits" text-anchor="middle">11</text>
+<rect x="736" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="753" y="379" class="field" text-anchor="middle">0</text>
+<text x="787" y="336" class="bits" text-anchor="middle">10</text>
+<rect x="770" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="787" y="379" class="field" text-anchor="middle">0</text>
+<text x="821" y="336" class="bits" text-anchor="middle">9</text>
+<rect x="804" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="821" y="379" class="field" text-anchor="middle">0</text>
+<text x="855" y="336" class="bits" text-anchor="middle">8</text>
+<rect x="838" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="855" y="379" class="field" text-anchor="middle">0</text>
+<text x="889" y="336" class="bits" text-anchor="middle">7</text>
+<rect x="872" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="889" y="379" class="field" text-anchor="middle">0</text>
+<text x="923" y="336" class="bits" text-anchor="middle">6</text>
+<rect x="906" y="348" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="923" y="379" class="field" text-anchor="middle">0</text>
+<text x="957" y="336" class="bits" text-anchor="middle">5</text>
+<rect x="940" y="348" width="34" height="48" rx="0" fill="#ffe4e6" stroke="#fb7185"/>
+<text x="957" y="379" class="field" text-anchor="middle">1</text>
+<text x="991" y="336" class="bits" text-anchor="middle">4</text>
+<rect x="974" y="348" width="34" height="48" rx="0" fill="#ccfbf1" stroke="#2dd4bf"/>
+<text x="991" y="379" class="field" text-anchor="middle">1</text>
+<text x="1025" y="336" class="bits" text-anchor="middle">3</text>
+<rect x="1008" y="348" width="34" height="48" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="1025" y="379" class="field" text-anchor="middle">1</text>
+<text x="1059" y="336" class="bits" text-anchor="middle">2</text>
+<rect x="1042" y="348" width="34" height="48" rx="0" fill="#f3e8ff" stroke="#c084fc"/>
+<text x="1059" y="379" class="field" text-anchor="middle">1</text>
+<text x="1093" y="336" class="bits" text-anchor="middle">1</text>
+<rect x="1076" y="348" width="34" height="48" rx="0" fill="#dcfce7" stroke="#4ade80"/>
+<text x="1093" y="379" class="field" text-anchor="middle">1</text>
+<text x="1127" y="336" class="bits" text-anchor="middle">0</text>
+<rect x="1110" y="348" width="34" height="48" rx="0" fill="#dbeafe" stroke="#60a5fa"/>
+<text x="1127" y="379" class="field" text-anchor="middle">1</text>
+<text x="60" y="445" class="body" text-anchor="start">Word 0 (32 bits) · Direct token · deliveryEntries = 0x0000003f</text>
+<text x="73" y="471" class="bits" text-anchor="middle">31</text>
+<rect x="56" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="73" y="514" class="field" text-anchor="middle">0</text>
+<text x="107" y="471" class="bits" text-anchor="middle">30</text>
+<rect x="90" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="107" y="514" class="field" text-anchor="middle">0</text>
+<text x="141" y="471" class="bits" text-anchor="middle">29</text>
+<rect x="124" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="141" y="514" class="field" text-anchor="middle">0</text>
+<text x="175" y="471" class="bits" text-anchor="middle">28</text>
+<rect x="158" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="175" y="514" class="field" text-anchor="middle">0</text>
+<text x="209" y="471" class="bits" text-anchor="middle">27</text>
+<rect x="192" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="209" y="514" class="field" text-anchor="middle">0</text>
+<text x="243" y="471" class="bits" text-anchor="middle">26</text>
+<rect x="226" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="243" y="514" class="field" text-anchor="middle">0</text>
+<text x="277" y="471" class="bits" text-anchor="middle">25</text>
+<rect x="260" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="277" y="514" class="field" text-anchor="middle">0</text>
+<text x="311" y="471" class="bits" text-anchor="middle">24</text>
+<rect x="294" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="311" y="514" class="field" text-anchor="middle">0</text>
+<text x="345" y="471" class="bits" text-anchor="middle">23</text>
+<rect x="328" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="345" y="514" class="field" text-anchor="middle">0</text>
+<text x="379" y="471" class="bits" text-anchor="middle">22</text>
+<rect x="362" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="379" y="514" class="field" text-anchor="middle">0</text>
+<text x="413" y="471" class="bits" text-anchor="middle">21</text>
+<rect x="396" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="413" y="514" class="field" text-anchor="middle">0</text>
+<text x="447" y="471" class="bits" text-anchor="middle">20</text>
+<rect x="430" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="447" y="514" class="field" text-anchor="middle">0</text>
+<text x="481" y="471" class="bits" text-anchor="middle">19</text>
+<rect x="464" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="481" y="514" class="field" text-anchor="middle">0</text>
+<text x="515" y="471" class="bits" text-anchor="middle">18</text>
+<rect x="498" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="515" y="514" class="field" text-anchor="middle">0</text>
+<text x="549" y="471" class="bits" text-anchor="middle">17</text>
+<rect x="532" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="549" y="514" class="field" text-anchor="middle">0</text>
+<text x="583" y="471" class="bits" text-anchor="middle">16</text>
+<rect x="566" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="583" y="514" class="field" text-anchor="middle">0</text>
+<text x="617" y="471" class="bits" text-anchor="middle">15</text>
+<rect x="600" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="617" y="514" class="field" text-anchor="middle">0</text>
+<text x="651" y="471" class="bits" text-anchor="middle">14</text>
+<rect x="634" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="651" y="514" class="field" text-anchor="middle">0</text>
+<text x="685" y="471" class="bits" text-anchor="middle">13</text>
+<rect x="668" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="685" y="514" class="field" text-anchor="middle">0</text>
+<text x="719" y="471" class="bits" text-anchor="middle">12</text>
+<rect x="702" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="719" y="514" class="field" text-anchor="middle">0</text>
+<text x="753" y="471" class="bits" text-anchor="middle">11</text>
+<rect x="736" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="753" y="514" class="field" text-anchor="middle">0</text>
+<text x="787" y="471" class="bits" text-anchor="middle">10</text>
+<rect x="770" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="787" y="514" class="field" text-anchor="middle">0</text>
+<text x="821" y="471" class="bits" text-anchor="middle">9</text>
+<rect x="804" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="821" y="514" class="field" text-anchor="middle">0</text>
+<text x="855" y="471" class="bits" text-anchor="middle">8</text>
+<rect x="838" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="855" y="514" class="field" text-anchor="middle">0</text>
+<text x="889" y="471" class="bits" text-anchor="middle">7</text>
+<rect x="872" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="889" y="514" class="field" text-anchor="middle">0</text>
+<text x="923" y="471" class="bits" text-anchor="middle">6</text>
+<rect x="906" y="483" width="34" height="48" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="923" y="514" class="field" text-anchor="middle">0</text>
+<text x="957" y="471" class="bits" text-anchor="middle">5</text>
+<rect x="940" y="483" width="34" height="48" rx="0" fill="#ffe4e6" stroke="#fb7185"/>
+<text x="957" y="514" class="field" text-anchor="middle">1</text>
+<text x="991" y="471" class="bits" text-anchor="middle">4</text>
+<rect x="974" y="483" width="34" height="48" rx="0" fill="#ccfbf1" stroke="#2dd4bf"/>
+<text x="991" y="514" class="field" text-anchor="middle">1</text>
+<text x="1025" y="471" class="bits" text-anchor="middle">3</text>
+<rect x="1008" y="483" width="34" height="48" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="1025" y="514" class="field" text-anchor="middle">1</text>
+<text x="1059" y="471" class="bits" text-anchor="middle">2</text>
+<rect x="1042" y="483" width="34" height="48" rx="0" fill="#f3e8ff" stroke="#c084fc"/>
+<text x="1059" y="514" class="field" text-anchor="middle">1</text>
+<text x="1093" y="471" class="bits" text-anchor="middle">1</text>
+<rect x="1076" y="483" width="34" height="48" rx="0" fill="#dcfce7" stroke="#4ade80"/>
+<text x="1093" y="514" class="field" text-anchor="middle">1</text>
+<text x="1127" y="471" class="bits" text-anchor="middle">0</text>
+<rect x="1110" y="483" width="34" height="48" rx="0" fill="#dbeafe" stroke="#60a5fa"/>
+<text x="1127" y="514" class="field" text-anchor="middle">1</text>
+<text x="600" y="554" class="small" text-anchor="middle">Bit j enables top-k entry j. The six colors identify entries, not GPU ranks.</text>
+<text x="600" y="579" class="small" text-anchor="middle">Entries 0 and 5 share GPU 8; entries 1 and 4 share GPU 10. All stay enabled; copying deduplicates GPUs.</text>
+<text x="60" y="620" class="body" text-anchor="start">Word 1 (32 bits) · control · Direct bit + compact epoch label</text>
+<text x="370.0" y="645" class="bits" text-anchor="middle">bits 31…5</text>
+<rect x="60" y="657" width="620" height="67" rx="10" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="370.0" y="684" class="field" text-anchor="middle">Reserved</text>
+<text x="370.0" y="709" class="small" text-anchor="middle">Written as zero</text>
+<text x="775.0" y="645" class="bits" text-anchor="middle">bit 4</text>
+<rect x="680" y="657" width="190" height="67" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+<text x="775.0" y="684" class="field" text-anchor="middle">Direct</text>
+<text x="775.0" y="709" class="small" text-anchor="middle">1 = Direct · 0 = relay</text>
+<text x="1005.0" y="645" class="bits" text-anchor="middle">bits 3…0</text>
+<rect x="870" y="657" width="270" height="67" rx="10" fill="#fef3c7" stroke="#fcd34d"/>
+<text x="1005.0" y="684" class="field" text-anchor="middle">Epoch label</text>
+<text x="1005.0" y="709" class="small" text-anchor="middle">(e + 1) &amp; 15</text>
+<rect x="60" y="749" width="525" height="155" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="322" y="776" class="body" text-anchor="middle">Relay token at e = 42 · control = 0x0000000b</text>
+<text x="322" y="800" class="small" text-anchor="middle">27 reserved bits = 0; low five bits shown below</text>
+<text x="227" y="823" class="bits" text-anchor="middle">4</text>
+<rect x="205" y="831" width="44" height="38" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="227" y="857" class="field" text-anchor="middle">0</text>
+<text x="274" y="823" class="bits" text-anchor="middle">3</text>
+<rect x="252" y="831" width="44" height="38" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="274" y="857" class="field" text-anchor="middle">1</text>
+<text x="321" y="823" class="bits" text-anchor="middle">2</text>
+<rect x="299" y="831" width="44" height="38" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="321" y="857" class="field" text-anchor="middle">0</text>
+<text x="368" y="823" class="bits" text-anchor="middle">1</text>
+<rect x="346" y="831" width="44" height="38" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="368" y="857" class="field" text-anchor="middle">1</text>
+<text x="415" y="823" class="bits" text-anchor="middle">0</text>
+<rect x="393" y="831" width="44" height="38" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="415" y="857" class="field" text-anchor="middle">1</text>
+<text x="322" y="893" class="small" text-anchor="middle">bit 4 = delivery mode · bits 3–0 = epoch label 1011</text>
+<rect x="615" y="749" width="525" height="155" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="877" y="776" class="body" text-anchor="middle">Direct token at e = 42 · control = 0x0000001b</text>
+<text x="877" y="800" class="small" text-anchor="middle">27 reserved bits = 0; low five bits shown below</text>
+<text x="782" y="823" class="bits" text-anchor="middle">4</text>
+<rect x="760" y="831" width="44" height="38" rx="0" fill="#dbeafe" stroke="#60a5fa"/>
+<text x="782" y="857" class="field" text-anchor="middle">1</text>
+<text x="829" y="823" class="bits" text-anchor="middle">3</text>
+<rect x="807" y="831" width="44" height="38" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="829" y="857" class="field" text-anchor="middle">1</text>
+<text x="876" y="823" class="bits" text-anchor="middle">2</text>
+<rect x="854" y="831" width="44" height="38" rx="0" fill="#f1f5f9" stroke="#cbd5e1"/>
+<text x="876" y="857" class="field" text-anchor="middle">0</text>
+<text x="923" y="823" class="bits" text-anchor="middle">1</text>
+<rect x="901" y="831" width="44" height="38" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="923" y="857" class="field" text-anchor="middle">1</text>
+<text x="970" y="823" class="bits" text-anchor="middle">0</text>
+<rect x="948" y="831" width="44" height="38" rx="0" fill="#fef3c7" stroke="#fbbf24"/>
+<text x="970" y="857" class="field" text-anchor="middle">1</text>
+<text x="877" y="893" class="small" text-anchor="middle">bit 4 = delivery mode · bits 3–0 = epoch label 1011</text>
+<text x="600" y="937" class="small" text-anchor="middle">32 entry bits support up to 32 routing entries without imposing a 32-GPU limit. The packet label is not readiness.</text>
+</g>
+<rect x="60" y="1060" width="525" height="68" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+<text x="322" y="1087" class="body" text-anchor="middle">Old packet: epoch 42</text>
+<text x="322" y="1113" class="bits" text-anchor="middle">Packet label 1011 · full ready tag 43</text>
+<rect x="615" y="1060" width="525" height="68" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+<text x="877" y="1087" class="body" text-anchor="middle">Current operation: epoch 58</text>
+<text x="877" y="1113" class="bits" text-anchor="middle">Packet label 1011 · required full ready tag 59</text>
+<text x="600" y="1158" class="body" text-anchor="middle">The four-bit label wraps, but an old slot tagged 43 is not copied when the receiver requires 59.</text>
+<text x="600" y="1181" class="small" text-anchor="middle">Acquired completion, full-width tags and counters, and safe control cleanup establish readiness.</text>
+</svg>

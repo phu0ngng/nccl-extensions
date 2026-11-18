@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-labelledby="title desc">
+<title id="title">Hierarchical posting: stable relay ownership and strong publication</title>
+<desc id="desc">For 512 tokens and 256 send CTAs, each CTA owns two tokens. Warp zero of CTA zero uses context zero and relay GPU eight for tokens zero and 256. CTA one uses context one and relay GPU ten for tokens one and 257. A relay remains fixed for each source, send CTA and domain even when a later token does not need it. Each payload put is followed by a header put with a strong signal increment; a terminal closes the same signal stream.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker></defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:24px;font-weight:700}.heading{font-size:18px;font-weight:650}.body{font-size:15px}.small{font-size:13px;fill:#526176}</style>
+<rect width="1200" height="780" rx="18" fill="white"/>
+
+<text x="600" y="35" text-anchor="middle" class="title">Hierarchical posting · one context per CTA, one relay per remote domain</text>
+<text x="600" y="64" text-anchor="middle" class="small">512 tokens · S = 256 send CTAs · C = 297 contexts · 2 of 256 producers shown</text>
+<rect x="50" y="100" width="350" height="135" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="225" y="129" text-anchor="middle" class="heading">CTA 0 · warp 0 → context 0</text>
+<text x="225" y="159" text-anchor="middle" class="body">Owns tokens 0 and 256</text>
+<text x="225" y="187" text-anchor="middle" class="small">Warp votes on routing; lane 0 posts GIN</text>
+<text x="225" y="215" text-anchor="middle" class="small">Other warps do not post in this helper</text>
+<path d="M400 168 H693" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="550" y="149" text-anchor="middle" class="small">Remote LSA domain 1</text>
+<text x="550" y="195" text-anchor="middle" class="small">Same relay for both tokens</text>
+<rect x="700" y="100" width="450" height="135" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="925" y="129" text-anchor="middle" class="heading">GPU 8 · chosen from token 0’s destinations</text>
+<text x="925" y="160" text-anchor="middle" class="body">Owns this source/send-CTA/domain task</text>
+<text x="925" y="189" text-anchor="middle" class="small">Token 256 needs GPUs 13 and 15; GPU 8 still relays it.</text>
+<text x="925" y="217" text-anchor="middle" class="small">Forwards only to each packet’s required local GPUs</text>
+<rect x="50" y="270" width="350" height="135" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="225" y="299" text-anchor="middle" class="heading">CTA 1 · warp 0 → context 1</text>
+<text x="225" y="329" text-anchor="middle" class="body">Owns tokens 1 and 257</text>
+<text x="225" y="357" text-anchor="middle" class="small">Warp votes on routing; lane 0 posts GIN</text>
+<text x="225" y="385" text-anchor="middle" class="small">Other warps do not post in this helper</text>
+<path d="M400 338 H693" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="550" y="319" text-anchor="middle" class="small">Remote LSA domain 1</text>
+<text x="550" y="365" text-anchor="middle" class="small">Same relay for both tokens</text>
+<rect x="700" y="270" width="450" height="135" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="925" y="299" text-anchor="middle" class="heading">GPU 10 · chosen from token 1’s destinations</text>
+<text x="925" y="330" text-anchor="middle" class="body">Owns this source/send-CTA/domain task</text>
+<text x="925" y="359" text-anchor="middle" class="small">Token 257 needs GPUs 8 and 15; GPU 10 still relays it.</text>
+<text x="925" y="387" text-anchor="middle" class="small">Forwards only to each packet’s required local GPUs</text>
+<text x="600" y="443" text-anchor="middle" class="body">Within CTA 0’s selected domain: one signal stream publishes both packets, then closes.</text>
+<rect x="50" y="470" width="345" height="105" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="222.5" y="498" text-anchor="middle" class="heading">Token 0</text>
+<text x="222.5" y="529" text-anchor="middle" class="small">net.put(payload), then net.put(header)</text>
+<text x="222.5" y="556" text-anchor="middle" class="small">Strong signal +1</text>
+<rect x="435" y="470" width="345" height="105" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="607.5" y="498" text-anchor="middle" class="heading">Token 256</text>
+<text x="607.5" y="529" text-anchor="middle" class="small">net.put(payload), then net.put(header)</text>
+<text x="607.5" y="556" text-anchor="middle" class="small">Strong signal +1</text>
+<rect x="820" y="470" width="330" height="105" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="985.0" y="498" text-anchor="middle" class="heading">Terminal</text>
+<text x="985.0" y="529" text-anchor="middle" class="small">net.signal on the same indexed signal</text>
+<text x="985.0" y="556" text-anchor="middle" class="small">High word set to 1 for this dense source</text>
+<path d="M395 522 H427" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M780 522 H812" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="600" y="611" text-anchor="middle" class="heading">Accumulated relay publication signal after this sequence (64 bits)</text>
+<rect x="60" y="632" width="540" height="72" rx="10" fill="#fef3c7" stroke="#fcd34d"/>
+<text x="330" y="660" text-anchor="middle" class="body">High 32 bits: terminal = 1</text>
+<text x="330" y="689" text-anchor="middle" class="small">Nonzero means the producer has finished this domain</text>
+<rect x="600" y="632" width="540" height="72" rx="10" fill="#fef3c7" stroke="#fcd34d"/>
+<text x="870" y="660" text-anchor="middle" class="body">Low 32 bits: packet count = 2</text>
+<text x="870" y="689" text-anchor="middle" class="small">Relay drains exactly the published packet sequence</text>
+<text x="600" y="736" text-anchor="middle" class="small">For N &lt; S, the terminal high word is N + 2 instead. Empty domains still receive a terminal.</text>
+<text x="600" y="763" text-anchor="middle" class="body">This signal announces packets to the relay; it is separate from the final receiver’s done word.</text>
+</svg>

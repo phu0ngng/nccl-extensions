@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="820.8pt" height="106.56pt" viewBox="0 0 820.8 106.56" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.9.4, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 106.56 
+L 820.8 106.56 
+L 820.8 0 
+L 0 0 
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="text_1">
+   <!-- $G=(D-1)M\,p_{\mathrm{GPU}}\qquad H=(D-1)\,p_{\mathrm{domain}}$ -->
+   <g style="fill: #172033" transform="translate(236.07 35.064783)">
+    <text>
+     <tspan style="font: oblique 18px 'DejaVu Sans'" x="0 43.066406 97.49707 115.949765 189.520371 232.173691 289.526777" y="-0.34375">GDMpHDp</tspan>
+     <tspan style="font: 18px 'DejaVu Sans'" x="17.455078 36.043945 60.433594 79.022461 90.474609 206.562363 225.15123 249.540879 268.129746 279.581894" y="-0.34375">=(−1)=(−1)</tspan>
+     <tspan style="font: 12.6px 'DejaVu Sans'" x="127.375547 137.139316 144.737461 300.952558 308.950605 316.659492 328.933418 336.654609 340.155293" y="2.609375">GPUdomain</tspan>
+    </text>
+   </g>
+  </g>
+  <g id="text_2">
+   <!-- $\mathrm{payload\ reduction}=1-\frac{H}{G}\qquad \mathrm{network\ gain}=\frac{G}{H}$ -->
+   <g style="fill: #172033" transform="translate(201.51 81.485217)">
+    <text>
+     <tspan style="font: 18px 'DejaVu Sans'" x="0 11.425781 22.456055 33.108398 38.109375 49.12207 60.152344 77.422793 84.823184 95.897402 107.323184 118.731387 128.627871 135.685488 140.686465 151.69916 166.614199 185.203067 200.162051 265.833047 277.24125 288.315469 295.373086 310.094766 321.107461 328.507852 344.776348 356.202129 367.232403 372.233379 387.148418" y="-0.5906249999999993">payloadreduction=1−networkgain=</tspan>
+     <tspan style="font: oblique 12.6px 'DejaVu Sans'" x="218.750918 218.750918 405.737285 405.737285" y="-8.4734375 6.503125000000001 -8.6484375 6.339062500000001">HGGH</tspan>
+    </text>
+    <rect x="218.750918" y="-4.973437" width="9.76377" height="1.125"/>
+    <rect x="405.737285" y="-4.973437" width="9.76377" height="1.125"/>
+   </g>
+  </g>
+ </g>
+</svg>

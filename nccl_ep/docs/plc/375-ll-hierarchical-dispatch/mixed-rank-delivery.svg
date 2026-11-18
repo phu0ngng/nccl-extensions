@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="390" viewBox="0 0 1200 390" role="img" aria-labelledby="title desc">
+<title id="title">Independent send modes in one dispatch</title><desc id="desc">A one-token rank sends Direct to GPU 10. A 256-token rank sends through relay GPU 8. GPU 10 receives both modes in the same operation.</desc>
+<defs>
+<marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker>
+<marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#15803d"/></marker>
+</defs>
+<style>text{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#172033}.title{font-size:25px;font-weight:700}.heading{font-size:20px;font-weight:650}.body{font-size:16px}.small{font-size:14px;fill:#526176}.field{font-size:18px;font-weight:650}.bits{font-size:14px;fill:#526176;font-family:ui-monospace,SFMono-Regular,monospace}.blue{fill:#2563eb}.green{fill:#15803d}</style>
+<rect width="1200" height="390" rx="18" fill="white"/>
+<text x="600" y="37" class="title" text-anchor="middle">One dispatch. Independent send choices. Compatible receivers.</text>
+<text x="180" y="82" class="small" text-anchor="middle">Source LSA domain</text>
+<text x="900" y="82" class="small" text-anchor="middle">Receiving LSA domain</text>
+<rect x="50" y="103" width="270" height="82" rx="10" fill="#eff6ff" stroke="#93c5fd"/>
+<text x="185" y="134" class="heading" text-anchor="middle">Rank 0 · 1 local token</text>
+<text x="185" y="163" class="body blue" text-anchor="middle">Chooses Direct</text>
+<rect x="50" y="221" width="270" height="82" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="185" y="252" class="heading" text-anchor="middle">Rank 1 · 256 local tokens</text>
+<text x="185" y="281" class="body green" text-anchor="middle">Chooses hierarchical</text>
+<rect x="920" y="103" width="230" height="200" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="1035" y="135" class="heading" text-anchor="middle">GPU 10 receives both</text>
+<text x="1035" y="175" class="body blue" text-anchor="middle">Direct final slot</text>
+<text x="1035" y="285" class="body green" text-anchor="middle">Forwarded final slot</text>
+<rect x="605" y="221" width="240" height="82" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+<text x="725" y="252" class="heading" text-anchor="middle">GPU 8 · relay</text>
+<text x="725" y="281" class="body green" text-anchor="middle">Forward locally</text>
+<path d="M320 145 H914" stroke="#2563eb" stroke-width="3" fill="none" marker-end="url(#blue)"/>
+<text x="600" y="129" class="small blue" text-anchor="middle">RDMA · packet Direct = 1</text>
+<path d="M320 262 H599" stroke="#2563eb" stroke-width="3" fill="none" marker-end="url(#blue)"/>
+<text x="460" y="245" class="small blue" text-anchor="middle">RDMA · Direct = 0</text>
+<path d="M845 262 H914" stroke="#15803d" stroke-width="3" fill="none" marker-end="url(#green)"/>
+<text x="879" y="245" class="small green" text-anchor="middle">LSA</text>
+<text x="600" y="337" class="body" text-anchor="middle">A receiver’s outgoing token count does not predict its incoming work.</text>
+<text x="600" y="361" class="small" text-anchor="middle">Each source is decoded independently; no extra mode-selection collective is needed.</text>
+</svg>

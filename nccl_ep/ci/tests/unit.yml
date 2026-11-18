@@ -26,6 +26,13 @@ env:
   NCCL_EP_HT_UNFUSED_SYNC: "0"
 
 tests:
+  # Host-only model coverage; no communicator or rank wrapper is needed.
+  - name: test_ll_dispatch_policy
+    binary: nccl_ep/test_ll_dispatch_policy
+    min_gpus: 1
+    np: 1
+    timeout: 60
+
   - name: test_ht_dispatch_async
     binary: "@bash"
     args: >-

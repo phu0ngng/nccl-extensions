@@ -33,7 +33,7 @@ never builds NCCL or NCCL-EP; --install must point at prepared artifacts.
 
 Options:
   --install DIR         NCCL/NCCL-EP install root (default: $NCCL_HOME or build/)
-  --suite NAME          smoke, unit, bench, python, or full (default: smoke)
+  --suite NAME          smoke, unit, bench, hier, python, or full (default: smoke)
   --np N                MPI ranks (default: detected local GPU count)
   --unit-gpus N         Local GPU count for unit tests (default: detected)
   --hostfile FILE       MPI hostfile for multi-node runs
@@ -95,10 +95,10 @@ done
 NEED_MPI=0
 NEED_UNIT=0
 case "${SUITE}" in
-  smoke|bench|python) NEED_MPI=1 ;;
+  smoke|bench|hier|python) NEED_MPI=1 ;;
   unit) NEED_UNIT=1 ;;
   full) NEED_MPI=1; NEED_UNIT=1 ;;
-  *) die "unsupported suite '${SUITE}' (expected smoke, unit, bench, python, or full)" ;;
+  *) die "unsupported suite '${SUITE}' (expected smoke, unit, bench, hier, python, or full)" ;;
 esac
 
 if (( NEED_MPI )); then
@@ -267,6 +267,48 @@ run_bench_sweep() {
       done
     done
   done
+}
+
+run_hier_case() {
+  local mode="$1" name="$2"
+  shift 2
+  local selector=(env -u NCCL_EP_LL_HIER_DISPATCH)
+  if [[ "${mode}" == baseline ]]; then
+    selector=(env NCCL_EP_LL_HIER_DISPATCH=0)
+  elif [[ "${mode}" == candidate ]]; then
+    selector=(env NCCL_EP_LL_HIER_DISPATCH=1)
+  fi
+  run_case "hier-${mode}-${name}" "${CASE_TIMEOUT}" \
+    "${selector[@]}" NCCL_EP_LL_HIER_FULL_GIN=1 "${MPI_CMD[@]}" "${EP_BENCH}" \
+    --algorithm low-latency --layout rm --datatype bf16 --hidden 7168 \
+    --top-k 8 --experts 256 --validate "$@"
+}
+
+run_hier_suite() {
+  # Explicit opt-in: forced candidate cases require multiple real LSA domains.
+  [[ -n "${HOSTFILE}" ]] || die "hier suite requires --hostfile and multiple LSA domains"
+  (( NP == 8 || NP == 16 || NP == 32 )) || die "hier suite requires --np 8, 16, or 32"
+  local mode tokens
+  for mode in baseline candidate auto; do
+    for tokens in 1 16 256 4096; do
+      run_hier_case "${mode}" "tokens-${tokens}" --tokens "${tokens}"
+    done
+  done
+  for tokens in 1 32 64 256; do
+    run_hier_case candidate "capacity-512-tokens-${tokens}" --tokens 512 \
+      --dispatch-less-than-max-tokens "${tokens}"
+  done
+  # Nonuniform routing includes an empty sender and can mix direct/relay senders.
+  run_hier_case candidate nonuniform --tokens 512 --non-uniform-tokens
+  run_hier_case candidate tail --tokens 513
+  run_hier_case candidate graph --tokens 512 --cuda-graph
+  run_hier_case candidate qp-reuse --tokens 512 --num-qp-per-rank 16
+  run_hier_case auto qp-restricted --tokens 512 --num-qp-per-rank 16
+  # Exercise typed routing-weight I/O in Direct, relay, and captured dispatches.
+  run_hier_case candidate bf16-weights-direct --tokens 16 --weight-dtype bf16
+  run_hier_case candidate bf16-weights-relay --tokens 512 --weight-dtype bf16
+  run_hier_case candidate bf16-weights-int32 --tokens 512 --weight-dtype bf16 --topk-idx-int32
+  run_hier_case candidate bf16-weights-graph --tokens 512 --weight-dtype bf16 --cuda-graph
 }
 
 run_benchmark_suite() {
@@ -499,6 +541,9 @@ preflight() {
       ;;
   esac
   case "${SUITE}" in
+    hier)
+      [[ -x "${EP_BENCH}" ]] || die "ep_bench not found or executable: ${EP_BENCH}"
+      ;;
     bench|full)
       [[ -x "${EP_BENCH}" ]] || die "ep_bench not found or executable: ${EP_BENCH}"
       [[ -x "${AF_TEST}" ]] || die "af_test not found or executable: ${AF_TEST}"
@@ -579,6 +624,7 @@ case "${SUITE}" in
   smoke) run_smoke_suite ;;
   unit) run_unit_suite ;;
   bench) run_benchmark_suite ;;
+  hier) run_hier_suite ;;
   python) run_python_suite ;;
   full) run_unit_suite; run_smoke_suite; run_benchmark_suite; run_python_suite ;;
 esac

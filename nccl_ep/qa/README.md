@@ -36,6 +36,7 @@ For multi-node testing, configure passwordless MPI launch and use `--hostfile`.
 | `smoke` | Five canonical `ep_test` LL/HT correctness cases |
 | `unit` | Complete `tests/run_tests.sh` matrix on one machine |
 | `bench` | LL/HT `ep_bench` matrix plus end-to-end AFD correctness |
+| `hier` | Opt-in multi-node LL BF16 rank-major hierarchical dispatch qualification |
 | `python` | Complete `ep_test.py` matrix plus AFD API export verification |
 | `full` | Unit, smoke, bench, and Python suites |
 
@@ -58,6 +59,46 @@ bash nccl_ep/qa/run_ep_qa.sh --install /path/to/nccl-ep-install --np 16 --hostfi
 This covers `ep_bench` in both NVLink and RDMA configurations without repeating
 the smoke, unit, or Python suites on the multi-node run. Preserve the result
 directory from each configuration as separate qualification evidence.
+
+### Hierarchical dispatch qualification
+
+Run this separate suite on two and four nodes with FULL GIN and one LSA domain
+per node. Use 8, 16, or 32 total ranks, distributed evenly across nodes. Confirm
+the actual LSA and rail teams in initialization logs; a hostfile alone does not
+establish the topology. The forced candidate should fail on unsupported setups.
+This suite is deliberately separate from `full`, which also supports a single
+NVLink domain.
+
+```bash
+bash nccl_ep/qa/run_ep_qa.sh --install /path/to/nccl-ep-install \
+  --np 16 --hostfile /path/to/hosts --suite hier
+```
+
+The 25 cases use `ep_bench --validate` with LL, RM, BF16 payloads, hidden 7168, top-k 8,
+and 256 experts:
+
+- Baseline, forced candidate, and AUTO at matched capacity for 1, 16, 256, and
+  4096 tokens. The candidate selects direct or hierarchical sending locally.
+- Forced candidate at capacity 512 with 1, 32, 64, and 256 active tokens.
+- Nonuniform counts including an empty sender, a 513-token tail, and fixed-count
+  CUDA graph replay.
+- A 16-QP forced candidate to exercise queue reuse and a 16-QP AUTO case to
+  exercise restricted-budget fallback.
+- BF16 routing weights in forced-candidate Direct and relay sends, int32 routing
+  indices, and fixed-count CUDA graph replay. Other cases use FP32 routing weights.
+
+Inspect the AUTO selection logs as well as validation results. Graph coverage
+here replays fixed captured counts; it does not test replay-varying device token
+counts. The extended mixed-mode and replay-varying experiments remain recorded
+in the [archived engineering records](https://gitlab-master.nvidia.com/nccl/nccl-extensions/-/blob/backup/hier-dispatch-pre-squash-20261105/nccl_ep/docs/plc/375-ll-hierarchical-dispatch/README.md), with their frozen
+benchmark sources. They are not flags in the production benchmark.
+
+For performance qualification, repeat on the same node pair with baseline and
+candidate cases interleaved, recording source commits, installed artifact
+hashes, topology, capacity, and timing mode. Retain distributions and investigate
+repeatable regressions; a single noisy timing is not a CI failure. Use the
+CollectiveX ladder for the broader performance study. Sanitizer and longer
+multi-node reuse stress runs also belong to QA, not the bounded unit tier.
 
 ### EP 0.3 feature coverage
 
