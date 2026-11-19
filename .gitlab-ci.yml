@@ -390,6 +390,20 @@ package:python:
 ## Stage: test (child pipelines; each trigger needs every artifact its child installs)
 ##
 
+# Shared CI infrastructure, dependencies, and Python packaging/runtime helpers.
+.shared-files:
+  - .gitlab-ci.yml
+  - .gitlab/**/*
+  - .gitmodules
+  - third_party/**/*
+  # Add new shared Python directories here if no existing pattern covers them.
+  - python/*
+  - python/build_assets/**/*
+  - python/ci/**/*
+  - python/nccl/*
+  - python/nccl/_extensions/**/*
+  - python/tests/**/*
+
 # Each child starts only after every parent artifact it consumes is final; the
 # needs list is the child's complete input set. A need by matrix base name waits
 # for all of that job's generated entries.
@@ -411,11 +425,8 @@ test:m2n:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
         - nccl_m2n/**/*
-        - python/**/*
-        - .gitlab-ci.yml
-        - .gitlab/**/*
-        - .gitmodules
-        - third_party/**/*
+        - python/nccl/m2n/**/*
+    - changes: !reference [.shared-files]
   variables:
     PARENT_PIPELINE_ID: "${CI_PIPELINE_ID}"
   trigger:
@@ -452,11 +463,8 @@ test:ep:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
         - nccl_ep/**/*
-        - python/**/*
-        - .gitlab-ci.yml
-        - .gitlab/**/*
-        - .gitmodules
-        - third_party/**/*
+        - python/nccl/ep/**/*
+    - changes: !reference [.shared-files]
   variables:
     PARENT_PIPELINE_ID: "${CI_PIPELINE_ID}"
   trigger:
