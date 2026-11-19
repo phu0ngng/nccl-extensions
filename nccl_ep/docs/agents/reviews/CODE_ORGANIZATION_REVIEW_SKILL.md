@@ -169,12 +169,34 @@ separate commit before the feature commit, in the same change.
 
 ## 10. Design documents
 
-PLC documents are written under `../PLC_DOCS_SKILL.md` (never edit an existing one; a new
-directory carries the MR number). When the diff adds or changes a document under
-`docs/plc`, read it against the code and check:
+PLC documents are written under `../PLC_DOCS_SKILL.md` (a new change gets a new
+directory that carries the MR number; a fix to a past PLC is made in that document).
 
-- Directory name, title and index entry carry the MR number, and no existing PLC
-  `README.md` was edited. Report any that do not.
+A PLC is not required for every MR; do not report its absence as a violation. When the
+diff has no document under `docs/plc`, check whether it contains an API change (public
+function, struct, enum, config field, environment variable, documented contract), a
+significant algorithmic change (new kernel, protocol, wire or buffer layout, mode,
+dispatch policy, synchronization scheme) or a significant infrastructure change (JIT,
+build, benchmark or test harness). If it does, ask the author explicitly, as a question
+and once, whether a PLC should be added, naming the part of the change that prompted
+it. Otherwise say nothing about PLCs.
+
+When the diff adds or changes a document under `docs/plc`, read it against the code and
+check:
+
+- Directory name, title and index entry of a new PLC carry the MR number. Report any
+  that do not.
+- An edit to an existing PLC `README.md` or its figures is flagged, not treated as a
+  violation. List each edited document in the review as a note with what changed, so
+  the edit is visible, and classify it:
+  - a fix to that PLC (wrong statement, stale link, incorrect number, or text about
+    code this MR corrects): correct as is. Do not ask for a new PLC.
+  - new design or new results written into the old document: ask, as a `minor`, to move
+    them to a new PLC that links back.
+  - not clear which: ask the author once which it is.
+  The reverse also holds: when the MR fixes a defect that a past PLC describes as
+  working, or adds a new PLC only to correct an old one, suggest updating the old
+  document instead.
 - Scope: every described element is added or altered by this change; a pre-existing
   element presented as new, or a path the change does not support (name the transport
   or mode the document mentions), is a finding. The supported scope is stated once.
