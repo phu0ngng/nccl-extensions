@@ -1,6 +1,6 @@
 ---
 name: review-perf-complexity
-description: "Critic for algorithmic and overhead cost in nccl_ep changes: work sized by buffer capacity instead of the actual batch, wrong bound for the regime (latency vs bandwidth), recomputation, extra launches, passes or serial network/fence hops, skew and scale blindness, atomics contention, optional features that cost the default kernel (pay-for-play), alignment and tails, load and store order of issue (interleaved load/store copies, short per-thread trip counts that miss an unrolled fast path, dependent loads), registers, spills and integer width, warp collectives, division and rank masks, topology-size assumptions, early CTA exit and cooperative launch, JIT and host hot-path overhead, graph capture and signalling cost, env override versus automatic default, and weak evidence. Use when reviewing any change that adds a kernel, a launch, a copy, a sync, a loop over peers/experts/tokens, or a new mode on a hot path in nccl_ep."
+description: "Critic for algorithmic and overhead cost in nccl_ep changes: work sized by buffer capacity instead of the actual batch, wrong bound for the regime (latency vs bandwidth), recomputation, extra launches, passes or serial network/fence hops, skew and scale blindness, atomics contention, optional features that cost the default kernel (pay-for-play), alignment and tails, load and store order of issue (interleaved load/store copies, short per-thread trip counts that miss an unrolled fast path, dependent loads), registers, spills, occupancy and other per-kernel resource degradation between base and head (asking the user for compiler access when none is present), integer width, warp collectives, division and rank masks, topology-size assumptions, early CTA exit and cooperative launch, JIT and host hot-path overhead, graph capture and signalling cost, env override versus automatic default, and weak evidence. Use when reviewing any change that adds a kernel, a launch, a copy, a sync, a loop over peers/experts/tokens, or a new mode on a hot path in nccl_ep."
 ---
 
 # Algorithmic-performance review
@@ -174,10 +174,9 @@ the real work.
 - Reserve only the memory a variant uses, whether shared memory, registers or global
   buffers, and count only that in budgets. Do not move hot data to a slower space (for
   example kernel arguments to global memory) without a measurement.
-- Report registers, spills and shared memory per kernel before and after. When `nvcc`
-  is available, build both revisions and report them yourself (`REVIEW_METHOD.md`).
-  Require explicit launch bounds on new kernels. Derive launch sizing from the resource
-  budget, not constants.
+- Report registers, spills and shared memory per kernel before and after (see "Resource
+  degradation" below). Require explicit launch bounds on new kernels. Derive launch
+  sizing from the resource budget, not constants.
 - A per-thread array is free only if every index is a compile-time constant after
   unrolling. A runtime index puts it in local memory. Check how each new array is
   indexed and check the spill count; do not flag an array because it exists.
@@ -200,6 +199,58 @@ the real work.
   and return a clear error for the mode that needs the host count. State which, and cost
   the worst-case sizing against section 2. Check that library-internal eager work runs
   under relaxed capture mode.
+
+### Resource degradation: inspect it when a compiler is available
+
+A change can slow a kernel without changing its algorithm, by raising what each thread
+or CTA consumes. This is not visible in the diff. When `nvcc` is available and the user
+agreed to build (`BUILD_EVIDENCE_SKILL.md`), compare base and head for every kernel and
+JIT variant the change reaches, on the target architecture, and report the rows
+(`res_usage_diff.md`, `jit_diff.md`, `jit_<side>/variants.tsv`):
+
+- **Registers per thread.** Compute CTAs per SM from registers x threads per CTA against
+  the SM's register file, before and after, with the kernel's launch bounds. An increase
+  that loses a CTA per SM, or that breaks the minimum the launch bounds or a cooperative
+  launch rely on, is a finding with both numbers.
+- **Spills.** Any new spill store or load bytes. Locate them with
+  `tools/sass_ldst.py hot --spaces local` (source lines ranked by local-memory
+  operations) and say whether they are in a hot loop, a wait loop or one-time setup;
+  only the first two cost per token.
+- **Stack frame and local memory.** Growth means a per-thread array indexed at run time
+  or a call that was not inlined. Name the array or call.
+- **Shared and constant memory.** Shared memory per CTA against the occupancy the launch
+  assumes; kernel arguments that moved to constant or global memory.
+- **Instruction count.** A large increase in a kernel the change should not affect, or
+  a variant that no longer compiles.
+- **Kernels that should be unchanged.** A feature claimed to leave a mode alone must
+  leave that mode's rows identical. Any difference is a finding (pay-for-play, section 5).
+
+Usual causes to look for in the diff when a row degrades: a new template or runtime
+parameter kept live across a loop or barrier, a wider integer, a new per-thread array, a
+deeper unroll, an optional feature's arguments and branches in the default kernel, and
+a helper that stopped inlining. Static numbers are not a time: give the degradation
+with its numbers as a suggestion or question (section 10), and ask for a measurement
+when occupancy or a hot-loop spill changed.
+
+### When no compiler is available: ask for one
+
+If the diff can change code generation (`REVIEW_METHOD.md` step 7) and there is no
+`nvcc`, ask the user explicitly for access before triage, once. Do not fall back to
+reading mode silently. Say:
+
+- what is missing (`nvcc`, the NCCL build, or both) and what would do: a toolkit path or
+  module of the CI version, or a machine or cluster node where a compile-only job may
+  run. No GPU is needed for it;
+- that it improves the review: registers, spills, occupancy, load and store order
+  (section 7) and new warnings become numbers in the findings, where otherwise they are
+  questions the author has to answer, and regressions of this kind are usually missed
+  when reading the diff;
+- which kernels and architectures you would compile.
+
+If the user provides access, continue with `BUILD_EVIDENCE_SKILL.md` step 2 (the build
+still needs its own yes). If not, state in the review header that resource checks were
+not done and why, and report each codegen-dependent point as a question. Do not install
+a toolkit or build NCCL on your own initiative.
 
 ## 7. Load and store latency: order of issue
 
@@ -274,7 +325,7 @@ The output is the order of issue, not a time. Write the finding as a cost expres
 follow section 10 for severity: a suggestion until measured. Ask for an A/B at the
 smallest and a mid batch size when the path is on the small-batch critical path.
 
-Without a compiler, decide from the source whether the pattern can occur (two pointer
+Without a compiler, first ask for one (section 6). If there is still none, decide from the source whether the pattern can occur (two pointer
 parameters, no locals between load and store, trip count against the batch). If it can,
 ask the author for the SASS of that loop, naming the kernel, the instantiation and the
 lines. Do not state the instruction order from the source alone.

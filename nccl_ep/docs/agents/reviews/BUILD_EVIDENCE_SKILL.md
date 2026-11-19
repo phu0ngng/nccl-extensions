@@ -1,6 +1,6 @@
 ---
 name: review-build-evidence
-description: "Build-mode step of an nccl_ep review: when a CUDA toolkit is present, probe the machine, ask the user whether to build and run, then produce the evidence pack (base and head builds, warning diff, static and JIT kernel resource diffs, touched tests on each side, compute-sanitizer, optional mutation runs) that the critics cite instead of asking the author. Use at the start of any nccl_ep review; it decides between reading mode and build mode, and it never builds or runs anything without the user's explicit yes."
+description: "Build-mode step of an nccl_ep review: when a CUDA toolkit is present, probe the machine, ask the user for compiler access when none is present and the diff can change codegen, ask whether to build and run, then produce the evidence pack (base and head builds, warning diff, static and JIT kernel resource diffs, touched tests on each side, compute-sanitizer, optional mutation runs) that the critics cite instead of asking the author. Use at the start of any nccl_ep review; it decides between reading mode and build mode, and it never builds or runs anything without the user's explicit yes."
 ---
 
 # Build evidence
@@ -30,8 +30,16 @@ Check and report, without building anything:
   per side on a many-core host, longer on a laptop; the test runs add a few minutes; sanitizer
   runs multiply test time by 5 to 20.
 
-If `nvcc` or the NCCL build is missing, the mode is reading. Say so in one line, name what is
-missing, and go to triage. Do not try to install a toolkit or build NCCL.
+If `nvcc` or the NCCL build is missing, do not install a toolkit or build NCCL on your own
+initiative. If the diff cannot change code generation (`REVIEW_METHOD.md` step 7), the mode is
+reading: say so in one line, name what is missing, and go to triage. Otherwise ask the user
+explicitly, once, whether a compiler can be made available: name what is missing and what
+would do (a toolkit path or module of the CI version, or a machine or cluster node where a
+compile-only job may run; no GPU needed), and say that it improves the review, because
+register, spill, occupancy and load/store-order claims become numbers instead of questions
+to the author (`PERF_COMPLEXITY_REVIEW_SKILL.md` section 6). If the user provides one, re-probe
+and go to step 2. If not, the mode is reading; say in the review header that the resource
+checks were not done.
 
 ## Step 2. Ask the user
 
