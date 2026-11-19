@@ -12,6 +12,8 @@ to a fresh directory) and runs nvcc with the same options the library's
 compiler backend uses (device/jit/nvcc_compiler.cc), plus `-Xptxas -v`, then
 `cuobjdump -sass` for an instruction count. Variant names are taken from
 metadata.json when present, else from the kernel source's first __global__.
+With REVIEW_KEEP_CUBIN set, it adds `-lineinfo` and keeps the cubin as
+`<cache-dir>/<key>/review_kernel.cubin` for `sass_ldst.py`.
 
 `diff` joins two tables on variant name and prints variants that are new,
 gone, or changed in registers, spills, shared, stack or instruction count.
@@ -97,6 +99,8 @@ def compile_one(variant_dir, args, opts):
         if proc.returncode != 0:
             row["status"] = "compile_failed"
             return [row]
+        if os.environ.get("REVIEW_KEEP_CUBIN"):
+            shutil.copy(cubin, os.path.join(variant_dir, "review_kernel.cubin"))
         rows = []
         entry, arch = None, None
         cur = None
@@ -149,6 +153,9 @@ def cmd_compile(args):
         args.cuda_include_dir or os.environ.get("NCCL_EP_JIT_CUDA_INCLUDE_DIR", ""),
     )
     opts += os.environ.get("NVCC_EXTRA_FLAGS", "").split()
+    if os.environ.get("REVIEW_KEEP_CUBIN"):
+        # Line info for tools/sass_ldst.py; it does not change the generated code.
+        opts.append("-lineinfo")
     dirs = sorted(
         os.path.join(args.cache_dir, d)
         for d in os.listdir(args.cache_dir)

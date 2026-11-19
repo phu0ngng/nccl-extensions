@@ -76,6 +76,7 @@ or asking:
 | the change compiles, in debug and release flags; new warnings | `build_<side>.log`, `warnings_new.md` |
 | registers, spills, shared memory, stack of a statically compiled kernel, base against head | `res_usage_diff.md` |
 | the same for a JIT kernel, per variant; which JIT variants the touched tests reach at all | `jit_diff.md`, `jit_<side>/variants.tsv` |
+| order of loads and stores in a copy or gather loop (interleaved or batched) | `tools/sass_ldst.py` on a `-lineinfo` cubin of the variant (`REVIEW_KEEP_CUBIN=1`); see the perf skill, section 7 |
 | the touched tests pass before and after | `tests_<side>.log` |
 | uninitialized reads, out-of-bounds access, shared-memory races, barrier misuse in the touched tests | `sanitizer_<tool>.log` |
 | a test still passes with a given defect applied | `mutation_<name>.log` via `tools/mutate_and_run.sh` |

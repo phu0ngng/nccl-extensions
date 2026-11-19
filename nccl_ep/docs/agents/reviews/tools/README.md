@@ -18,6 +18,7 @@ cannot work on the machine are skipped and listed as skipped in the index.
 | `build_<side>.log`, `warnings_new.md` | `review_prep.sh`, `warnings_diff.py` | the change compiles with the project flags in `DEBUG=0` and `DEBUG=1`; new compiler warnings |
 | `res_usage_diff.md` | `res_usage_diff.py` on `cuobjdump -res-usage` of both `libnccl_ep.so` | registers, spills, shared and stack of every statically compiled kernel, base against head |
 | `jit_<side>/variants.tsv`, `jit_diff.md` | `jit_variants.py` on the JIT cache a test run filled, or on sources `jit_enumerate.sh` generates for a fixed configuration matrix when no test ran (the generators' arguments and the kernel enumerators are parsed from the tree's headers by `jit_enumerate_gen.py`, so only a new generator parameter needs a binding there; kernels the matrix does not build are printed as `NOT COVERED`) | which JIT variants compile; `ptxas -v` numbers and SASS instruction counts per variant, base against head. Only a cache filled by a test run says which variants the tests reach; `INDEX.md` states which source the pack used |
+| `jit_<side>/cache/<key>/review_kernel.cubin` (only with `REVIEW_KEEP_CUBIN=1`), read with `sass_ldst.py` | `jit_variants.py` adds `-lineinfo` and keeps the cubin; `sass_ldst.py hot` ranks source lines by loads and stores, `sass_ldst.py show --src FILE:FIRST-LAST` prints their order per basic block | whether a copy or gather loop issues its loads together or alternates load and store (`PERF_COMPLEXITY_REVIEW_SKILL.md` section 7). Order of issue, not time |
 | `tests_host_<side>.log` | touched tests that do not include `test_common.h`, run without a GPU | host-only tests (kernel selection, parsing) pass before and after, on any node |
 | `tests_<side>.log` | the touched test binaries, run on the GPUs present | the tests pass before and after |
 | `sanitizer_<tool>.log` | `run_tests_sanitized.sh` | `memcheck`, `initcheck`, `racecheck`, `synccheck` on the touched tests |
@@ -50,6 +51,7 @@ What the pack does not do:
 | `REVIEW_TESTS` | touched `tests/test_*.cu` | space-separated test binaries to run (basename) |
 | `REVIEW_SANITIZERS` | `initcheck memcheck` | `compute-sanitizer` tools to run; empty skips |
 | `REVIEW_ARCH` | from `nvidia-smi` compute capability, else `sm_90` | `-arch` for offline JIT compiles and for `jit_enumerate.sh`, whose CFT variants need `sm_100` or newer with CUDA 13.3+ |
+| `REVIEW_KEEP_CUBIN` | unset | keep a `-lineinfo` cubin per JIT variant for `sass_ldst.py` |
 | `REVIEW_SKIP_BUILD` | unset | reuse `out-dir/build_<side>` from an earlier run |
 | `REVIEW_JOBS` | `nproc` | `make -j` |
 

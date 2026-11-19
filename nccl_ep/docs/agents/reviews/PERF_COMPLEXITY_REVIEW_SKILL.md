@@ -1,6 +1,6 @@
 ---
 name: review-perf-complexity
-description: "Critic for algorithmic and overhead cost in nccl_ep changes: work sized by buffer capacity instead of the actual batch, wrong bound for the regime (latency vs bandwidth), recomputation, extra launches, passes or serial network/fence hops, skew and scale blindness, atomics contention, optional features that cost the default kernel (pay-for-play), alignment and tails, registers, spills and integer width, warp collectives, division and rank masks, topology-size assumptions, early CTA exit and cooperative launch, JIT and host hot-path overhead, graph capture and signalling cost, env override versus automatic default, and weak evidence. Use when reviewing any change that adds a kernel, a launch, a copy, a sync, a loop over peers/experts/tokens, or a new mode on a hot path in nccl_ep."
+description: "Critic for algorithmic and overhead cost in nccl_ep changes: work sized by buffer capacity instead of the actual batch, wrong bound for the regime (latency vs bandwidth), recomputation, extra launches, passes or serial network/fence hops, skew and scale blindness, atomics contention, optional features that cost the default kernel (pay-for-play), alignment and tails, load and store order of issue (interleaved load/store copies, short per-thread trip counts that miss an unrolled fast path, dependent loads), registers, spills and integer width, warp collectives, division and rank masks, topology-size assumptions, early CTA exit and cooperative launch, JIT and host hot-path overhead, graph capture and signalling cost, env override versus automatic default, and weak evidence. Use when reviewing any change that adds a kernel, a launch, a copy, a sync, a loop over peers/experts/tokens, or a new mode on a hot path in nccl_ep."
 ---
 
 # Algorithmic-performance review
@@ -201,7 +201,85 @@ the real work.
   the worst-case sizing against section 2. Check that library-internal eager work runs
   under relaxed capture mode.
 
-## 7. Network behavior
+## 7. Load and store latency: order of issue
+
+A thread that needs a loaded value waits for the load; it does not wait for a store. In
+a latency-bound path the time of a per-thread copy or gather is about
+(dependent loads in sequence) x (load latency), so what matters is how many loads a
+thread has in flight before the first instruction that needs one of them. Four loads
+then four stores cost one latency; load, store, load, store costs four. The latency is
+larger for peer memory in the NVLink domain than for local memory. This term matters
+when each thread handles few elements and the batch is small; with every SM busy on a
+large batch the bound is bandwidth and the order matters less. State which regime the
+loop runs in (section 1) before raising it.
+
+For every new or changed loop that loads from global, peer or window memory, write the
+elements per thread at the smallest and largest supported hidden size and thread count
+(elements / copy threads), then check:
+
+- **Interleaved copy.** `dst[i] = src[i]`, or one load and one store per iteration,
+  through two pointers the compiler cannot prove distinct. It may not move the next load
+  above the store, so unrolling gives load, store, load, store. `#pragma unroll` does not
+  change that. The fix is to load k values into locals and then store them
+  (`UNROLLED_WARP_COPY`, `device/device_primitives.cuh`) or to call a helper that does.
+  `__restrict__` may be enough; that is a codegen claim, so check it.
+- **Sibling comparison.** Find how the baseline kernel copies the same data. A new path
+  that replaces a batched helper with a plain loop, or drops the cache-hinted load and
+  store helpers the sibling uses, is a finding; say what the new path drops.
+- **Fast path never taken.** A batched helper usually has a fast loop for full batches
+  and a guarded path for the rest. Compare elements per thread with the helper's batch
+  (unroll factor x threads in the group). When the whole copy is smaller than one batch,
+  only the guarded path runs: bounds checks and predicated accesses per element, often
+  with the values buffered through local memory. Check this when a library copy is called
+  with a larger thread group than its callers used so far (CTA instead of warp).
+- **Dependent loads.** An address that comes from a previous load (index then data,
+  count then payload, pointer then field) costs one latency per level. Issue the
+  independent loads of all elements first, then the dependent ones; do not walk
+  element by element.
+- **Something between a load and its use.** A barrier, warp sync, atomic, volatile or
+  system-scope access, or a call the compiler cannot see through, stops loads from being
+  issued early. Loads that do not depend on the wait belong before it.
+- **Buffering through local memory.** A per-thread value array indexed at run time turns
+  each element into a local store and a local load (section 6). The copy then has two
+  more memory operations per element and the global loads may no longer be grouped.
+- **Loads in flight per CTA.** Changing warps per CTA or the unroll factor changes
+  threads x loads in flight. A change that halves the threads without raising the unroll
+  factor halves the overlap.
+
+Do not report: a loop with one element per thread; a store to shared or local memory
+between loads; a path that is bandwidth-bound in every supported configuration.
+
+### Settle it from SASS when a compiler is available
+
+Source order does not decide this; the compiler does, and it differs by toolkit and
+architecture. Compiling is a build step: get the user's yes through
+`BUILD_EVIDENCE_SKILL.md` first (compile-only is "Build only"; nothing runs on a GPU).
+
+1. Compile the kernel, or for a JIT kernel its generated source, with the project's
+   flags plus `-lineinfo`, for each target architecture the product ships on and the
+   toolkit CI uses. `-lineinfo` adds debug sections and does not change the code. In the
+   evidence pack: `REVIEW_KEEP_CUBIN=1` makes `tools/jit_variants.py compile` add
+   `-lineinfo` and keep `review_kernel.cubin` beside each variant's `kernel.cu`.
+2. `tools/sass_ldst.py hot <cubin>` lists the source lines that own the loads and
+   stores. Inlined helpers are attributed to the helper's line, not the call site.
+3. `tools/sass_ldst.py show <cubin> --src <file>:<first>-<last>` prints the order per
+   basic block. `run 1` in a loop block is the interleaved pattern; `run k` means k
+   loads are in flight. `?` marks predicated accesses (the guarded path) and the suffix
+   `l` local-memory operations.
+4. Do the same for the sibling loop or the base revision and put both sequences in the
+   finding, with toolkit, architecture and instantiation.
+
+The output is the order of issue, not a time. Write the finding as a cost expression
+(elements per thread x load latency, against the same divided by the run length) and
+follow section 10 for severity: a suggestion until measured. Ask for an A/B at the
+smallest and a mid batch size when the path is on the small-batch critical path.
+
+Without a compiler, decide from the source whether the pattern can occur (two pointer
+parameters, no locals between load and store, trip count against the batch). If it can,
+ask the author for the SASS of that loop, naming the kernel, the instantiation and the
+lines. Do not state the instruction order from the source alone.
+
+## 8. Network behavior
 
 State messages per peer per call, bytes per message, in-flight depth and the flow-control
 or credit mechanism. Many small puts or unbounded queue depth risk WQE-rate limits and
@@ -214,13 +292,13 @@ head-of-line blocking; batching trades latency for rate.
   buffers so both progress concurrently. Ask the reason for any change that merges
   them.
 
-## 8. Overlap
+## 9. Overlap
 
 State the SMs used and the kernel duration, and the end-to-end effect with concurrent
 compute. Compare SM copies against copy-engine or NIC offload as a trade-off, not a
 default.
 
-## 9. Evidence required
+## 10. Evidence required
 
 - Regression data for every shared kernel the feature touches, including paths that
   should be unaffected. Verify that the benchmark measures only the path under test.
@@ -239,7 +317,7 @@ default.
   with the first iterations trimmed, per-rank min and max, and a profiler artifact
   (timeline or counter) for any claimed cause.
 
-## 10. Worked example: compacting a sparse row
+## 11. Worked example: compacting a sparse row
 
 A change compacted per-expert weights into a per-token row. Its decoder scanned local
 experts in ascending order and searched the token's top-k list for each match, costing
@@ -249,7 +327,7 @@ a follow-up walked the top-k list once and packed matches at the start of the ro
 cutting the work to O(top-k). Method: write the cost, list what the API does not
 guarantee, then ask what a single pass over the smaller set would cost.
 
-## 11. Worked example: ranking tokens per expert inside a warp
+## 12. Worked example: ranking tokens per expert inside a warp
 
 A lane needs its position among the lanes whose tokens route to the same expert. A
 serial version loops over earlier lanes: O(lanes) per lane, and it diverges. Instead take
@@ -260,3 +338,21 @@ iteration. Preconditions: every lane executes the ballot, and one ballot covers 
 32 items. Method: write the serial cost, name the preconditions of the collective, then
 check that the running offset is read before it is updated and that "not routed" does
 not collide with a valid encoding.
+
+## 13. Worked example: a staging copy that loads and stores one vector at a time
+
+A new dispatch path staged each token with a loop of one 16-byte load and one 16-byte
+store per iteration, through two pointer arguments. At hidden size 7168 in BF16 a token
+is 896 vectors and 224 threads copied it, four vectors per thread. The baseline kernel
+copies the same payload with `UNROLLED_WARP_COPY(7, ...)`, which loads up to seven
+values into locals before the first store. The review compiled the JIT source for two
+target architectures and three toolkits (compile-only) and read the loop with line
+info: every build gave `L128 S128` four times, never `L128 L128 L128 L128 S128 ...`,
+so each thread paid four load latencies per token where the baseline pays one. The same
+change forwarded tokens with a library copy called by a 256-thread group; its fast loop
+needs 1024 vectors per iteration, the payload has 896, so only the bounds-checked path
+ran, with the values going through local memory. Both were reported as suggestions with
+the SASS sequences attached and a request for an A/B at small batch sizes, because
+static order is not a time. Method: write elements per thread, find the sibling's copy,
+compare the per-thread batch with the helper's batch, then read the order of issue in
+SASS for each target instead of inferring it from the source.
