@@ -123,6 +123,7 @@ struct CombinePushLaunch {
     int chunk_int4;
     unsigned int device_sm;
     bool direct_store;
+    int ring;  // load-ring stages; 0 keeps the LDG gather
 };
 
 // Resolve the expert-major combine-push chunk width (int4) before tile rounding.

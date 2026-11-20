@@ -633,6 +633,12 @@ inline ncclResult_t launch_combine_push(
         signaled && (param.chunk_begin > 0 ||
                      param.chunk_end < ::ht_ep::combine_push_num_chunks(hidden_int4, kernel_chunk_size));
 
+    // The load ring serves the unsignaled TMA-store push only.
+    int ring = 0;
+    if (!param.flat && !mxfp8 && !direct_store && !signaled) {
+        ring = ::ht_ep::combine_push_ring_depth(row_int4, smem_cap, chunk_size, slots, top_k, param.lsa_team_size);
+    }
+
     // chunk_size is baked into the source and variant name: it sets the per-warp buffer width and
     // the reduce strategy at compile time, so each distinct value is its own JIT compile.
     const std::string variant_name = [&] {
@@ -642,7 +648,7 @@ inline ncclResult_t launch_combine_push(
              << (backward ? "_bwd" : "")
              << "_c" << chunk_size << (param.claim_dynamic ? "_dyn" : "") << (signaled ? "_sig" : "")
              << (chunk_range ? "_chunks" : "") << (param.flat ? "_flat" : "") << "_w" << slots
-             << (direct_store ? "_direct" : "");
+             << (direct_store ? "_direct" : "") << "_r" << ring;
         return name.str();
     }();
     const std::string source = [&] {
@@ -666,7 +672,7 @@ inline ncclResult_t launch_combine_push(
             << "  ::ht_ep::combine_push<" << top_k << ", " << hidden_int4 << ", " << token_dtype_literal
             << ", " << recipe_literal << ", " << backward_literal << ", " << kernel_chunk_size << ", "
             << (param.claim_dynamic ? "true" : "false") << ", " << (signaled ? "true" : "false") << ", "
-            << ::nccl_ep::jit::bool_literal(direct_store) << ", "
+            << ::nccl_ep::jit::bool_literal(direct_store) << ", " << ring << ", "
             << ::nccl_ep::jit::bool_literal(chunk_range) << ">(\n"
             << "      p.peer_staging_ptrs,\n"
             << "      reinterpret_cast<const uint8_t*>(p.recv_x_em),\n"
@@ -707,7 +713,9 @@ inline ncclResult_t launch_combine_push(
     variant.runtime_key = static_cast<std::uint64_t>(std::hash<std::string>{}(variant_name));
     variant.num_blocks = num_blocks;
     variant.block_dim = block_dim;
-    variant.dynamic_smem_bytes = shape.dynamic_smem_bytes;
+    variant.dynamic_smem_bytes = ring > 0 ? static_cast<int>(::ht_ep::combine_push_dynamic_smem_bytes(
+                                                row_int4, slots, chunk_size, ring))
+                                          : shape.dynamic_smem_bytes;
     variant.nucs = nucs;
     variant.programmatic = signaled;
     // A signaled push starts on SMs that a max-shared-memory GEMM just left, and would keep their minimum-L1 split.
@@ -723,7 +731,7 @@ inline ncclResult_t launch_combine_push(
                      error.empty() ? "" : ": ", error.empty() ? "" : error.c_str());
         return ncclInternalError;
     }
-    if (launch_record != nullptr) *launch_record = {chunk_size, device_sm, direct_store};
+    if (launch_record != nullptr) *launch_record = {chunk_size, device_sm, direct_store, ring};
     return ncclSuccess;
 }
 

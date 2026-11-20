@@ -68,10 +68,10 @@ ncclResult_t ncclEpGroup_test_setMaxDynamicSmem(ncclEpGroup_t group, int max_dyn
 // that group has not launched LL combine.
 int ncclEpGroup_test_getLastLlCombineWarpsPerGroup(ncclEpGroup_t group);
 // Returns the last HT push combine launch's chunk width (int4, after tile rounding), the device
-// architecture it was resolved for and whether it stored chunks directly, or zeros when the group
-// has not launched one.
+// architecture it was resolved for, whether it stored chunks directly and its load-ring stages, or
+// zeros when the group has not launched one.
 void ncclEpGroup_test_getLastCombinePushLaunch(
-    ncclEpGroup_t group, int* chunk_int4, unsigned int* device_sm, bool* direct_store);
+    ncclEpGroup_t group, int* chunk_int4, unsigned int* device_sm, bool* direct_store, int* ring);
 // Return the group budgets of one pass (expert-major for HT); use the handle accessor for flat.
 void ncclEpGroup_test_getSmBudgets(
     ncclEpGroup_t group, ncclEpPassDir_t pass_direction, unsigned int* dispatch_num_sms,

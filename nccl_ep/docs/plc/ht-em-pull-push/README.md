@@ -218,7 +218,7 @@ Per warp, buffered TMA path
   |       tile>0: tma_store_wait<0> -- block until the prior tile's      |
   |             TMA store has drained row_buf, so it's safe to reuse     |
   |       reduce n copies -> FP32 acc for this tile (k = 0..n-1),        |
-  |             copy loads issued in batches before they are summed      |
+  |             copy loads in batches, or the TMA load ring (below)      |
   |       acc -> row_buf                 (same smem buffer every tile)   |
   |       tma_store_fence; tma_store_1d row_buf -> s_dst[tile's bytes]   |
   +----------------------------+-----------------------------------------+
@@ -282,6 +282,20 @@ for EP < 16 and pushes the whole row for EP >= 16.
 
 The sweep above is GB300. On Rubin (SM107) the one-tile chunk was also faster at
 EP 16 and 32, so there the auto default chunks one tile at every EP size.
+
+**Load ring.** With one-tile chunks over a multi-chunk row, a warp can TMA-load its
+source tiles ahead of the reduce instead of gathering them with scalar loads.
+Unit `(chunk, copy)` of the row's `n` copies goes to one of `kRing` per-warp smem
+stages, `kRing` units ahead of the sum, so the next loads overlap the current
+reduce and the previous chunk's TMA output store. The output store is unchanged:
+it still drains from the single push buffer. `kRing`
+(`combine_push_ring_depth`, the `_r<depth>` suffix of the variant name) is the
+smem left after the 24 push buffers, capped at `kCombinePushMaxRing = 3`. It is 0,
+the scalar gather, when `top_k / lsa_team_size` is outside `[1, kRing]`. That ratio is
+the mean copies per row over every destination, so it is a heuristic: routing can
+put all of a row's copies on one rank, and the ring still reduces them. Whole-row,
+multi-tile and MXFP8 pushes keep the scalar gather, as do the direct-store and
+signaled pushes, which own their own gather.
 
 **Row claiming.** Rows with several valid EM copies cost more than single-copy
 rows, and peer NVLink links differ in speed, so static per-warp row ranges

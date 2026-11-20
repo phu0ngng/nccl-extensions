@@ -27,6 +27,9 @@
 #include "../nccl_ep_test_internal.h"
 #include "../device/ht_ep.cuh"
 #include "nccl_ep/common.hpp"
+#include "../device/ht_ep.cuh"
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <set>
@@ -838,8 +841,9 @@ TEST_F(HtBwdTopK2Test, CombineWithGradExpertMajor) {
 //
 // combine_push's chunked (multi-chunk) branch needs a row wider than one tile; the shared
 // kHidden=16 group's row is a single tile (can't split into >1 chunk). This fixture uses a hidden
-// wide enough to actually split (kHiddenChunked=4096 -> hidden_int4=512 -> 4 tiles), through the same backward combine-with-grad round trip
-// CombineWithGradExpertMajor uses, and additionally checks combined_x's values (the row itself,
+// wide enough to actually split (kHiddenChunked=4096 -> hidden_int4=512 -> 4 tiles), through the
+// backward combine-with-grad round trip CombineWithGradExpertMajor uses (and a forward combine for
+// some cases), and additionally checks combined_x's values (the row itself,
 // not just the co-located weight pad), since that's what the chunked store loop assembles.
 // Only meaningful under push-combine (NCCL_EP_HT_PULL_PUSH); skips otherwise.
 
@@ -868,7 +872,35 @@ struct ScopedEnvOverride {
     }
 };
 
-class HtBwdChunkedCombineTest : public ::testing::TestWithParam<const char*> {
+// top_k 4 at the CI team size 4 (one copy per row on average) engages the TMA load ring on a
+// one-tile chunk ("1024") of a TMA-store push; a two-tile chunk ("2048") keeps the LDG gather. The ring cases use more
+// tokens and one combine SM so a warp reuses its ring across rows with one or two local copies.
+struct ChunkedCombineCase {
+    const char* chunk_size;  // NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE, in hidden elements
+    int top_k;
+    bool backward;
+    int hidden = kHiddenChunked;
+    int tokens = kNumTokens;  // source tokens per rank
+    int recv_slots = kMaxRecvSlots;
+    unsigned int combine_num_sms = NCCL_EP_AUTO;
+    bool expect_ring = false;  // the combine must select a load ring where top_k / ranks admits one
+};
+
+// Payload terms that make a misplaced read change the sum. Element hh adds 8 * (hh % 5): a shift by
+// an int4 (8 elements) or by 1 to 3 chunks of 1024 changes it. Each copy adds (weight * 8) % 8, which
+// differs between the copies of a token. The token base cycles through 1..16, so sums stay exact bf16
+// integers (at most 220).
+static float chunked_token_base(int rank, int tokens, int i) {
+    return static_cast<float>(1 + (rank * tokens + i) % 16);
+}
+static float chunked_elem_term(int hh) {
+    return static_cast<float>(8 * (hh % 5));
+}
+static float chunked_copy_term(float w) {
+    return static_cast<float>(static_cast<int>(w * 8.0f) % 8);
+}
+
+class HtBwdChunkedCombineTest : public ::testing::TestWithParam<ChunkedCombineCase> {
 protected:
     ncclEpGroup_t group_ = nullptr;
     ncclEpTensor_t* topk_idx_em_ = nullptr;
@@ -882,19 +914,29 @@ protected:
         ncclEpGroupConfig_t gcfg = NCCL_EP_GROUP_CONFIG_INIT;
         gcfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
         gcfg.num_experts = kNumExperts;
-        gcfg.max_dispatch_tokens_per_rank = kNumTokens;
-        gcfg.max_token_bytes = kHiddenChunked * sizeof(nv_bfloat16);
+        gcfg.max_dispatch_tokens_per_rank = GetParam().tokens;
+        gcfg.max_token_bytes = GetParam().hidden * sizeof(nv_bfloat16);
         gcfg.rdma_buffer_size = NCCL_EP_AUTO;
         gcfg.num_qp_per_rank = NCCL_EP_AUTO;
         gcfg.num_channels = NCCL_EP_AUTO;
-        gcfg.max_recv_tokens_per_rank = static_cast<unsigned int>(kMaxRecvSlots);
+        gcfg.max_recv_tokens_per_rank = static_cast<unsigned int>(GetParam().recv_slots);
+        gcfg.combine_num_sms = GetParam().combine_num_sms;
         NCCL_ASSERT(ncclEpCreateGroup(&group_, g_comm, &gcfg));
 
-        CUDA_ASSERT(cudaMalloc(&d_topk_, kNumTokens * kTopK * sizeof(int64_t)));
-        int64_t h[kNumTokens];
-        for (int i = 0; i < kNumTokens; ++i) h[i] = expert_for_token(i);
-        CUDA_ASSERT(cudaMemcpy(d_topk_, h, sizeof(h), cudaMemcpyHostToDevice));
-        NCCL_ASSERT(epTensorCreate(&topk_idx_em_, 2, ncclInt64, d_topk_, kNumTokens, kTopK));
+        // top_k consecutive experts from expert_for_token(i), so a rank can get two copies of a token;
+        // each row is sorted by expert id.
+        const int top_k = GetParam().top_k;
+        const int tokens = GetParam().tokens;
+        CUDA_ASSERT(cudaMalloc(&d_topk_, tokens * top_k * sizeof(int64_t)));
+        std::vector<int64_t> h(tokens * top_k);
+        for (int i = 0; i < tokens; ++i) {
+            for (int k = 0; k < top_k; ++k) {
+                h[i * top_k + k] = (expert_for_token(i) + k) % kNumExperts;
+            }
+            std::sort(h.begin() + i * top_k, h.begin() + (i + 1) * top_k);
+        }
+        CUDA_ASSERT(cudaMemcpy(d_topk_, h.data(), h.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+        NCCL_ASSERT(epTensorCreate(&topk_idx_em_, 2, ncclInt64, d_topk_, tokens, top_k));
     }
 
     void TearDown() override {
@@ -909,36 +951,46 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
         return;
     }
 
+    const int top_k = GetParam().top_k;
+    const bool backward = GetParam().backward;
+    const int hidden = GetParam().hidden;
+    const int tokens = GetParam().tokens;
+    const int recv_slots = GetParam().recv_slots;
     ncclEpHandle_t h = nullptr;
     NCCL_ASSERT(ncclEpCreateHandle(&h, group_, NCCL_EP_LAYOUT_EXPERT_MAJOR, topk_idx_em_, nullptr, nullptr, g_stream));
     CUDA_ASSERT(cudaStreamSynchronize(g_stream));
     ASSERT_NE(h, nullptr);
 
-    std::vector<nv_bfloat16> h_tok(kNumTokens * kHiddenChunked);
-    for (int i = 0; i < kNumTokens; ++i) {
-        float v = static_cast<float>(g_rank * kNumTokens + i + 1);
-        for (int hh = 0; hh < kHiddenChunked; ++hh) h_tok[i * kHiddenChunked + hh] = __float2bfloat16(v);
+    std::vector<nv_bfloat16> h_tok(tokens * hidden);
+    for (int i = 0; i < tokens; ++i) {
+        float v = chunked_token_base(g_rank, tokens, i);
+        for (int hh = 0; hh < hidden; ++hh) {
+            h_tok[i * hidden + hh] = __float2bfloat16(v + chunked_elem_term(hh));
+        }
     }
-    std::vector<float> h_w(kNumTokens * kTopK);
-    for (int i = 0; i < kNumTokens; ++i)
-        for (int k = 0; k < kTopK; ++k) h_w[i * kTopK + k] = weight_for(g_rank, i, k);
+    std::vector<float> h_w(tokens * top_k);
+    for (int i = 0; i < tokens; ++i) {
+        for (int k = 0; k < top_k; ++k) {
+            h_w[i * top_k + k] = weight_for(g_rank, i, k);
+        }
+    }
 
     nv_bfloat16 *d_tok = nullptr, *d_recv = nullptr;
     float *d_weights = nullptr, *d_recv_w = nullptr;
-    CUDA_ASSERT(cudaMalloc(&d_tok, kNumTokens * kHiddenChunked * sizeof(nv_bfloat16)));
-    CUDA_ASSERT(cudaMalloc(&d_recv, kMaxRecvSlots * kHiddenChunked * sizeof(nv_bfloat16)));
-    CUDA_ASSERT(cudaMalloc(&d_weights, kNumTokens * kTopK * sizeof(float)));
-    CUDA_ASSERT(cudaMalloc(&d_recv_w, kMaxRecvSlots * kTopK * sizeof(float)));
-    CUDA_ASSERT(cudaMemset(d_recv, 0, kMaxRecvSlots * kHiddenChunked * sizeof(nv_bfloat16)));
-    CUDA_ASSERT(cudaMemset(d_recv_w, 0, kMaxRecvSlots * kTopK * sizeof(float)));
-    CUDA_ASSERT(cudaMemcpy(d_tok, h_tok.data(), kNumTokens * kHiddenChunked * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
-    CUDA_ASSERT(cudaMemcpy(d_weights, h_w.data(), kNumTokens * kTopK * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_ASSERT(cudaMalloc(&d_tok, tokens * hidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMalloc(&d_recv, recv_slots * hidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMalloc(&d_weights, tokens * top_k * sizeof(float)));
+    CUDA_ASSERT(cudaMalloc(&d_recv_w, recv_slots * sizeof(float)));
+    CUDA_ASSERT(cudaMemset(d_recv, 0, recv_slots * hidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMemset(d_recv_w, 0, recv_slots * sizeof(float)));
+    CUDA_ASSERT(cudaMemcpy(d_tok, h_tok.data(), tokens * hidden * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
+    CUDA_ASSERT(cudaMemcpy(d_weights, h_w.data(), tokens * top_k * sizeof(float), cudaMemcpyHostToDevice));
 
     ncclEpTensor_t *t_tok, *t_recv, *t_w, *t_recv_w;
-    NCCL_ASSERT(epTensorCreate(&t_tok, 2, ncclBfloat16, d_tok, kNumTokens, kHiddenChunked));
-    NCCL_ASSERT(epTensorCreate(&t_recv, 2, ncclBfloat16, d_recv, kMaxRecvSlots, kHiddenChunked));
-    NCCL_ASSERT(epTensorCreate(&t_w, 2, ncclFloat32, d_weights, kNumTokens, kTopK));
-    NCCL_ASSERT(epTensorCreate(&t_recv_w, 1, ncclFloat32, d_recv_w, kMaxRecvSlots));  // EM: 1D
+    NCCL_ASSERT(epTensorCreate(&t_tok, 2, ncclBfloat16, d_tok, tokens, hidden));
+    NCCL_ASSERT(epTensorCreate(&t_recv, 2, ncclBfloat16, d_recv, recv_slots, hidden));
+    NCCL_ASSERT(epTensorCreate(&t_w, 2, ncclFloat32, d_weights, tokens, top_k));
+    NCCL_ASSERT(epTensorCreate(&t_recv_w, 1, ncclFloat32, d_recv_w, recv_slots));  // EM: 1D
 
     ncclEpDispatchInputs_t d_in = NCCL_EP_DISPATCH_INPUTS_INIT;
     ncclEpDispatchOutputs_t d_out = NCCL_EP_DISPATCH_OUTPUTS_INIT;
@@ -951,53 +1003,97 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
     NCCL_ASSERT(ncclEpComplete(h, nullptr, g_stream));
     CUDA_ASSERT(cudaStreamSynchronize(g_stream));
 
+    // Expert side: add each copy's term to its recv row (rows without a weight are unused).
+    {
+        std::vector<nv_bfloat16> h_recv(recv_slots * hidden);
+        std::vector<float> h_recv_w(recv_slots);
+        CUDA_ASSERT(cudaMemcpy(h_recv.data(), d_recv, h_recv.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
+        CUDA_ASSERT(cudaMemcpy(h_recv_w.data(), d_recv_w, h_recv_w.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < recv_slots; ++s) {
+            if (h_recv_w[s] == 0.0f) {
+                continue;
+            }
+            const float term = chunked_copy_term(h_recv_w[s]);
+            for (int hh = 0; hh < hidden; ++hh) {
+                nv_bfloat16& x = h_recv[s * hidden + hh];
+                x = __float2bfloat16(bf16_val(x) + term);
+            }
+        }
+        CUDA_ASSERT(cudaMemcpy(d_recv, h_recv.data(), h_recv.size() * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
+    }
+
     nv_bfloat16* d_combined_x = nullptr;
     float* d_combined_w = nullptr;
-    CUDA_ASSERT(cudaMalloc(&d_combined_x, kNumTokens * kHiddenChunked * sizeof(nv_bfloat16)));
-    CUDA_ASSERT(cudaMalloc(&d_combined_w, kNumTokens * kTopK * sizeof(float)));
-    CUDA_ASSERT(cudaMemset(d_combined_w, 0, kNumTokens * kTopK * sizeof(float)));
+    CUDA_ASSERT(cudaMalloc(&d_combined_x, tokens * hidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMalloc(&d_combined_w, tokens * top_k * sizeof(float)));
+    CUDA_ASSERT(cudaMemset(d_combined_w, 0, tokens * top_k * sizeof(float)));
 
     ncclEpTensor_t *t_combined_x, *t_combined_w;
-    NCCL_ASSERT(epTensorCreate(&t_combined_x, 2, ncclBfloat16, d_combined_x, kNumTokens, kHiddenChunked));
-    NCCL_ASSERT(epTensorCreate(&t_combined_w, 2, ncclFloat32, d_combined_w, kNumTokens, kTopK));
+    NCCL_ASSERT(epTensorCreate(&t_combined_x, 2, ncclBfloat16, d_combined_x, tokens, hidden));
+    NCCL_ASSERT(epTensorCreate(&t_combined_w, 2, ncclFloat32, d_combined_w, tokens, top_k));
 
     ncclEpCombineInputs_t c_in = NCCL_EP_COMBINE_INPUTS_INIT;
     ncclEpCombineOutputs_t c_out = NCCL_EP_COMBINE_OUTPUTS_INIT;
     c_in.tokens = t_recv;
-    c_in.topk_weights = t_recv_w;  // 1D for EM
     c_out.tokens = t_combined_x;
-    c_out.topk_weights = t_combined_w;
     ncclEpCombineConfig_t ccfg = NCCL_EP_COMBINE_CONFIG_INIT;
-    ccfg.pass_direction = NCCL_EP_BWD_PASS;
+    if (backward) {
+        c_in.topk_weights = t_recv_w;  // 1D for EM
+        c_out.topk_weights = t_combined_w;
+        ccfg.pass_direction = NCCL_EP_BWD_PASS;
+    }
+    if (GetParam().combine_num_sms != NCCL_EP_AUTO) {
+        unsigned int combine_sms = 0;
+        ncclEpHandle_test_getSmBudgets(h, backward ? NCCL_EP_BWD_PASS : NCCL_EP_FWD_PASS, nullptr, &combine_sms);
+        EXPECT_EQ(combine_sms, GetParam().combine_num_sms);
+    }
     {
-        ScopedEnvOverride force_chunks("NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE", GetParam());
+        ScopedEnvOverride force_chunks("NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE", GetParam().chunk_size);
+        // Below 8 ranks a push stores directly and loads without the ring; the ring cases keep the TMA store.
+        ScopedEnvOverride force_store("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE", GetParam().expect_ring ? "1" : nullptr);
         NCCL_ASSERT(ncclEpCombine(h, &c_in, &c_out, &ccfg, g_stream));
         CUDA_ASSERT(cudaStreamSynchronize(g_stream));
     }
+    // The ring runs only while the mean copies per row (top_k / ranks) are in [1, depth].
+    if (GetParam().expect_ring && top_k >= g_nranks && top_k <= ht_ep::kCombinePushMaxRing * g_nranks) {
+        int ring = 0;
+        ncclEpGroup_test_getLastCombinePushLaunch(group_, nullptr, nullptr, nullptr, &ring);
+        EXPECT_GT(ring, 0) << "chunk " << GetParam().chunk_size << " top_k " << top_k << " ranks " << g_nranks
+                           << " does not select the load ring";
+    }
 
-    std::vector<float> h_combined_w(kNumTokens * kTopK);
+    std::vector<float> h_combined_w(tokens * top_k);
     CUDA_ASSERT(
-        cudaMemcpy(h_combined_w.data(), d_combined_w, kNumTokens * kTopK * sizeof(float), cudaMemcpyDeviceToHost));
-    for (int i = 0; i < kNumTokens; ++i)
-        for (int k = 0; k < kTopK; ++k) {
+        cudaMemcpy(h_combined_w.data(), d_combined_w, tokens * top_k * sizeof(float), cudaMemcpyDeviceToHost));
+    for (int i = 0; backward && i < tokens; ++i) {
+        for (int k = 0; k < top_k; ++k) {
             float expected = weight_for(g_rank, i, k);
-            EXPECT_NEAR(h_combined_w[i * kTopK + k], expected, 1e-4f)
+            EXPECT_NEAR(h_combined_w[i * top_k + k], expected, 1e-4f)
                 << "chunked combine rank " << g_rank << " token " << i << " k " << k << " expected=" << expected
-                << " got=" << h_combined_w[i * kTopK + k];
+                << " got=" << h_combined_w[i * top_k + k];
         }
+    }
 
-    // The row itself: what the chunked store loop assembles across its chunk boundaries.
-    std::vector<nv_bfloat16> h_combined_x(kNumTokens * kHiddenChunked);
-    CUDA_ASSERT(cudaMemcpy(h_combined_x.data(), d_combined_x, kNumTokens * kHiddenChunked * sizeof(nv_bfloat16),
+    // The row itself: what the chunked store loop assembles across its chunk boundaries. It sums
+    // the top_k copies of the source element, each plus its copy term.
+    std::vector<nv_bfloat16> h_combined_x(tokens * hidden);
+    CUDA_ASSERT(cudaMemcpy(h_combined_x.data(), d_combined_x, tokens * hidden * sizeof(nv_bfloat16),
                             cudaMemcpyDeviceToHost));
-    for (int i = 0; i < kNumTokens; ++i) {
-        const float expected_x = static_cast<float>(g_rank * kNumTokens + i + 1);
+    for (int i = 0; i < tokens; ++i) {
+        float copy_terms = 0.0f;
+        for (int k = 0; k < top_k; ++k) {
+            copy_terms += chunked_copy_term(weight_for(g_rank, i, k));
+        }
+        const float v = chunked_token_base(g_rank, tokens, i);
         int errors = 0;
-        for (int hh = 0; hh < kHiddenChunked; ++hh) {
-            if (std::abs(bf16_val(h_combined_x[i * kHiddenChunked + hh]) - expected_x) > 1e-3f) errors++;
+        for (int hh = 0; hh < hidden; ++hh) {
+            const float expected_x = top_k * (v + chunked_elem_term(hh)) + copy_terms;
+            const float actual_x = bf16_val(h_combined_x[i * hidden + hh]);
+            // A NaN output passes an abs()-only tolerance check, so require a finite result explicitly.
+            if (!std::isfinite(actual_x) || std::abs(actual_x - expected_x) > 1e-3f) errors++;
         }
         EXPECT_EQ(errors, 0) << "chunked combine rank " << g_rank << " token " << i
-                              << " combined_x mismatch at " << errors << "/" << kHiddenChunked << " elems";
+                              << " combined_x mismatch at " << errors << "/" << hidden << " elems";
     }
 
     ncclEpTensorDestroy(t_tok);
@@ -1016,7 +1112,18 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
 }
 
 // Chunk size in hidden elements: one tile (1024 bf16) and two tiles per chunk.
-INSTANTIATE_TEST_SUITE_P(ChunkSize, HtBwdChunkedCombineTest, ::testing::Values("1024", "2048"));
+INSTANTIATE_TEST_SUITE_P(ChunkSize, HtBwdChunkedCombineTest,
+                         ::testing::Values(
+                             ChunkedCombineCase{"1024", kTopK, true},
+                             ChunkedCombineCase{"2048", kTopK, true},
+                             ChunkedCombineCase{"1024", 4, true, kHiddenChunked, kNumTokens, kMaxRecvSlots,
+                                                NCCL_EP_AUTO, true},
+                             // 32 tokens per rank on one combine SM: every rank receives well over the 24
+                             // warps' worth of rows, so each warp refills its ring across rows of one or
+                             // two local copies. 3584 elements end in a half tile and 1536 in a short
+                             // second chunk, whose rows with one copy leave a ring stage unused.
+                             ChunkedCombineCase{"1024", 4, true, 3584, 32, 512, 1, true},
+                             ChunkedCombineCase{"1024", 4, false, 1536, 32, 512, 1, true}));
 
 // ── whole-row vs multi-chunk combine_push equivalence (BWD) ──────────────────
 //
@@ -1237,7 +1344,7 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
         int chunk_int4 = 0;
         unsigned int launched_sm = 0;
         bool direct = false;
-        ncclEpGroup_test_getLastCombinePushLaunch(group_, &chunk_int4, &launched_sm, &direct);
+        ncclEpGroup_test_getLastCombinePushLaunch(group_, &chunk_int4, &launched_sm, &direct, nullptr);
         EXPECT_EQ(chunk_int4, expected_chunk_int4)
             << c.name << " chunk env " << (chunk_env != nullptr ? chunk_env : "(unset)");
         EXPECT_EQ(direct, expect_direct) << c.name << " store mode, TMA store env " << tma_store_env;

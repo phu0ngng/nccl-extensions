@@ -9133,12 +9133,15 @@ int ncclEpGroup_test_getLastLlCombineWarpsPerGroup(ncclEpGroup_t group) {
 }
 
 void ncclEpGroup_test_getLastCombinePushLaunch(
-    ncclEpGroup_t group, int* chunk_int4, unsigned int* device_sm, bool* direct_store) {
+    ncclEpGroup_t group, int* chunk_int4, unsigned int* device_sm, bool* direct_store, int* ring) {
     if (group == nullptr) return;
     if (chunk_int4 != nullptr) *chunk_int4 = group->last_combine_push_launch.chunk_int4;
     if (device_sm != nullptr) *device_sm = group->last_combine_push_launch.device_sm;
     if (direct_store != nullptr) {
         *direct_store = group->last_combine_push_launch.direct_store;
+    }
+    if (ring != nullptr) {
+        *ring = group->last_combine_push_launch.ring;
     }
 }
 
