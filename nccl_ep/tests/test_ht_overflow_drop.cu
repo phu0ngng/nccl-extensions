@@ -26,6 +26,7 @@
 #include "test_common.h"
 #include "../nccl_ep_test_internal.h"
 
+#include <cmath>
 #include <set>
 
 // Recv budget for the drop group. Must be >= max_dispatch_tokens_per_rank
@@ -1243,21 +1244,21 @@ struct PpDropBufs {
 
 // Allocate one round's device buffers: routing, token values and weights in, outputs zeroed.
 static void pp_drop_upload(PpDropBufs* b, const int64_t* routing, int round, float scale, unsigned int budget,
-                           int top_k) {
+                           int top_k, int hidden) {
     CUDA_ASSERT(cudaMalloc(&b->idx, kNumTokens * top_k * sizeof(int64_t)));
-    CUDA_ASSERT(cudaMalloc(&b->tok, kNumTokens * kHidden * sizeof(nv_bfloat16)));
-    CUDA_ASSERT(cudaMalloc(&b->recv, budget * kHidden * sizeof(nv_bfloat16)));
-    CUDA_ASSERT(cudaMalloc(&b->comb_x, kNumTokens * kHidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMalloc(&b->tok, kNumTokens * hidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMalloc(&b->recv, budget * hidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMalloc(&b->comb_x, kNumTokens * hidden * sizeof(nv_bfloat16)));
     CUDA_ASSERT(cudaMalloc(&b->w, kNumTokens * top_k * sizeof(float)));
     CUDA_ASSERT(cudaMalloc(&b->recv_w, budget * sizeof(float)));
     CUDA_ASSERT(cudaMalloc(&b->comb_w, kNumTokens * top_k * sizeof(float)));
     CUDA_ASSERT(cudaMemcpy(b->idx, routing, kNumTokens * top_k * sizeof(int64_t), cudaMemcpyHostToDevice));
 
-    std::vector<nv_bfloat16> h_tok(kNumTokens * kHidden);
+    std::vector<nv_bfloat16> h_tok(kNumTokens * hidden);
     std::vector<float> h_w(kNumTokens * top_k);
     for (int i = 0; i < kNumTokens; ++i) {
-        for (int hh = 0; hh < kHidden; ++hh) {
-            h_tok[i * kHidden + hh] = __float2bfloat16(pp_token_value(scale, g_rank, i));
+        for (int hh = 0; hh < hidden; ++hh) {
+            h_tok[i * hidden + hh] = __float2bfloat16(pp_token_value(scale, g_rank, i));
         }
         for (int k = 0; k < top_k; ++k) {
             h_w[i * top_k + k] = pp_weight(round, g_rank, i, k);
@@ -1265,9 +1266,9 @@ static void pp_drop_upload(PpDropBufs* b, const int64_t* routing, int round, flo
     }
     CUDA_ASSERT(cudaMemcpy(b->tok, h_tok.data(), h_tok.size() * sizeof(nv_bfloat16), cudaMemcpyHostToDevice));
     CUDA_ASSERT(cudaMemcpy(b->w, h_w.data(), h_w.size() * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_ASSERT(cudaMemset(b->recv, 0, budget * kHidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMemset(b->recv, 0, budget * hidden * sizeof(nv_bfloat16)));
     CUDA_ASSERT(cudaMemset(b->recv_w, 0, budget * sizeof(float)));
-    CUDA_ASSERT(cudaMemset(b->comb_x, 0, kNumTokens * kHidden * sizeof(nv_bfloat16)));
+    CUDA_ASSERT(cudaMemset(b->comb_x, 0, kNumTokens * hidden * sizeof(nv_bfloat16)));
     CUDA_ASSERT(cudaMemset(b->comb_w, 0, kNumTokens * top_k * sizeof(float)));
 }
 
@@ -1281,9 +1282,10 @@ static void pp_drop_free(PpDropBufs* b) {
     cudaFree(b->idx);
 }
 
-// Copy back each token's first combined value, the combined weights and the delivered-pair count.
-static void pp_drop_download(const PpDropBufs& b, unsigned int budget, int top_k, PpDropOut* out) {
-    std::vector<nv_bfloat16> h_x(kNumTokens * kHidden);
+// Copy back each token's combined value (NaN when its columns differ), the combined weights and the
+// delivered-pair count.
+static void pp_drop_download(const PpDropBufs& b, unsigned int budget, int top_k, int hidden, PpDropOut* out) {
+    std::vector<nv_bfloat16> h_x(kNumTokens * hidden);
     CUDA_ASSERT(cudaMemcpy(h_x.data(), b.comb_x, h_x.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
     CUDA_ASSERT(cudaMemcpy(out->w, b.comb_w, kNumTokens * top_k * sizeof(float), cudaMemcpyDeviceToHost));
     std::vector<float> h_recv_w(budget);
@@ -1293,21 +1295,26 @@ static void pp_drop_download(const PpDropBufs& b, unsigned int budget, int top_k
         out->recv_pairs += (rw != 0.0f) ? 1 : 0;  // every weight is nonzero, so this counts delivered pairs
     }
     for (int i = 0; i < kNumTokens; ++i) {
-        out->x[i] = __bfloat162float(h_x[i * kHidden]);
+        out->x[i] = __bfloat162float(h_x[i * hidden]);
+        for (int hh = 1; hh < hidden; ++hh) {
+            if (__bfloat162float(h_x[i * hidden + hh]) != out->x[i]) {
+                out->x[i] = std::nanf("");
+            }
+        }
     }
 }
 
 // One forward dispatch + combine (backward when asked, identity expert) on a fresh handle.
 static void pp_drop_round(ncclEpGroup_t grp, const int64_t* routing, int round, float scale,
-                          unsigned int budget, int top_k, bool backward, PpDropOut* out) {
+                          unsigned int budget, int top_k, int hidden, bool backward, PpDropOut* out) {
     PpDropBufs b;
-    pp_drop_upload(&b, routing, round, scale, budget, top_k);
+    pp_drop_upload(&b, routing, round, scale, budget, top_k, hidden);
 
     ncclEpTensor_t *t_idx, *t_tok, *t_recv, *t_comb_x, *t_w, *t_recv_w, *t_comb_w;
     NCCL_ASSERT(epTensorCreate(&t_idx, 2, ncclInt64, b.idx, kNumTokens, top_k));
-    NCCL_ASSERT(epTensorCreate(&t_tok, 2, ncclBfloat16, b.tok, kNumTokens, kHidden));
-    NCCL_ASSERT(epTensorCreate(&t_recv, 2, ncclBfloat16, b.recv, budget, kHidden));
-    NCCL_ASSERT(epTensorCreate(&t_comb_x, 2, ncclBfloat16, b.comb_x, kNumTokens, kHidden));
+    NCCL_ASSERT(epTensorCreate(&t_tok, 2, ncclBfloat16, b.tok, kNumTokens, hidden));
+    NCCL_ASSERT(epTensorCreate(&t_recv, 2, ncclBfloat16, b.recv, budget, hidden));
+    NCCL_ASSERT(epTensorCreate(&t_comb_x, 2, ncclBfloat16, b.comb_x, kNumTokens, hidden));
     NCCL_ASSERT(epTensorCreate(&t_w, 2, ncclFloat32, b.w, kNumTokens, top_k));
     NCCL_ASSERT(epTensorCreate(&t_recv_w, 1, ncclFloat32, b.recv_w, budget));
     NCCL_ASSERT(epTensorCreate(&t_comb_w, 2, ncclFloat32, b.comb_w, kNumTokens, top_k));
@@ -1338,7 +1345,7 @@ static void pp_drop_round(ncclEpGroup_t grp, const int64_t* routing, int round, 
     }
     NCCL_ASSERT(ncclEpCombine(h, &c_in, &c_out, &ccfg, g_stream));
     ASSERT_EQ(cudaStreamSynchronize(g_stream), cudaSuccess) << "Rank " << g_rank << ": drop round faulted";
-    pp_drop_download(b, budget, top_k, out);
+    pp_drop_download(b, budget, top_k, hidden, out);
 
     NCCL_ASSERT(ncclEpHandleDestroy(h));
     ncclEpTensorDestroy(t_comb_w);
@@ -1362,12 +1369,12 @@ static void pp_sum_over_ranks(int local, int* total) {
     cudaFree(d_val);
 }
 
-static void pp_drop_group(ncclEpGroup_t* grp, unsigned int budget, int top_k) {
+static void pp_drop_group(ncclEpGroup_t* grp, unsigned int budget, int top_k, int hidden) {
     ncclEpGroupConfig_t gcfg = NCCL_EP_GROUP_CONFIG_INIT;
     gcfg.algorithm                    = NCCL_EP_ALGO_HIGH_THROUGHPUT;
     gcfg.num_experts                  = kNumExperts;
     gcfg.max_dispatch_tokens_per_rank = kNumTokens;
-    gcfg.max_token_bytes              = kHidden * sizeof(nv_bfloat16);
+    gcfg.max_token_bytes              = hidden * sizeof(nv_bfloat16);
     gcfg.rdma_buffer_size             = NCCL_EP_AUTO;
     gcfg.num_qp_per_rank              = NCCL_EP_AUTO;
     gcfg.num_channels                 = NCCL_EP_AUTO;
@@ -1385,7 +1392,7 @@ static void run_pull_push_drop(unsigned int budget, bool all_delivered, bool bac
         GTEST_SKIP() << "routing below assumes 4 ranks (8 experts -> 2 per rank)";
     }
     ncclEpGroup_t grp = nullptr;
-    pp_drop_group(&grp, budget, kPpTopK);
+    pp_drop_group(&grp, budget, kPpTopK, kHidden);
 
     PpDropOut out;
     for (int p = 0; p < 2; ++p) {
@@ -1395,7 +1402,7 @@ static void run_pull_push_drop(unsigned int budget, bool all_delivered, bool bac
             routing[i * kPpTopK] = first;
             routing[i * kPpTopK + 1] = first + 1;
         }
-        pp_drop_round(grp, routing, p + 1, /*scale=*/8.0f, budget, kPpTopK, backward, &out);
+        pp_drop_round(grp, routing, p + 1, /*scale=*/8.0f, budget, kPpTopK, kHidden, backward, &out);
     }
 
     int64_t routing[kNumTokens * kPpTopK];
@@ -1403,7 +1410,7 @@ static void run_pull_push_drop(unsigned int budget, bool all_delivered, bool bac
         routing[i * kPpTopK] = 0;
         routing[i * kPpTopK + 1] = 1;
     }
-    pp_drop_round(grp, routing, /*round=*/3, /*scale=*/1.0f, budget, kPpTopK, backward, &out);
+    pp_drop_round(grp, routing, /*round=*/3, /*scale=*/1.0f, budget, kPpTopK, kHidden, backward, &out);
     if (g_rank == 0) {
         // Every token routes two experts to rank 0: a drop happened and something was delivered.
         EXPECT_GT(out.recv_pairs, 0);
@@ -1455,14 +1462,14 @@ TEST_F(HtOverflowDropTest, PullPushCombineForwardDroppedTokenReadsZero) {
 
 // Four experts per token on two ranks, rank 0 over budget and rank 1 (or 2) not: the dropped pair must read
 // zero while the other ranks' copies and weights, including top-k positions beyond 2, come through.
-TEST_F(HtOverflowDropTest, PullPushCombineTopK4DropsOneRankOnly) {
+static void run_pull_push_topk4_drop(int hidden) {
     if (g_nranks != 4) {
         GTEST_SKIP() << "routing below assumes 4 ranks (8 experts -> 2 per rank)";
     }
     constexpr int kTopK4 = 4;
     const unsigned int budget = 4 * kNumTokens;
     ncclEpGroup_t grp = nullptr;
-    pp_drop_group(&grp, budget, kTopK4);
+    pp_drop_group(&grp, budget, kTopK4, hidden);
     PpDropOut out;
     int64_t routing[kNumTokens * kTopK4];
     for (int p = 0; p < 2; ++p) {
@@ -1472,7 +1479,7 @@ TEST_F(HtOverflowDropTest, PullPushCombineTopK4DropsOneRankOnly) {
                 routing[i * kTopK4 + k] = first + k;
             }
         }
-        pp_drop_round(grp, routing, p + 1, /*scale=*/8.0f, budget, kTopK4, /*backward=*/true, &out);
+        pp_drop_round(grp, routing, p + 1, /*scale=*/8.0f, budget, kTopK4, hidden, /*backward=*/true, &out);
     }
     for (int i = 0; i < kNumTokens; ++i) {
         const int64_t second = (i % 2 == 0) ? 2 : 4;
@@ -1481,7 +1488,7 @@ TEST_F(HtOverflowDropTest, PullPushCombineTopK4DropsOneRankOnly) {
             routing[i * kTopK4 + k] = experts[k];
         }
     }
-    pp_drop_round(grp, routing, /*round=*/3, /*scale=*/1.0f, budget, kTopK4, /*backward=*/true, &out);
+    pp_drop_round(grp, routing, /*round=*/3, /*scale=*/1.0f, budget, kTopK4, hidden, /*backward=*/true, &out);
 
     // Rank 0 gets 2 pairs from every token (over budget); ranks 1 and 2 get exactly their budget.
     if (g_rank == 0) {
@@ -1500,6 +1507,16 @@ TEST_F(HtOverflowDropTest, PullPushCombineTopK4DropsOneRankOnly) {
         }
     }
     NCCL_ASSERT(ncclEpGroupDestroy(grp));
+}
+
+TEST_F(HtOverflowDropTest, PullPushCombineTopK4DropsOneRankOnly) {
+    run_pull_push_topk4_drop(kHidden);
+}
+
+// The same over 4096-element rows in one-tile chunks: below 8 ranks the push stores each chunk directly.
+TEST_F(HtOverflowDropTest, PullPushCombineTopK4DropsOneRankOnlyChunked) {
+    ScopedEnvVar chunk("NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE", "1024");
+    run_pull_push_topk4_drop(4096);
 }
 
 // ── main ────────────────────────────────────────────────────────────────────

@@ -117,11 +117,12 @@ struct CombinePushChunkResolution {
     CombinePushChunkMessage message;
 };
 
-// Chunk width of the last combine-push launch, for tests: int4 after tile rounding and the
-// architecture it was resolved for.
+// Chunk width of the last combine-push launch, for tests: int4 after tile rounding, the
+// architecture it was resolved for, and whether it stored chunks directly.
 struct CombinePushLaunch {
     int chunk_int4;
     unsigned int device_sm;
+    bool direct_store;
 };
 
 // Resolve the expert-major combine-push chunk width (int4) before tile rounding.

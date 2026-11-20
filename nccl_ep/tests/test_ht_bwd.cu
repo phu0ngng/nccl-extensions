@@ -25,6 +25,7 @@
 
 #include "test_common.h"
 #include "../nccl_ep_test_internal.h"
+#include "../device/ht_ep.cuh"
 #include "nccl_ep/common.hpp"
 #include <cstdint>
 #include <cuda_fp16.h>
@@ -839,7 +840,7 @@ TEST_F(HtBwdTopK2Test, CombineWithGradExpertMajor) {
 // kHidden=16 group's row is a single tile (can't split into >1 chunk). This fixture uses a hidden
 // wide enough to actually split (kHiddenChunked=4096 -> hidden_int4=512 -> 4 tiles), through the same backward combine-with-grad round trip
 // CombineWithGradExpertMajor uses, and additionally checks combined_x's values (the row itself,
-// not just the co-located weight pad), since that's what the chunked TMA-store loop assembles.
+// not just the co-located weight pad), since that's what the chunked store loop assembles.
 // Only meaningful under push-combine (NCCL_EP_HT_PULL_PUSH); skips otherwise.
 
 static constexpr int kHiddenChunked = 4096;
@@ -985,7 +986,7 @@ TEST_P(HtBwdChunkedCombineTest, CombineWithGradExpertMajorChunked) {
                 << " got=" << h_combined_w[i * kTopK + k];
         }
 
-    // The row itself: what the chunked TMA-store loop assembles across its chunk boundaries.
+    // The row itself: what the chunked store loop assembles across its chunk boundaries.
     std::vector<nv_bfloat16> h_combined_x(kNumTokens * kHiddenChunked);
     CUDA_ASSERT(cudaMemcpy(h_combined_x.data(), d_combined_x, kNumTokens * kHiddenChunked * sizeof(nv_bfloat16),
                             cudaMemcpyDeviceToHost));
@@ -1019,9 +1020,9 @@ INSTANTIATE_TEST_SUITE_P(ChunkSize, HtBwdChunkedCombineTest, ::testing::Values("
 
 // ── whole-row vs multi-chunk combine_push equivalence (BWD) ──────────────────
 //
-// Whole-row, forced one-tile, default and reused whole-row combines of the same inputs must match each
-// other and an analytic reference; each pass checks the chunk width the launcher resolved (launch record).
-// Push-combine only.
+// Whole-row, forced chunk (one or two tiles), default and reused whole-row combines of the same inputs must
+// match each other and an analytic reference; each pass checks the chunk width the launcher resolved (launch
+// record). Push-combine only.
 
 static void write_token_elem(void* base, int idx, ncclDataType_t dtype, float v) {
     if (dtype == ncclFloat32) {
@@ -1055,6 +1056,8 @@ struct CombineChunkCase {
     ncclDataType_t dtype;
     int hidden;
     const char* name;
+    int chunk_tiles = 1;
+    int top_k = 1;
 };
 
 struct CombineResult {
@@ -1085,13 +1088,17 @@ protected:
         gcfg.max_recv_tokens_per_rank = static_cast<unsigned int>(kMaxRecvSlots);
         NCCL_ASSERT(ncclEpCreateGroup(&group_, g_comm, &gcfg));
 
-        CUDA_ASSERT(cudaMalloc(&d_topk_, kNumTokens * kTopK * sizeof(int64_t)));
-        int64_t h[kNumTokens];
+        CUDA_ASSERT(cudaMalloc(&d_topk_, kNumTokens * c.top_k * sizeof(int64_t)));
+        std::vector<int64_t> h(kNumTokens * c.top_k);
         for (int i = 0; i < kNumTokens; ++i) {
-            h[i] = expert_for_token(i);
+            const int64_t e = expert_for_token(i);
+            // Two experts per rank: top_k 2 routes both of the owning rank's experts, so a slot carries two copies.
+            for (int k = 0; k < c.top_k; ++k) {
+                h[i * c.top_k + k] = c.top_k == 1 ? e : (e & ~1) + k;
+            }
         }
-        CUDA_ASSERT(cudaMemcpy(d_topk_, h, sizeof(h), cudaMemcpyHostToDevice));
-        NCCL_ASSERT(epTensorCreate(&topk_idx_em_, 2, ncclInt64, d_topk_, kNumTokens, kTopK));
+        CUDA_ASSERT(cudaMemcpy(d_topk_, h.data(), h.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+        NCCL_ASSERT(epTensorCreate(&topk_idx_em_, 2, ncclInt64, d_topk_, kNumTokens, c.top_k));
     }
 
     void TearDown() override {
@@ -1112,6 +1119,7 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
         return;
     }
     const CombineChunkCase& c = GetParam();
+    const int top_k = c.top_k;
     const int eb = static_cast<int>(nccl_ep::ncclTypeSize(c.dtype));
     const int tile_elems = 2048 / eb;  // one tile = 128 int4
     ASSERT_GT(c.hidden, tile_elems) << c.name << " needs a multi-tile row to split into chunks";
@@ -1137,10 +1145,10 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
             write_token_elem(h_tok.data(), i * c.hidden + hh, c.dtype, chunk_elem_val(g_rank, i, hh));
         }
     }
-    std::vector<float> h_w(kNumTokens * kTopK);
+    std::vector<float> h_w(kNumTokens * top_k);
     for (int i = 0; i < kNumTokens; ++i) {
-        for (int k = 0; k < kTopK; ++k) {
-            h_w[i * kTopK + k] = weight_for(g_rank, i, k);
+        for (int k = 0; k < top_k; ++k) {
+            h_w[i * top_k + k] = weight_for(g_rank, i, k);
         }
     }
 
@@ -1150,17 +1158,17 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
     float* d_recv_w = nullptr;
     CUDA_ASSERT(cudaMalloc(&d_tok, h_tok.size()));
     CUDA_ASSERT(cudaMalloc(&d_recv, recv_bytes));
-    CUDA_ASSERT(cudaMalloc(&d_weights, kNumTokens * kTopK * sizeof(float)));
+    CUDA_ASSERT(cudaMalloc(&d_weights, kNumTokens * top_k * sizeof(float)));
     CUDA_ASSERT(cudaMalloc(&d_recv_w, kMaxRecvSlots * sizeof(float)));
     CUDA_ASSERT(cudaMemset(d_recv, 0, recv_bytes));
     CUDA_ASSERT(cudaMemset(d_recv_w, 0, kMaxRecvSlots * sizeof(float)));
     CUDA_ASSERT(cudaMemcpy(d_tok, h_tok.data(), h_tok.size(), cudaMemcpyHostToDevice));
-    CUDA_ASSERT(cudaMemcpy(d_weights, h_w.data(), kNumTokens * kTopK * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_ASSERT(cudaMemcpy(d_weights, h_w.data(), kNumTokens * top_k * sizeof(float), cudaMemcpyHostToDevice));
 
     ncclEpTensor_t *t_tok, *t_recv, *t_w, *t_recv_w;
     NCCL_ASSERT(epTensorCreate(&t_tok, 2, c.dtype, d_tok, kNumTokens, c.hidden));
     NCCL_ASSERT(epTensorCreate(&t_recv, 2, c.dtype, d_recv, kMaxRecvSlots, c.hidden));
-    NCCL_ASSERT(epTensorCreate(&t_w, 2, ncclFloat32, d_weights, kNumTokens, kTopK));
+    NCCL_ASSERT(epTensorCreate(&t_w, 2, ncclFloat32, d_weights, kNumTokens, top_k));
     NCCL_ASSERT(epTensorCreate(&t_recv_w, 1, ncclFloat32, d_recv_w, kMaxRecvSlots));  // EM: 1D
 
     ncclEpDispatchInputs_t d_in = NCCL_EP_DISPATCH_INPUTS_INIT;
@@ -1174,14 +1182,35 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
     NCCL_ASSERT(ncclEpComplete(h, nullptr, g_stream));
     CUDA_ASSERT(cudaStreamSynchronize(g_stream));
 
+    // The copy at top-k position k carries 16 * k more than the source row, so a combine that reads one
+    // copy twice or swaps two copies changes the sum. The EM weight of a row is weight_for(.., k), whose
+    // last decimal digit is k.
+    if (top_k > 1) {
+        std::vector<float> h_recv_w(kMaxRecvSlots);
+        std::vector<uint8_t> h_recv(recv_bytes);
+        CUDA_ASSERT(cudaMemcpy(h_recv_w.data(), d_recv_w, h_recv_w.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_ASSERT(cudaMemcpy(h_recv.data(), d_recv, h_recv.size(), cudaMemcpyDeviceToHost));
+        for (int r = 0; r < kMaxRecvSlots; ++r) {
+            if (h_recv_w[r] == 0.0f) {
+                continue;
+            }
+            const int k = static_cast<int>(h_recv_w[r] / 0.125f) % 10;
+            for (int hh = 0; hh < c.hidden; ++hh) {
+                const int idx = r * c.hidden + hh;
+                write_token_elem(h_recv.data(), idx, c.dtype, read_token_elem(h_recv.data(), idx, c.dtype) + 16.0f * k);
+            }
+        }
+        CUDA_ASSERT(cudaMemcpy(d_recv, h_recv.data(), h_recv.size(), cudaMemcpyHostToDevice));
+    }
+
     void* d_combined_x = nullptr;
     float* d_combined_w = nullptr;
     CUDA_ASSERT(cudaMalloc(&d_combined_x, tok_elems * eb));
-    CUDA_ASSERT(cudaMalloc(&d_combined_w, kNumTokens * kTopK * sizeof(float)));
+    CUDA_ASSERT(cudaMalloc(&d_combined_w, kNumTokens * top_k * sizeof(float)));
 
     ncclEpTensor_t *t_combined_x, *t_combined_w;
     NCCL_ASSERT(epTensorCreate(&t_combined_x, 2, c.dtype, d_combined_x, kNumTokens, c.hidden));
-    NCCL_ASSERT(epTensorCreate(&t_combined_w, 2, ncclFloat32, d_combined_w, kNumTokens, kTopK));
+    NCCL_ASSERT(epTensorCreate(&t_combined_w, 2, ncclFloat32, d_combined_w, kNumTokens, top_k));
 
     ncclEpCombineInputs_t c_in = NCCL_EP_COMBINE_INPUTS_INIT;
     ncclEpCombineOutputs_t c_out = NCCL_EP_COMBINE_OUTPUTS_INIT;
@@ -1192,21 +1221,26 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
     ncclEpCombineConfig_t ccfg = NCCL_EP_COMBINE_CONFIG_INIT;
     ccfg.pass_direction = NCCL_EP_BWD_PASS;
 
-    // One backward combine under a forced chunk size (null: unset); checks the launcher resolved
-    // expected_chunk_int4 for this device, and returns combined_x/w as float.
-    auto combine_pass = [&](const char* chunk_env, int expected_chunk_int4, CombineResult& out) {
+    // One backward combine under a forced chunk size and store mode ("1" keeps the TMA store where
+    // the direct store is eligible); checks the launcher resolved expected_chunk_int4 and the store
+    // mode for this device, and returns combined_x/w as float.
+    auto combine_pass = [&](const char* chunk_env, const char* tma_store_env, int expected_chunk_int4,
+                            bool expect_direct, CombineResult& out) {
         CUDA_ASSERT(cudaMemset(d_combined_x, 0, tok_elems * eb));
-        CUDA_ASSERT(cudaMemset(d_combined_w, 0, kNumTokens * kTopK * sizeof(float)));
+        CUDA_ASSERT(cudaMemset(d_combined_w, 0, kNumTokens * top_k * sizeof(float)));
         {
             ScopedEnvOverride force_chunk("NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE", chunk_env);
+            ScopedEnvOverride force_store("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE", tma_store_env);
             NCCL_ASSERT(ncclEpCombine(h, &c_in, &c_out, &ccfg, g_stream));
             CUDA_ASSERT(cudaStreamSynchronize(g_stream));
         }
         int chunk_int4 = 0;
         unsigned int launched_sm = 0;
-        ncclEpGroup_test_getLastCombinePushLaunch(group_, &chunk_int4, &launched_sm);
+        bool direct = false;
+        ncclEpGroup_test_getLastCombinePushLaunch(group_, &chunk_int4, &launched_sm, &direct);
         EXPECT_EQ(chunk_int4, expected_chunk_int4)
             << c.name << " chunk env " << (chunk_env != nullptr ? chunk_env : "(unset)");
+        EXPECT_EQ(direct, expect_direct) << c.name << " store mode, TMA store env " << tma_store_env;
         EXPECT_EQ(launched_sm, device_sm) << c.name << " launcher resolved the chunk for the wrong architecture";
         std::vector<uint8_t> raw_x(tok_elems * eb);
         CUDA_ASSERT(cudaMemcpy(raw_x.data(), d_combined_x, raw_x.size(), cudaMemcpyDeviceToHost));
@@ -1214,24 +1248,28 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
         for (size_t idx = 0; idx < tok_elems; ++idx) {
             out.x[idx] = read_token_elem(raw_x.data(), static_cast<int>(idx), c.dtype);
         }
-        out.w.resize(kNumTokens * kTopK);
+        out.w.resize(kNumTokens * top_k);
         CUDA_ASSERT(cudaMemcpy(out.w.data(), d_combined_w, out.w.size() * sizeof(float), cudaMemcpyDeviceToHost));
     };
 
     // Whole row, forced multi-chunk, the unset default (one tile at this EP size on every
     // architecture), then whole row again: the last pass reuses the first pass's cached JIT
     // variant while alternating the chunk setting, so a stale cached kernel variant would
-    // surface as a reuse mismatch.
-    const std::string tile_chunk = std::to_string(tile_elems);
-    CombineResult whole, forced, by_default, reuse;
-    combine_pass("0", whole_row_int4, whole);
-    combine_pass(tile_chunk.c_str(), kTileInt4, forced);
-    combine_pass(nullptr, kTileInt4, by_default);
-    combine_pass("0", whole_row_int4, reuse);
+    // surface as a reuse mismatch. Teams below 8 ranks store multi-chunk rows directly, so a
+    // further pass forces the TMA store used from 8 ranks.
+    const std::string chunk_req = std::to_string(c.chunk_tiles * tile_elems);
+    const int chunk_req_int4 = c.chunk_tiles * kTileInt4;
+    const bool small_team = g_nranks < ht_ep::kCombinePushTmaStoreMinTeam;
+    CombineResult whole, forced, by_default, reuse, tma;
+    combine_pass("0", "0", whole_row_int4, false, whole);
+    combine_pass(chunk_req.c_str(), "0", chunk_req_int4, small_team, forced);
+    combine_pass(nullptr, "0", kTileInt4, small_team, by_default);
+    combine_pass("0", "0", whole_row_int4, false, reuse);
+    combine_pass(chunk_req.c_str(), "1", chunk_req_int4, false, tma);
 
     for (int i = 0; i < kNumTokens; ++i) {
-        for (int k = 0; k < kTopK; ++k) {
-            EXPECT_NEAR(whole.w[i * kTopK + k], weight_for(g_rank, i, k), 1e-4f)
+        for (int k = 0; k < top_k; ++k) {
+            EXPECT_NEAR(whole.w[i * top_k + k], weight_for(g_rank, i, k), 1e-4f)
                 << c.name << " whole-row weight token " << i << " k " << k;
         }
     }
@@ -1239,7 +1277,7 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
     for (int i = 0; i < kNumTokens; ++i) {
         for (int hh = 0; hh < c.hidden; ++hh) {
             const int idx = i * c.hidden + hh;
-            const float expected = chunk_elem_val(g_rank, i, hh);
+            const float expected = top_k * chunk_elem_val(g_rank, i, hh) + 8.0f * top_k * (top_k - 1);
             if (std::abs(whole.x[idx] - expected) > 1e-3f) {
                 if (ref_err < 8) {
                     printf("[Rank %d] %s whole-row x token %d hh %d: expected %.1f got %.1f\n", g_rank, c.name, i,
@@ -1276,7 +1314,8 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
         const CombineResult* result;
     };
     for (const Variant& v : {Variant{"multi-chunk", &forced}, Variant{"default", &by_default},
-                             Variant{"reused whole-row (stale JIT variant?)", &reuse}}) {
+                             Variant{"reused whole-row (stale JIT variant?)", &reuse},
+                             Variant{"TMA-store multi-chunk", &tma}}) {
         EXPECT_EQ(count_mismatches(v.label, *v.result), 0) << c.name << " " << v.label << " != whole-row combine";
     }
 
@@ -1296,7 +1335,8 @@ TEST_P(HtBwdCombineChunkEquivTest, WholeRowEqualsChunkedWithGrad) {
 }
 
 // Token dtype and row width: exact-tile-multiple and partial final tile (hidden_int4 not a multiple of the
-// 128-int4 tile) widths. bf16 at a tile multiple runs in ChunkSize above.
+// 128-int4 tile) widths. bf16 at a tile multiple runs in ChunkSize above. The two-tile cases split a five-tile
+// row into chunks of 2, 2 and 1 tiles.
 INSTANTIATE_TEST_SUITE_P(
     DtypeWidth,
     HtBwdCombineChunkEquivTest,
@@ -1304,7 +1344,11 @@ INSTANTIATE_TEST_SUITE_P(
         CombineChunkCase{ncclBfloat16, 3584, "bf16_partial"},
         CombineChunkCase{ncclFloat32, 2048, "fp32_exact"},
         CombineChunkCase{ncclFloat32, 1792, "fp32_partial"},
-        CombineChunkCase{ncclFloat16, 3584, "fp16_partial"}),
+        CombineChunkCase{ncclFloat16, 3584, "fp16_partial"},
+        CombineChunkCase{ncclBfloat16, 5120, "bf16_two_tile_chunk", 2},
+        CombineChunkCase{ncclBfloat16, 4608, "bf16_two_tile_chunk_partial", 2},
+        CombineChunkCase{ncclBfloat16, 4096, "bf16_one_tile_chunk_two_copies", 1, 2},
+        CombineChunkCase{ncclBfloat16, 5120, "bf16_two_tile_chunk_two_copies", 2, 2}),
     [](const ::testing::TestParamInfo<CombineChunkCase>& info) { return std::string(info.param.name); });
 
 // ── main ──────────────────────────────────────────────────────────────────────

@@ -262,6 +262,43 @@ INSTANTIATE_TEST_SUITE_P(Sizing, CombinePushChunkingTest, ::testing::ValuesIn(kC
                               return info.param.name;
                           });
 
+// Launch shape of a multi-chunk row (hidden_int4=896, two-tile chunks, 4096-byte chunk buffer). A direct
+// EM store keeps every warp with no dynamic smem and no chunk limit; the forced TMA store of the same row
+// sizes the block by its buffer and rejects a chunk wider than the cap.
+TEST(CombinePushLaunchShape, DirectStoreHasNoChunkBuffer) {
+    constexpr int kHiddenInt4 = 896;
+    constexpr int kRowBytes = kHiddenInt4 * 16;
+    constexpr int kRoomyCap = 232448;
+    const int chunk = ht_ep::combine_push_chunk_size(kHiddenInt4, 200);
+    const int chunk_bytes = ht_ep::combine_push_buf_int4(kHiddenInt4, chunk) * 16;
+    ASSERT_EQ(chunk_bytes, 4096);
+    // Room for half a chunk past the static metadata.
+    const int tight_cap = ht_ep::combine_push_meta_reserve_bytes() + chunk_bytes / 2;
+
+    for (int team : {2, ht_ep::kCombinePushTmaStoreMinTeam - 1}) {
+        EXPECT_TRUE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk));
+        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, 0));
+    }
+    for (int team : {ht_ep::kCombinePushTmaStoreMinTeam, 2 * ht_ep::kCombinePushTmaStoreMinTeam}) {
+        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk));
+    }
+
+    for (int cap : {kRoomyCap, tight_cap}) {
+        const auto direct = ht_ep::combine_push_launch_shape(false, true, kRowBytes, kHiddenInt4, chunk, cap);
+        EXPECT_EQ(direct.slots, ht_ep::kCombinePushMaxSlots);
+        EXPECT_EQ(direct.dynamic_smem_bytes, 0);
+        EXPECT_TRUE(direct.chunk_fits);
+    }
+    const auto tma_roomy = ht_ep::combine_push_launch_shape(false, false, kRowBytes, kHiddenInt4, chunk, kRoomyCap);
+    EXPECT_EQ(tma_roomy.slots, ht_ep::kCombinePushMaxSlots);
+    EXPECT_EQ(tma_roomy.dynamic_smem_bytes, ht_ep::kCombinePushMaxSlots * chunk_bytes);
+    EXPECT_TRUE(tma_roomy.chunk_fits);
+    const auto tma_tight = ht_ep::combine_push_launch_shape(false, false, kRowBytes, kHiddenInt4, chunk, tight_cap);
+    EXPECT_EQ(tma_tight.slots, 1);
+    EXPECT_EQ(tma_tight.dynamic_smem_bytes, chunk_bytes);
+    EXPECT_FALSE(tma_tight.chunk_fits);
+}
+
 static float bf16_val(nv_bfloat16 v) {
     return __bfloat162float(v);
 }
