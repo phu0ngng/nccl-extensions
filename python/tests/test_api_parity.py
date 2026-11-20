@@ -273,6 +273,36 @@ class EpApiParityTest(unittest.TestCase):
                 with self.assertRaises(NcclInvalid):
                     invalid_group.get_async_error()
 
+    def test_group_config_bwd_sms_round_trip(self) -> None:
+        dispatch_bwd = 24
+        combine_bwd = 40
+        config = ep.GroupConfig(
+            dispatch_bwd_num_sms=dispatch_bwd,
+            combine_bwd_num_sms=combine_bwd,
+        )
+
+        # Keyword-only construction must survive the facade.
+        with self.assertRaises(TypeError):
+            ep.GroupConfig(dispatch_bwd)  # type: ignore[misc]
+
+        # Facade field and Cython property read the same value.
+        self.assertEqual(config.dispatch_bwd_num_sms, dispatch_bwd)
+        self.assertEqual(config.combine_bwd_num_sms, combine_bwd)
+        self.assertEqual(config._lowpp.dispatch_bwd_num_sms, dispatch_bwd)
+        self.assertEqual(config._lowpp.combine_bwd_num_sms, combine_bwd)
+
+        # Serialized struct carries both fields at their NumPy dtype offsets.
+        dtype = ep_bindings.group_config_dtype
+        view = np.frombuffer(config._lowpp, dtype=dtype, count=1)
+        self.assertEqual(int(view["dispatch_bwd_num_sms"][0]), dispatch_bwd)
+        self.assertEqual(int(view["combine_bwd_num_sms"][0]), combine_bwd)
+
+        # The appended fields follow padding_v4 and are adjacent 4-byte words.
+        dispatch_off = dtype.fields["dispatch_bwd_num_sms"][1]
+        combine_off = dtype.fields["combine_bwd_num_sms"][1]
+        self.assertGreater(dispatch_off, dtype.fields["padding_v4"][1])
+        self.assertEqual(combine_off, dispatch_off + 4)
+
     def test_from_buffer_preserves_exporter_mutability(self) -> None:
         lowpp_type = ep_bindings.HandleConfig
         dtype = ep_bindings.handle_config_dtype

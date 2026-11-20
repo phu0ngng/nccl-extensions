@@ -72,16 +72,18 @@ int ncclEpGroup_test_getLastLlCombineWarpsPerGroup(ncclEpGroup_t group);
 // has not launched one.
 void ncclEpGroup_test_getLastCombinePushLaunch(
     ncclEpGroup_t group, int* chunk_int4, unsigned int* device_sm, bool* direct_store);
-// Return the group budgets (expert-major for HT); use the handle accessor for flat.
+// Return the group budgets of one pass (expert-major for HT); use the handle accessor for flat.
 void ncclEpGroup_test_getSmBudgets(
-    ncclEpGroup_t group, unsigned int* dispatch_num_sms, unsigned int* combine_num_sms);
+    ncclEpGroup_t group, ncclEpPassDir_t pass_direction, unsigned int* dispatch_num_sms,
+    unsigned int* combine_num_sms);
 
 // Return the resolved HT flow for testing AUTO selection and explicit overrides.
 ncclEpHtFlow_t ncclEpGroup_test_getHtFlow(ncclEpGroup_t group);
 
-// Effective HT handle budgets, including the layout-specific default.
+// Effective HT handle budgets of one pass, including the layout-specific default.
 void ncclEpHandle_test_getSmBudgets(
-    ncclEpHandle_t handle, unsigned int* dispatch_num_sms, unsigned int* combine_num_sms);
+    ncclEpHandle_t handle, ncclEpPassDir_t pass_direction, unsigned int* dispatch_num_sms,
+    unsigned int* combine_num_sms);
 int ncclEpHandle_test_getCombineTokensPerChunk(ncclEpHandle_t handle);
 
 // Number of combine signal flags for a token row of hidden elements at the given signal granularity.
