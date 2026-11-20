@@ -6623,11 +6623,18 @@ __host__ __device__ constexpr int combine_push_ring_depth(
     }
     return ring;
 }
-// A multi-chunk row in an LSA team below this size is stored int4 by int4 to the peer, which skips the smem buffer
-// and its per-chunk TMA wait; from this size the TMA store is kept.
+// In an LSA team below this size, every row of a signaled push and a row of more than one chunk are stored int4 by
+// int4 to the peer, which skips the smem buffer and its per-chunk TMA wait; from this size one TMA store per chunk
+// writes the peers at least as fast. A single-chunk signaled push always stores directly: a whole-row buffer would
+// cost the block most of its warps.
 constexpr int kCombinePushTmaStoreMinTeam = 8;
-__host__ __device__ constexpr bool combine_push_direct_store(int lsa_team_size, int hidden_int4, int chunk_size) {
-    return lsa_team_size < kCombinePushTmaStoreMinTeam && combine_push_num_chunks(hidden_int4, chunk_size) > 1;
+__host__ __device__ constexpr bool combine_push_direct_store(int lsa_team_size, int hidden_int4, int chunk_size,
+                                                             bool signal) {
+    const bool multi_chunk = combine_push_num_chunks(hidden_int4, chunk_size) > 1;
+    if (signal && !multi_chunk) {
+        return true;
+    }
+    return lsa_team_size < kCombinePushTmaStoreMinTeam && (signal || multi_chunk);
 }
 // Block shape and dynamic smem of a combine_push launch. FLAT and buffered EM size both by their per-warp smem buffer
 // (slots is 0 when a FLAT row does not fit; chunk_fits is false when a buffered EM chunk does not fit). A direct EM
@@ -9187,13 +9194,15 @@ __device__ __forceinline__ void combine_push_quant_row(
 
 // Row claiming for combine_push. Dynamic: a block claims rows of its own region one by one (shared
 // counter); the last 1/kPoolDiv of every region is a grid-wide pool claimed by ticket t, which maps to
-// region (t % grid) at pool position (t / grid). Rows up to kPoolMinRowBytes skip the pool. Static:
-// each warp walks a contiguous range. Both rotate regions by rank so concurrent senders start on
-// different destinations.
+// region (t % grid) at pool position (t / grid). Rows up to kPoolMinRowBytes skip the pool. With wide_pool and a
+// grid of at least kPoolMinGrid blocks, whatever the team size, the pool is three quarters of every region, so each
+// warp's rows spread over destinations. Static: each warp walks a contiguous range. Both rotate regions by rank so
+// concurrent senders start on different destinations.
 template <bool kDynamic>
 struct combine_push_claim_t {
     static constexpr int kPoolDiv = 4;
     static constexpr int kPoolMinRowBytes = 8192;
+    static constexpr int kPoolMinGrid = 24;  // the smallest grid where the wide pool was measured to help (EP8)
     int num_recv;
     int grid_blocks;
     int num_per_block;
@@ -9207,7 +9216,7 @@ struct combine_push_claim_t {
     int static_end;
 
     __device__ __forceinline__ void init(int num_recv_in, int my_lsa_rank, int lsa_team_size, int row_bytes,
-                                         int slots_per_block, int slot_in_block) {
+                                         int slots_per_block, int slot_in_block, bool wide_pool) {
         num_recv = num_recv_in;
         grid_blocks = static_cast<int>(gridDim.x);
         if constexpr (!kDynamic) {
@@ -9219,7 +9228,11 @@ struct combine_push_claim_t {
             return;
         }
         num_per_block = nccl_ep::ceil_div(num_recv, grid_blocks);
-        const int pool_per_block = row_bytes > kPoolMinRowBytes ? num_per_block / kPoolDiv : 0;
+        int pool_per_block = 0;
+        if (row_bytes > kPoolMinRowBytes) {
+            const bool wide = wide_pool && grid_blocks >= kPoolMinGrid;
+            pool_per_block = wide ? num_per_block - num_per_block / kPoolDiv : num_per_block / kPoolDiv;
+        }
         own_per_block = num_per_block - pool_per_block;
         rot_offset = my_lsa_rank * (grid_blocks / lsa_team_size);
         own_start = ((static_cast<int>(blockIdx.x) + rot_offset) % grid_blocks) * num_per_block;
@@ -9259,6 +9272,23 @@ struct combine_push_claim_t {
                 return claimed;
             }
         }
+    }
+
+    // Block-only claiming for kDynamic: the block takes every row of its own region through one counter, with no
+    // grid-wide pool. Pairs with next_in_block.
+    __device__ __forceinline__ void init_block_only(int num_recv_in, int my_lsa_rank, int lsa_team_size) {
+        static_assert(kDynamic, "block-only claiming is dynamic");
+        init(num_recv_in, my_lsa_rank, lsa_team_size, 0, 0, 0, false);
+    }
+
+    // Warp-uniform. Returns the next row of the block's own region from its counter, or num_recv when none are left.
+    __device__ __forceinline__ int next_in_block(int* block_counter, int wlane) const {
+        int idx = 0;
+        if (wlane == 0) {
+            idx = atomicAdd(block_counter, 1);
+        }
+        idx = __shfl_sync(0xFFFFFFFFu, idx, 0);
+        return own_start + idx < own_end ? own_start + idx : num_recv;
     }
 };
 
@@ -9453,6 +9483,235 @@ __device__ __forceinline__ void combine_push_signaled_tail(
     }
 }
 
+// One chunk of the signaled push: columns [chunk * kChunkInt4, + kChunkInt4) of every row, clamped to the row. The
+// block waits for ready[chunk] == chunk, then each warp claims rows from the block's region through block_counter,
+// the chunk's counter, and stores each reduced int4 to the destination row, straight or through its smem chunk buffer
+// and one TMA store (combine_push_chunk_store_t). A single-chunk push of rows over kPoolMinRowBytes also claims from
+// the grid-wide pool, as no other chunk shares its counter. A row with one copy is stored as loaded. The chunk
+// geometry is compile-time, so a one-tile chunk keeps two copies of loads in flight per lane.
+template <int MaxTopK, int HiddenInt4, ncclDataType_t kTokenDtype, bool BACKWARD_COMBINE, int kChunkInt4,
+          bool kDirectStore>
+__device__ __forceinline__ void combine_push_signaled_chunk(
+    void* const* __restrict__ peer_staging_ptrs,
+    const uint8_t* __restrict__ recv_x_em,
+    const int32_t* __restrict__ flat2em_slot_map,
+    const int32_t* __restrict__ recv_slot_to_src,
+    int num_recv,
+    int top_k,
+    int caller_num_recv_tokens,
+    int my_lsa_rank,
+    const tokens_fast_div_t& tokens_div,
+    int lsa_team_size,
+    const float* __restrict__ topk_weights_em,
+    const int32_t* __restrict__ srcpos_map,
+    const int32_t* __restrict__ ready,
+    int chunk,
+    int* block_counter,
+    uint32_t* pool_counter,
+    int32_t (*s_flat2em)[MaxTopK],
+    int4** s_dst,
+    int4* my_row,
+    size_t row_flag_offset) {
+    constexpr int kThreadsPerSlot = 32;
+    constexpr int kRowBytes = HiddenInt4 * 16;
+    constexpr int kElemsPerThread = nccl_ep::ceil_div(kChunkInt4, kThreadsPerSlot);
+    constexpr int kHiddenVec = (kElemsPerThread < 4) ? kElemsPerThread : 4;
+    constexpr int kNTiles = nccl_ep::ceil_div(kElemsPerThread, kHiddenVec);
+    constexpr int kPairs = nccl_ep::pairs_per_int4<kTokenDtype>();
+    constexpr int kNumChunks = nccl_ep::ceil_div(HiddenInt4, kChunkInt4);
+    constexpr int kLastInt4 = HiddenInt4 - (kNumChunks - 1) * kChunkInt4;
+    // Up to 8 int4 loads in flight per lane (one tile at a time, so for any chunk width). Top-k <= 2 and rows with a
+    // partial last chunk take 4; the partial rows spill at 8.
+    constexpr int kCopyBatch = (MaxTopK <= 2 || kLastInt4 != kChunkInt4 ? 4 : 8) / kHiddenVec;
+    const int width = kLastInt4 != kChunkInt4 && chunk == kNumChunks - 1 ? kLastInt4 : kChunkInt4;
+    const size_t chunk_off = static_cast<size_t>(chunk) * kChunkInt4 * 16;
+    recv_x_em += chunk_off;
+    const int tid = static_cast<int>(threadIdx.x);
+    const int slot_in_block = tid / kThreadsPerSlot;
+    const int wlane = tid % kThreadsPerSlot;
+
+    combine_push_claim_t<true> claim;
+    if constexpr (kNumChunks == 1) {
+        claim.init(num_recv, my_lsa_rank, lsa_team_size, kRowBytes, static_cast<int>(blockDim.x) / kThreadsPerSlot,
+                   slot_in_block, true);
+    } else {
+        claim.init_block_only(num_recv, my_lsa_rank, lsa_team_size);
+    }
+    auto next_slot = [&]() {
+        if constexpr (kNumChunks == 1) {
+            return claim.next(block_counter, pool_counter, wlane);
+        } else {
+            return claim.next_in_block(block_counter, wlane);
+        }
+    };
+    // The next row's routing metadata is loaded one row ahead, the first one before the wait.
+    int32_t next_em = -1;
+    int32_t next_src = 0;
+    auto load_meta = [&](int sl) {
+        const bool ok = sl < num_recv;
+        next_em = (ok && wlane < top_k) ? __ldg(flat2em_slot_map + static_cast<size_t>(sl) * top_k + wlane) : -1;
+        next_src = (ok && wlane == 0) ? __ldg(recv_slot_to_src + sl) : 0;
+    };
+    int slot = next_slot();
+    load_meta(slot);
+
+    // One thread polls and acquires; the barrier extends the acquire to the block. A rank with no rows skips it
+    // (num_recv is block-uniform). A flag the producer never sets is reported, then traps.
+    if (num_recv > 0) {
+        if (tid == 0) {
+            const long long start = clock64();
+            while (nccl_ep::ld_relaxed_gpu_global(reinterpret_cast<const uint32_t*>(ready + chunk)) !=
+                   static_cast<uint32_t>(chunk)) {
+                if (clock64() - start > NUM_TIMEOUT_CYCLES) {
+                    printf("ncclEpCombine: combine_signal.signal[%d] was not set before the timeout "
+                           "(LSA rank %d)\n", chunk, my_lsa_rank);
+                    __trap();
+                }
+            }
+            while (nccl_ep::ld_acquire_global(ready + chunk) != chunk) {
+            }
+        }
+        __syncthreads();
+    }
+
+    auto src_j = [&](int tile, int u) { return wlane + (tile * kHiddenVec + u) * kThreadsPerSlot; };
+    auto tile_valid = [&](int tile, int u) {
+        return (tile * kHiddenVec + u) < kElemsPerThread && src_j(tile, u) < width;
+    };
+    bool stored = false;  // this warp has a TMA store in flight from its buffer
+    // slot is warp-uniform.
+    while (slot < num_recv) {
+        // Backstop: the device-built slot map must index the caller's x rows (see ncclEpCombine num_tokens).
+        EP_DEVICE_ASSERT(next_em < caller_num_recv_tokens);
+        const unsigned valid = __ballot_sync(0xFFFFFFFFu, next_em >= 0);
+        if (next_em >= 0) {
+            s_flat2em[slot_in_block][__popc(valid & ((1u << wlane) - 1))] = next_em;
+        }
+        if (wlane == 0) {
+            // Decode the destination attn (rank, token) this recv slot returns to.
+            const decoded_src_t dst_id = decode_src_fast(next_src, tokens_div, lsa_team_size);
+            const int64_t dst_row = static_cast<int64_t>(dst_id.token) * lsa_team_size + my_lsa_rank;
+            s_dst[slot_in_block] = reinterpret_cast<int4*>(
+                static_cast<uint8_t*>(peer_staging_ptrs[dst_id.rank]) +
+                static_cast<size_t>(dst_row) * comb_stage_push_stride_bytes(kRowBytes, false, BACKWARD_COMBINE) +
+                chunk_off);
+            if (row_flag_offset != 0 && chunk == 0) {
+                mark_row_pushed(peer_staging_ptrs[dst_id.rank], row_flag_offset, dst_row);
+            }
+        }
+        __syncwarp();
+        // Backward: with chunk 0, store each copy's weight to its source position in this (t, R) row's trailing pad.
+        if constexpr (BACKWARD_COMBINE) {
+            if (chunk == 0) {
+                int32_t prob_p = -1;
+                float prob_w = 0.0f;
+                if (wlane < top_k && next_em >= 0) {
+                    prob_p = __ldg(srcpos_map + static_cast<size_t>(slot) * top_k + wlane);
+                    prob_w = __ldg(topk_weights_em + next_em);
+                }
+                float* prob_dst = reinterpret_cast<float*>(s_dst[slot_in_block] + HiddenInt4);
+                if (row_flag_offset != 0) {
+                    write_drop_prob_pad(prob_dst, prob_p, prob_w, top_k, wlane);
+                } else if (prob_p >= 0) {
+                    prob_dst[prob_p] = prob_w;
+                }
+            }
+        }
+        slot = next_slot();
+        load_meta(slot);
+        const combine_push_chunk_store_t<kDirectStore> store{my_row, s_dst[slot_in_block]};
+        store.wait_buffer(wlane, stored);  // reuse the buffer after this warp's previous row
+        stored = true;
+        const int n = __popc(valid);
+        // Volatile: each copy batch reads its indices at the batch, so none stays live across batches.
+        const volatile int32_t* const f2e = s_flat2em[slot_in_block];
+#pragma unroll 1
+        for (int tile = 0; tile < kNTiles; tile++) {  // rolled: one tile's accumulators live at a time
+            float2 acc[kHiddenVec][4];
+#pragma unroll
+            for (int u = 0; u < kHiddenVec; u++) {
+#pragma unroll
+                for (int p = 0; p < 4; p++) {
+                    acc[u][p] = make_float2(0.0f, 0.0f);
+                }
+            }
+            int4 b[kCopyBatch][kHiddenVec];
+            // Copies in ascending order; each batch's loads are all issued before any is summed.
+#pragma unroll
+            for (int kb = 0; kb < MaxTopK; kb += kCopyBatch) {
+                if (kb > 0 && kb >= n) {
+                    break;
+                }
+#pragma unroll
+                for (int kk = 0; kk < kCopyBatch; kk++) {
+                    if (kb + kk >= n) {
+                        continue;
+                    }
+                    const int4* src =
+                        reinterpret_cast<const int4*>(recv_x_em + static_cast<size_t>(f2e[kb + kk]) * kRowBytes);
+#pragma unroll
+                    for (int u = 0; u < kHiddenVec; u++) {
+                        if (tile_valid(tile, u)) {
+                            b[kk][u] = __ldcg(src + src_j(tile, u));
+                        }
+                    }
+                }
+                if (kb == 0 && n == 1) {
+#pragma unroll
+                    for (int u = 0; u < kHiddenVec; u++) {
+                        if (tile_valid(tile, u)) {
+                            store.put(src_j(tile, u), b[0][u]);
+                        }
+                    }
+                    continue;
+                }
+#pragma unroll
+                for (int kk = 0; kk < kCopyBatch; kk++) {
+                    if (kb + kk >= n) {
+                        continue;
+                    }
+#pragma unroll
+                    for (int u = 0; u < kHiddenVec; u++) {
+                        if (!tile_valid(tile, u)) {
+                            continue;
+                        }
+#pragma unroll
+                        for (int p = 0; p < kPairs; p++) {
+                            const float2 f = nccl_ep::ld_token_pair<kTokenDtype>(&b[kk][u], p);
+                            acc[u][p].x += f.x;
+                            acc[u][p].y += f.y;
+                        }
+                    }
+                }
+            }
+            // n == 0 pushes a zero row.
+            if (n != 1) {
+#pragma unroll
+                for (int u = 0; u < kHiddenVec; u++) {
+                    if (!tile_valid(tile, u)) {
+                        continue;
+                    }
+                    int4 out;
+#pragma unroll
+                    for (int p = 0; p < kPairs; p++) {
+                        nccl_ep::st_token_pair<kTokenDtype>(&out, p, acc[u][p]);
+                    }
+                    store.put(src_j(tile, u), out);
+                }
+            }
+        }
+        store.flush(wlane, width);
+        __syncwarp();  // s_flat2em and s_dst are rewritten for the next row
+    }
+    // The next chunk reuses the buffer.
+    if constexpr (!kDirectStore) {
+        if (stored && wlane == 0) {
+            nccl_ep::tma_store_wait<0>();
+        }
+        __syncwarp();
+    }
+}
+
 // One recv slot per warp (kSlotsPerBlock in parallel), identical
 // gather-reduce to local_permute_reduce; the reduced row is assembled in a per-warp smem buffer
 // and pushed to the remote destination staging slot [t*team_size + R], one TMA store per row
@@ -9465,12 +9724,11 @@ __device__ __forceinline__ void combine_push_signaled_tail(
 //                in place in the smem row buffer and pushes the packed [FP8 H | E8M0 H/32] row.
 //   kRing - chunked one-tile path only (combine_push_ring_depth): TMA-load source chunks into kRing
 //                smem stages ahead of the reduce instead of LDG gathers. 0 keeps the LDG gather.
-//   kDirectStore - the multi-chunk path stores the row int4 by int4 to the destination, without
+//   kDirectStore - the chunk path stores the row int4 by int4 to the destination, without
 //                the smem buffer (combine_push_direct_store).
-//   kSignal    - chunk-major push, chunk s once ready[s] == s, its rows claimed per chunk; a block that finds
-//                every chunk of the launch ready at entry walks its rows row-major instead. A programmatic
-//                dependent with no wait at entry; block 0 waits for the kernel before it before exit
-//                (combine_push_signaled_tail), and a split's later push also at entry.
+//   kSignal    - chunk-major push, chunk s once ready[s] == s, one block-wide pass per chunk with its rows
+//                claimed per chunk (combine_push_signaled_chunk). A programmatic dependent; block 0 waits for the
+//                kernel before it before exit (combine_push_signaled_tail), and a split's later push also at entry.
 //   kChunkRange - signaled push of chunks [chunk_begin, chunk_end) only, part of a split combine; false pushes
 //                every chunk.
 template <int MaxTopK, int HiddenInt4, ncclDataType_t kTokenDtype, ncclEpCombQuant_t kCombineRecipe,
@@ -9534,7 +9792,7 @@ __device__ __forceinline__ void combine_push(
     __shared__ int s_nvalid[kCombinePushMaxSlots];
     __shared__ int4* s_dst[kCombinePushMaxSlots];
     constexpr int kNumChunks = combine_push_num_chunks(HiddenInt4, kChunkSize);
-    // A signaled push walks chunks in its outer loop, so it takes the chunk path even for one chunk.
+    // A signaled push returns through combine_push_signaled_chunk; it never takes the single-chunk path.
     constexpr bool kSingleChunk = kMxfp8 || (!kSignal && kNumChunks == 1);
     // Per-warp mbarriers: one for the single-chunk path's TMA-load source relay (n==1 fast path, see
     // below) or kRing for the chunked load ring. A specialization using neither still reserves one
@@ -9556,7 +9814,7 @@ __device__ __forceinline__ void combine_push(
     static_assert(kRing == 0 || (!kMxfp8 && combine_push_ring_supported(HiddenInt4, kChunkSize)),
                   "load ring needs the multi-chunk one-tile path");
     static_assert(kRing == 0 || !kSignal, "the load ring serves the unsignaled push only");
-    static_assert(!kDirectStore || !kSingleChunk, "the direct store serves the multi-chunk path only");
+    static_assert(!kDirectStore || !kSingleChunk, "the direct store serves the chunk path only");
     static_assert(kRing == 0 || !kDirectStore, "the load ring serves the TMA store only");
     int4* const my_row = kDirectStore ? nullptr : s_rows + static_cast<size_t>(slot_in_block) * kBufInt4;
 
@@ -9564,10 +9822,9 @@ __device__ __forceinline__ void combine_push(
     // Rows are claimed dynamically (see combine_push_claim_t). The pool counter is the
     // combine_head_sync_counter word (idle in pull/push), cleared by lsa_grid_tail_barrier.
     // Signaled: one block counter per chunk; the block's own region only, as the one pool counter
-    // cannot serve several chunks.
+    // cannot serve several chunks (a single-chunk push of rows over kPoolMinRowBytes takes the pool too).
     static_assert(!kSignal || kClaimDynamic, "a signaled push claims each chunk's rows dynamically");
     constexpr int kClaimCounters = kSignal ? kNumChunks : 1;
-    constexpr int kClaimRowBytes = kSignal ? 0 : kRowBytes;
     __shared__ int s_claim[kClaimCounters];
     // The static smem must fit what combine_push_slots_per_block and combine_push_ring_depth reserve.
     static_assert(sizeof(smem_flat2em_slot_map) + sizeof(s_nvalid) + sizeof(s_dst) + sizeof(s_mbar) +
@@ -9575,8 +9832,6 @@ __device__ __forceinline__ void combine_push(
                       combine_push_meta_reserve_bytes() + combine_push_ring_bar_bytes(kRing),
                   "combine_push static smem exceeds its sizing reserve");
     uint32_t* const pool_counter = grid_barrier_counter + 1;
-    combine_push_claim_t<kClaimDynamic> claim;
-    claim.init(num_recv, my_lsa_rank, lsa_team_size, kClaimRowBytes, kSlotsPerBlock, slot_in_block);
 
     // TMA-load relay: init this warp's mbarrier once (1 arrival: the load's complete_tx).
     uint32_t mbar_phase = 0;
@@ -9598,23 +9853,33 @@ __device__ __forceinline__ void combine_push(
     } else if (tid == 0) {
         s_claim[0] = 0;
     }
-    // Signaled: when every chunk of the launch is already published, the block walks its rows row-major.
-    const int first_chunk = kChunkRange ? chunk_begin : 0;
-    const int end_chunk = kChunkRange ? chunk_end : kNumChunks;
-    __shared__ bool s_row_major;
-    if constexpr (kSignal) {
-        if (tid == 0) {
-            bool all_ready = true;
-            for (int c = first_chunk; c < end_chunk && all_ready; c++) {
-                all_ready = nccl_ep::ld_acquire_global(ready + c) == c;
-            }
-            s_row_major = all_ready;
-        }
-    }
-    __syncthreads();
-    [[maybe_unused]] const bool row_major = kSignal && s_row_major;
-
     const tokens_fast_div_t tokens_div = make_tokens_fast_div(static_cast<uint32_t>(tokens_per_rank));
+    // Signaled: one block-wide pass per chunk (combine_push_signaled_chunk).
+    if constexpr (kSignal) {
+        __syncthreads();
+        const int num_recv_w = __reduce_max_sync(0xFFFFFFFFu, num_recv);  // warp-uniform
+        // A whole push keeps its compile-time loop.
+        const int first_chunk = kChunkRange ? chunk_begin : 0;
+        const int end_chunk = kChunkRange ? chunk_end : kNumChunks;
+        for (int c = first_chunk; c < end_chunk; c++) {
+            combine_push_signaled_chunk<MaxTopK, HiddenInt4, kTokenDtype, BACKWARD_COMBINE,
+                                        combine_push_chunk_size(HiddenInt4, kChunkSize), kDirectStore>(
+                peer_staging_ptrs, recv_x_em, flat2em_slot_map, recv_slot_to_src, num_recv_w, top_k,
+                caller_num_recv_tokens, my_lsa_rank, tokens_div, lsa_team_size, topk_weights_em, srcpos_map, ready, c,
+                &s_claim[c], pool_counter, smem_flat2em_slot_map, s_dst, my_row, row_flag_offset);
+        }
+        // The TMA stores complete before the tail sync publishes the rows.
+        combine_push_chunk_store_t<kDirectStore>::drain(wlane);
+        // The concurrent reduce reads the pushed rows with generic loads.
+        if (wlane == 0) {
+            nccl_ep::fence_proxy_async();
+        }
+        __syncwarp();
+    } else {
+    __syncthreads();
+
+    combine_push_claim_t<kClaimDynamic> claim;
+    claim.init(num_recv, my_lsa_rank, lsa_team_size, kRowBytes, kSlotsPerBlock, slot_in_block, false);
     // Next slot's routing metadata is loaded one wave ahead to hide its latency.
     int32_t next_s = -1;
     int32_t next_g = 0;
@@ -9623,63 +9888,24 @@ __device__ __forceinline__ void combine_push(
         next_s = (ok && wlane < top_k) ? __ldg(flat2em_slot_map + static_cast<size_t>(sl) * top_k + wlane) : -1;
         next_g = (ok && wlane == 0) ? __ldg(recv_slot_to_src + sl) : 0;
     };
-    int pass = first_chunk;
-    int slot = claim.next(&s_claim[kSignal ? pass : 0], pool_counter, wlane);
+    int slot = claim.next(&s_claim[0], pool_counter, wlane);
     int next_slot = 0;
     load_meta(slot, slot < num_recv);
-    // Weak coherent loads when the producer may still be writing other chunks; plain otherwise.
-    const auto load_em = [](const int4* ptr) {
-        if constexpr (kSignal) {
-            return __ldcg(ptr);
-        } else {
-            return *ptr;
-        }
-    };
 
-    // Signaled, chunk-major: one pass per chunk, chunk `pass` once the producer published
-    // it; each pass claims its rows from the block's counter of that chunk.
-    [[maybe_unused]] bool pass_start = true;
     for (; slot < num_recv; slot = next_slot) {
-        if constexpr (kSignal) {
-            if (pass_start) {
-                // A flag the producer never sets is reported, then traps.
-                const long long start = clock64();
-                while (!row_major && nccl_ep::ld_acquire_global(ready + pass) != pass) {
-                    __nanosleep(100);
-                    if (clock64() - start > NUM_TIMEOUT_CYCLES) {
-                        if (wlane == 0) {
-                            printf("ncclEpCombine: combine_signal.signal[%d] was not set before the timeout "
-                                   "(LSA rank %d)\n", pass, my_lsa_rank);
-                        }
-                        __trap();
-                    }
-                }
-                __syncwarp();
-                if (pass > 0) {
-                    load_meta(slot, true);
-                }
-                pass_start = false;
-            }
-        }
-        const int chunk_lo = kSignal ? pass : 0;
-        int chunk_hi = kNumChunks;
-        if constexpr (kSignal) {
-            chunk_hi = row_major ? end_chunk : pass + 1;
-        }
         const bool slot_valid = (slot < num_recv);
 
         static_assert(MaxTopK <= 32, "cooperative pack assumes MaxTopK <= 32");
         // Backward: per-copy prob metadata (srcpos + input weight), prefetched in the metadata
         // phase but stored only after the token push loop so its load latency hides behind the
-        // NVLink token writes. Only the pass with chunk_lo == 0 writes it. Carried at wave scope
-        // across both blocks.
+        // NVLink token writes. Carried at wave scope across both blocks.
         int32_t prob_p = -1;
         float prob_w = 0.0f;
         if (slot_valid && wlane < 32) {
             const int32_t s = next_s;
             EP_DEVICE_ASSERT(s < caller_num_recv_tokens);
             if constexpr (BACKWARD_COMBINE) {
-                if (chunk_lo == 0 && wlane < top_k && s >= 0) {
+                if (wlane < top_k && s >= 0) {
                     prob_p = __ldg(srcpos_map + static_cast<size_t>(slot) * top_k + wlane);
                     prob_w = __ldg(topk_weights_em + s);
                 }
@@ -9697,13 +9923,13 @@ __device__ __forceinline__ void combine_push(
                 s_dst[slot_in_block] = reinterpret_cast<int4*>(
                     static_cast<uint8_t*>(peer_staging_ptrs[dst_rank]) +
                     static_cast<size_t>(dst_row) * comb_stage_push_stride_bytes(kPushRowBytes, kMxfp8, BACKWARD_COMBINE));
-                if (row_flag_offset != 0 && chunk_lo == 0) {
+                if (row_flag_offset != 0) {
                     mark_row_pushed(peer_staging_ptrs[dst_rank], row_flag_offset, dst_row);
                 }
             }
         }
         __syncwarp();
-        next_slot = claim.next(&s_claim[kSignal ? pass : 0], pool_counter, wlane);
+        next_slot = claim.next(&s_claim[0], pool_counter, wlane);
         load_meta(next_slot, next_slot < num_recv);
 
         if (slot_valid) {
@@ -9742,8 +9968,7 @@ __device__ __forceinline__ void combine_push(
             // combine_push_tile_int4 must match the tile size the kernel computes here.
             static_assert(kHiddenVec * kThreadsPerSlot == combine_push_tile_int4(HiddenInt4));
             static_assert(kNTiles == combine_push_ntiles(HiddenInt4));
-            // A whole-row chunk includes the row's partial last tile.
-            constexpr int kChunkTiles = nccl_ep::ceil_div(kBufInt4, kHiddenVec * kThreadsPerSlot);
+            constexpr int kChunkTiles = kBufInt4 / (kHiddenVec * kThreadsPerSlot);
             if constexpr (kSingleChunk) {
                 // Single-copy relay: TMA-load the one source row straight into the smem buffer,
                 // bypassing the register round-trip below entirely. n==1 dominates at high EP
@@ -9842,14 +10067,14 @@ __device__ __forceinline__ void combine_push(
                 if constexpr (kRing > 0) {
                     ring.start_row(n, wlane);
                 }
-            for (int chunk = chunk_lo; chunk < chunk_hi; chunk++) {
+            for (int chunk = 0; chunk < kNumChunks; chunk++) {
                 const int tile0 = chunk * kChunkTiles;
                 const int tile1 = tile0 + kChunkTiles < kNTiles ? tile0 + kChunkTiles : kNTiles;
                 const int base_j = tile_j(tile0);
                 const int end_j = tile_j(tile1);
                 const combine_push_chunk_store_t<kDirectStore> store{my_row, dst_int4 + base_j};
                 if constexpr (kRing == 0) {
-                    store.wait_buffer(wlane, chunk > chunk_lo);  // reuse buffer after prior chunk push
+                    store.wait_buffer(wlane, chunk > 0);  // reuse buffer after prior chunk push
                 }
                 for (int tile = tile0; tile < tile1; tile++) {
                     const int32_t* const f2e = smem_flat2em_slot_map[slot_in_block];
@@ -9886,7 +10111,7 @@ __device__ __forceinline__ void combine_push(
 #pragma unroll
                                 for (int u = 0; u < kHiddenVec; u++) {
                                     if (tile_valid(tile, u)) {
-                                        b[kk][u] = load_em(src + src_j(tile, u));
+                                        b[kk][u] = src[src_j(tile, u)];
                                     }
                                 }
                             }
@@ -9925,38 +10150,22 @@ __device__ __forceinline__ void combine_push(
             // Backward: store the prefetched weight to its srcpos in this (t,R) token row's trailing
             // pad (co-located, one remote write per slot), after the token push has hidden the load.
             if constexpr (BACKWARD_COMBINE) {
-                if (chunk_lo == 0) {
-                    float* prob_dst = reinterpret_cast<float*>(
-                        reinterpret_cast<uint8_t*>(dst_int4) + kPushRowBytes);
-                    if (row_flag_offset != 0) {
-                        write_drop_prob_pad(prob_dst, prob_p, prob_w, top_k, wlane);
-                    } else if (prob_p >= 0) {
-                        prob_dst[prob_p] = prob_w;
-                    }
+                float* prob_dst = reinterpret_cast<float*>(
+                    reinterpret_cast<uint8_t*>(dst_int4) + kPushRowBytes);
+                if (row_flag_offset != 0) {
+                    write_drop_prob_pad(prob_dst, prob_p, prob_w, top_k, wlane);
+                } else if (prob_p >= 0) {
+                    prob_dst[prob_p] = prob_w;
                 }
             }
         }
         __syncwarp();
-        // Signaled, chunk-major: once the chunk's rows are claimed, the warp claims the next chunk's.
-        if constexpr (kSignal) {
-            if (next_slot >= num_recv && !row_major && pass + 1 < end_chunk) {
-                ++pass;
-                pass_start = true;
-                claim.init(num_recv, my_lsa_rank, lsa_team_size, kClaimRowBytes, kSlotsPerBlock, slot_in_block);
-                next_slot = claim.next(&s_claim[pass], pool_counter, wlane);
-            }
-        }
     }
     // Drain all outstanding bulk pushes (global writes complete) before the tail sync makes them
     // visible to combine_reduce. A direct store issues no bulk push.
     combine_push_chunk_store_t<kDirectStore>::drain(wlane);
-    if constexpr (kSignal) {
-        // The concurrent reduce reads the pushed rows with generic loads.
-        if (wlane == 0) {
-            nccl_ep::fence_proxy_async();
-        }
-    }
     __syncwarp();
+    }
 
     // ---- TAIL SYNC: all peer pushes globally visible before combine_reduce reads ----
     // Skipped when a separate tail-sync kernel runs it.

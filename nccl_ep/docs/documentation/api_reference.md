@@ -595,14 +595,14 @@ has passed its LSA tail barrier, and completes after the push, which completes a
 another stream must have every block resident before the push starts, or the push can fill the GPU and the ranks
 hang.
 
-A row of two or more chunks runs the chain in two parts, unless the group uses `NCCL_EP_OVERFLOW_DROP`: the push of
-every chunk but the last on the combine SM budget; then the push of the last chunk, beside the reduce of the other
-chunks on the shuffle SMs (as an unsplit reduce); then the reduce of the last chunk. The last chunk's push and reduce
-run on the SMs of the other chunks' push and reduce unless `NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS` or
-`NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS` sets them (1 to the device SM count, read at group creation; another value
-is ignored with a warning). These two may differ across ranks. Each push ends on the LSA tail barrier. Every rank
-therefore passes `combine_signal` to a combine, or none does: a rank that splits runs one more LSA barrier than a rank
-that does not, and the ranks hang.
+In an LSA team of 8 or more ranks, where the push stores by TMA, a row of two or more chunks runs the chain in two
+parts, unless the group uses `NCCL_EP_OVERFLOW_DROP`: the push of every chunk but the last on the combine SM budget;
+then the push of the last chunk, beside the reduce of the other chunks on the shuffle SMs (as an unsplit reduce); then
+the reduce of the last chunk. The last chunk's push and reduce run on the SMs of the other chunks' push and reduce
+unless `NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS` or `NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS` sets them (1 to the
+device SM count, read at group creation; another value is ignored with a warning). These two may differ across ranks.
+Each push ends on the LSA tail barrier. Every rank therefore passes `combine_signal` to a combine, or none does: a rank
+that splits runs one more LSA barrier than a rank that does not, and the ranks hang.
 
 The reduce lets the next kernel on `stream` start at its entry, as a signaled dispatch does for its consumer. A
 kernel launched next with programmatic stream serialization runs `griddepcontrol.wait` before it exits or triggers,

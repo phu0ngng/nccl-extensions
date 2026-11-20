@@ -8788,8 +8788,12 @@ ncclResult_t ncclEpCombine(
             // Split: the push of the last chunk and the reduce of the other chunks run together once the push of the
             // other chunks has passed its LSA tail barrier; the reduce of the last chunk then waits on push_done. It
             // depends only on settings every rank shares, so each rank runs the same barriers. One whole-row reduce
-            // re-arms the pushed-row flags, so a group that uses NCCL_EP_OVERFLOW_DROP does not split.
-            const bool split = push_done != nullptr && signal_args.num_chunks > 1 && !em_drop;
+            // re-arms the pushed-row flags, so a group that uses NCCL_EP_OVERFLOW_DROP does not split. Only a TMA-store
+            // push (LSA teams of 8 or more) leaves its SMs free for the reduce beside it; a direct-store push issues
+            // every store from its SMs and is faster whole.
+            const bool split = push_done != nullptr && signal_args.num_chunks > 1 && !em_drop &&
+                               !nccl_ep::ht::combine_push_signal_direct_store(team_size, row_bytes,
+                                                                              signal_args.chunk_int4 * 16);
             int last_col_int4 = 0;
             // The last chunk's reduce grid; see NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS.
             const unsigned int last_reduce_sms =

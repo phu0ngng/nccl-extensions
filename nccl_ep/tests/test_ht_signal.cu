@@ -8,6 +8,7 @@
 #include "test_common.h"
 #include "../nccl_ep_test_internal.h"
 #include "device/device_primitives.cuh"
+#include "device/ht_ep.cuh"
 #include <cuda/ptx>
 #include <algorithm>
 #include <cstdint>
@@ -613,9 +614,10 @@ protected:
 // The signaled forward dispatch writes the plain one's rows, weights and scales into poisoned outputs and flags every
 // tile, and a programmatic consumer sees each tile's final rows once flagged; the signaled backward equals the plain
 // one bitwise. The signaled combine, forward and backward, equals the plain one bitwise in chunks of the granularity,
-// published before the push or during it with the last rank late, while the env names another chunk. A row of
-// several chunks, and no other, splits the combine, and each reduce's call word then equals its push's done word. A
-// fixed group also replays a graph of the signaled forward dispatch and combine.
+// published before the push or during it with the last rank late, while the env names another chunk. One-tile chunks
+// of a fixed row also run through the TMA store, which splits the combine at every team size, and each reduce's call
+// word then equals its push's done word. Only a row of several chunks pushed by TMA splits. A fixed group also replays
+// a graph of the signaled forward dispatch and combine.
 TEST_P(SignalCaseTest, MatchesPlain) {
     if (c_.sizing == Sizing::Drop) {
         // Every staging row first holds a token of the spread routing, which drops none: a token the skewed routing
@@ -692,14 +694,23 @@ TEST_P(SignalCaseTest, MatchesPlain) {
         return;
     }
 
-    std::vector<int> granularities = {c_.chunk};
+    struct Pass {
+        int granularity;
+        const char* tma_store;  // NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE; null: unset
+    };
+    std::vector<Pass> passes = {{c_.chunk, nullptr}};
     if (c_.chunk == 0) {
-        granularities = {kPushTileElems, nccl_ep::align(c_.hidden, kPushTileElems)};
+        passes = {{kPushTileElems, nullptr},
+                  {nccl_ep::align(c_.hidden, kPushTileElems), nullptr},
+                  {kPushTileElems, "1"}};
     }
-    for (int granularity : granularities) {
+    for (const Pass& pass : passes) {
+        const int granularity = pass.granularity;
         ScopedEnvVar push_chunk(kChunkEnv, granularity == kPushTileElems ? "0" : "1024");
+        ScopedEnvVar tma_store("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE", pass.tma_store);
         const int chunks = nccl_ep::ceil_div(c_.hidden, granularity);
         const ncclEpSignal_t sig = make_signal(chunks, granularity);
+        const std::string store = pass.tma_store != nullptr ? ", TMA store" : "";
         for (bool backward : {false, true}) {
             uint32_t before[4] = {};
             NCCL_ASSERT(ncclEpGroup_test_getCombinePushDone(group_, before));
@@ -710,18 +721,24 @@ TEST_P(SignalCaseTest, MatchesPlain) {
                 late_chunk_ = done ? -1 : chunks - 1;
                 ASSERT_NO_FATAL_FAILURE(expect_signaled_matches(
                     sig, backward, base,
-                    "granularity " + std::to_string(granularity) + (backward ? " backward" : " forward") +
+                    "granularity " + std::to_string(granularity) + store + (backward ? " backward" : " forward") +
                         (done ? ", published before" : ", published during")));
             }
             producer_done_ = false;
             late_chunk_ = -1;
+            bool direct = false;
+            ncclEpGroup_test_getLastCombinePushLaunch(group_, nullptr, nullptr, nullptr, &direct);
+            EXPECT_EQ(direct, pass.tma_store == nullptr &&
+                                  (chunks == 1 || g_nranks < ht_ep::kCombinePushTmaStoreMinTeam))
+                << "granularity " << granularity << store;
             uint32_t words[4] = {};
             NCCL_ASSERT(ncclEpGroup_test_getCombinePushDone(group_, words));
-            EXPECT_EQ(words[1], words[0]) << "granularity " << granularity;
-            EXPECT_EQ(words[3], words[2]) << "granularity " << granularity;
-            // Only a row of several chunks splits, and never under overflow drop.
-            const bool splits = chunks > 1 && c_.sizing != Sizing::Drop;
-            EXPECT_EQ(words[2] != before[2], splits) << "split, granularity " << granularity;
+            EXPECT_EQ(words[1], words[0]) << "granularity " << granularity << store;
+            EXPECT_EQ(words[3], words[2]) << "granularity " << granularity << store;
+            // Only a row of several chunks pushed by TMA splits, and never under overflow drop.
+            const bool splits = chunks > 1 && c_.sizing != Sizing::Drop &&
+                                (pass.tma_store != nullptr || g_nranks >= ht_ep::kCombinePushTmaStoreMinTeam);
+            EXPECT_EQ(words[2] != before[2], splits) << "split, granularity " << granularity << store;
             if (c_.sizing != Sizing::Fixed || backward) {
                 continue;
             }
@@ -744,8 +761,8 @@ TEST_P(SignalCaseTest, MatchesPlain) {
 
 // NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS and NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS, read at group creation: one SM
 // each; all but one SM and every SM (the default reduce); different values on even and odd ranks; and out-of-range
-// values, which fall back to the default. The base row in one-tile chunks still splits, forward and backward, with the
-// last rank late, and matches the plain combine bitwise.
+// values, which fall back to the default. The base row in one-tile chunks, pushed by TMA at every team size, still
+// splits, forward and backward, with the last rank late, and matches the plain combine bitwise.
 class SignalLastChunkSmsTest : public SignalTest, public ::testing::WithParamInterface<int> {
 protected:
     void SetUp() override {
@@ -763,6 +780,7 @@ protected:
 TEST_P(SignalLastChunkSmsTest, MatchesPlain) {
     rows_ = forward(handle_, ref_, nullptr);
     ScopedEnvVar push_chunk(kChunkEnv, "0");
+    ScopedEnvVar tma_store("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE", "1");
     const int chunks = nccl_ep::ceil_div(c_.hidden, kPushTileElems);
     const ncclEpSignal_t sig = make_signal(chunks, kPushTileElems);
     for (bool backward : {false, true}) {

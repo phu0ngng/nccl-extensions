@@ -294,9 +294,12 @@ a row of more than one chunk skips the smem buffer: each lane stores its reduced
 int4s straight to `s_dst` (`combine_push_direct_store`, variant suffix
 `_direct`). The warp neither stages a chunk nor waits for its previous TMA store,
 and the block needs no dynamic smem, so it keeps all 24 warps at any chunk width.
-Larger teams and single-chunk rows keep the TMA store; the 8-rank cutoff is
-not a hardware bound. A direct store does not use the load ring above, so the
-ring runs only in teams of 8 or more ranks.
+The 8-rank cutoff is not a hardware bound. A signaled push
+([readiness signals](../429-ht-signals/README.md)) stores every row directly
+below 8 ranks, and at any team size when it has one chunk; otherwise larger
+teams and single-chunk rows keep the TMA store. Neither a direct store nor a
+signaled push uses the load ring above, so the ring runs only in unsignaled
+pushes in teams of 8 or more ranks.
 
 **Row claiming.** Rows with several valid EM copies cost more than single-copy
 rows, and peer NVLink links differ in speed, so static per-warp row ranges

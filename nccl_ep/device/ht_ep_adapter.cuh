@@ -555,6 +555,10 @@ int combine_push_tile_bytes(int row_bytes);
 size_t dispatch_pull_order_bucket_bytes(int lsa_team_size, int tokens_per_rank);
 size_t dispatch_pull_order_pool_cap_bytes();
 
+// Whether a signaled expert-major push of rows of row_bytes in chunks of chunk_bytes stores directly to the peers
+// rather than by TMA store.
+bool combine_push_signal_direct_store(int lsa_team_size, int row_bytes, int chunk_bytes);
+
 // Push EM combine (mirror of pull EM dispatch). The push kernel does the local
 // gather-reduce + remote push with the head/tail intra-LSA syncs fused in; the reduce
 // kernel does the final team_size sum. peer_staging_ptrs is a [lsa_team_size] array of

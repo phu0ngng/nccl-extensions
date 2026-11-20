@@ -521,6 +521,12 @@ inline ncclResult_t launch_local_permute_reduce(
 constexpr const char* kCombinePushJitEntryName = "nccl_ep_jit_ht_combine_push_kernel";
 constexpr const char* kCombineReduceJitEntryName = "nccl_ep_jit_ht_combine_epi_reduce_kernel";
 
+// Whether an expert-major push stores directly; NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE (test only) keeps the TMA store.
+inline bool combine_push_stores_directly(int lsa_team_size, int hidden_int4, int chunk_int4, bool signaled) {
+    return ::ht_ep::combine_push_direct_store(lsa_team_size, hidden_int4, chunk_int4, signaled) &&
+           !::nccl_ep::jit::env_flag_enabled("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE");
+}
+
 inline ncclResult_t launch_combine_push(
     int top_k,
     int row_bytes,
@@ -583,10 +589,8 @@ inline ncclResult_t launch_combine_push(
     }
     const int chunk_size = ::ht_ep::combine_push_chunk_size(row_int4, requested_int4);
     const int kernel_chunk_size = mxfp8 ? 0 : chunk_size;
-    // Test only: NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE keeps the TMA store in teams below the direct-store threshold.
-    const bool direct_store = !param.flat &&
-        ::ht_ep::combine_push_direct_store(param.lsa_team_size, hidden_int4, kernel_chunk_size) &&
-        !::nccl_ep::jit::env_flag_enabled("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE");
+    const bool direct_store =
+        !param.flat && combine_push_stores_directly(param.lsa_team_size, hidden_int4, kernel_chunk_size, signaled);
     const ::ht_ep::combine_push_launch_shape_t shape = ::ht_ep::combine_push_launch_shape(
         param.flat, direct_store, row_bytes, row_int4, chunk_size, smem_cap);
     const int slots = shape.slots;
@@ -702,7 +706,8 @@ inline ncclResult_t launch_combine_push(
     variant.nucs = nucs;
     variant.programmatic = signaled;
     // A signaled push starts on SMs that a max-shared-memory GEMM just left, and would keep their minimum-L1 split.
-    variant.prefer_max_l1 = signaled;
+    // The TMA store needs its smem buffers.
+    variant.prefer_max_l1 = signaled && direct_store;
 
     std::string error;
     const ::nccl_ep::jit::JitKernelStatus status =

@@ -2790,6 +2790,10 @@ size_t dispatch_pull_order_pool_cap_bytes() {
     return ::ht_ep::kPullOrderMaxPoolBytes;
 }
 
+bool combine_push_signal_direct_store(int lsa_team_size, int row_bytes, int chunk_bytes) {
+    return jit::combine_push_stores_directly(lsa_team_size, row_bytes / 16, chunk_bytes / 16, true);
+}
+
 ncclResult_t launch_combine_reduce(
     void* flat_staging,
     const void* recv_x_em,

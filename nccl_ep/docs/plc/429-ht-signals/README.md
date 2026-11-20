@@ -168,10 +168,10 @@ reduce        | wait| wait| wait| rows|   resident from push entry (PDL)
 Push of chunk 0 hides under FC2's chunk 1. The last chunk's push, the barrier and the reduce stay exposed.
 
 Unless it splits (see **Split** below), signaled combine runs one push for all chunks and one reduction for whole rows.
-A push warp acquires the chunk flag, reads those columns with coherent loads, and writes them to peer staging. A block
-that finds all flags ready can push a whole row at a time. The push triggers the reduction at entry, so reduction blocks
-can start while the push is active. The diagram below shows what they must wait for when FC2 precedes combine on the
-same stream.
+The push takes the chunks in order, each in one block-wide pass once its flag is acquired
+([Signaled push](#signaled-push-mr-437)), and reads those columns with coherent loads. The push triggers the reduction
+at entry, so reduction blocks can start while the push is active. The diagram below shows what they must wait for when
+FC2 precedes combine on the same stream.
 
 ```text
 FC2 chunk flags --> push warps --> tail barrier ---> token blocks: acquire completion,
@@ -197,8 +197,10 @@ Completion and staging reuse:
 - If the reduction fails to launch after its push, the group rejects later signaled combines with
   `ncclInternalError`.
 
-**Split.** The chain above serves a row of one chunk. A combine whose row has two or more chunks splits it into four
-launches, unless the group uses `NCCL_EP_OVERFLOW_DROP` (only a whole-row reduce re-arms the pushed-row flags):
+**Split.** The chain above serves a row of one chunk, and every row in an LSA team below 8 ranks. In a team of 8 or
+more ranks, where the push stores by TMA ([Signaled push](#signaled-push-mr-437)), a combine whose row has two or more
+chunks splits it into four launches, unless the group uses `NCCL_EP_OVERFLOW_DROP` (only a whole-row reduce re-arms
+the pushed-row flags):
 
 ```text
  launch  work                   SMs                  waits for                   exit
@@ -227,6 +229,33 @@ What the neighboring kernels must do
 - A successor waits before accessing combine buffers, exiting, or triggering more work.
 - If FC2 runs on another stream, all its blocks must be resident before the push starts, and both must use the
   same CUDA memory synchronization domain. Buffer reuse then waits for FC2 on its own stream.
+
+## Signaled push (MR !437)
+
+The signaled push takes one chunk at a time with the whole block (`combine_push_signaled_chunk`). A chunk is
+`granularity` columns, a whole number of push tiles clamped to the row; the last chunk may be narrower.
+
+- **Wait.** One thread polls `signal[s]` (a relaxed load, then an acquire load); the block barrier extends the acquire
+  to every warp. A rank with no received rows skips the wait.
+- **Rows.** The warps claim the chunk's rows from the block's counter for that chunk. A row with one copy is stored as
+  loaded; the others are summed one tile at a time, with up to 8 int4 loads in flight per lane (4 for top-k <= 2 and
+  for rows that end in a partial chunk). With chunk 0 the backward stores the weights, and under
+  `NCCL_EP_OVERFLOW_DROP` the push marks the row's pushed-row flag.
+- **Claim pool.** A single-chunk push of rows over 8 KiB also claims from the grid-wide pool. From a grid of 24
+  blocks that pool is three quarters of every region, so each warp's rows spread over destinations.
+- **Store.** Below 8 ranks, and for a single-chunk push at every team size, each lane stores its reduced int4s straight
+  to the peer's staging row (variant suffix `_direct`): no dynamic shared memory, all 24 warps, and the max-L1
+  carveout. From 8 ranks a multi-chunk push writes each chunk through the warp's smem buffer and one TMA store.
+
+**Split from 8 ranks.** The [split](#combine-chunk-readiness-and-stream-completion) needs a TMA-store push, which
+leaves its SMs free for the reduce beside it, so it runs in LSA teams of 8 or more ranks. A direct-store push issues
+every store from its own SMs, so below 8 ranks the combine stays one push and one reduce.
+
+**Tests.** `SignalCaseTest.MatchesPlain` also runs one-tile chunks of the four-tile row and of the 2880-element row
+(three chunks, the last of 832 elements, with a zero-token rank) with `NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE=1`, which
+keeps the TMA store in a small team and so splits the combine at any team size. Each result matches the plain combine
+bitwise, and each reduce's call word equals its push's done word. `SignalLastChunkSmsTest` keeps the TMA store the
+same way.
 
 ## Cost and effect on existing callers
 
