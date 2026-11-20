@@ -345,6 +345,28 @@ __host__ __device__ constexpr dtype_t align_down(dtype_t a, dtype_t b) {
     return (a / b) * b;
 }
 
+// Dispatch signal workspace, in 32-bit words: two uint16 tile counters per word, then, for the per-call row map, one
+// entry per row. The map starts after the counters of tile size 1, so it does not move with the tile size.
+__host__ __device__ constexpr int dispatch_signal_map_offset(int rows) { return ceil_div(rows, 2); }
+__host__ __device__ constexpr int dispatch_signal_scratch_words(int rows, int tile_size, bool row_map) {
+    return row_map ? dispatch_signal_map_offset(rows) + rows : ceil_div(ceil_div(rows, tile_size), 2);
+}
+
+// Opt-in per-tile completion signaling of the pull dispatch (tile_size 0: off).
+struct dispatch_signal_param_t {
+    int tile_size;
+    int32_t* signal;                    // [tiles] caller flags: signal[t] == t once tile t is complete
+    // Layout, with rows = max_recv_tokens_per_rank (the EM-slot budget, not the caller's row
+    // capacity) and tiles = ceil(rows / tile_size): [ceil(tiles / 2)] tile row counts (two uint16 per word) |
+    // [rows] row map: recv slot + 1 of the token whose lowest EM row this is, else 0; only a pull that does not build
+    // its maps. Zero at creation and left zero by each call, so only the tile counters are zeroed per dispatch.
+    // Sizing from the budget keeps the workspace a fixed reservation that an oversized caller tensor cannot outgrow.
+    uint32_t* scratch;
+    int scratch_words;                  // words the group reserved in scratch; the kernel traps rather than exceed it
+    // Ordered pull: [lsa_team_size * ceil(tokens_per_rank / 32)] chunk entries, written before use.
+    uint8_t* chunk_table;
+};
+
 // Packed bitmap stored as little-endian 64-bit words: word count, word index, single-bit test/set.
 __host__ __device__ constexpr int bit_words(int n) { return ceil_div(n, 64); }
 __host__ __device__ constexpr int bit_word(int i) { return i >> 6; }

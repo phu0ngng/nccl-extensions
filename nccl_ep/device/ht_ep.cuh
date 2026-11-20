@@ -145,13 +145,22 @@ private:
 // Release the staged smem buffers for reuse: waits only until the bulk stores have
 // *read* their source, so writes keep draining while the next remote row is in flight.
 __device__ __forceinline__ void bulk_wait_reads(int lane) {
-    if (lane == 0) cuda::ptx::cp_async_bulk_wait_group_read(cuda::ptx::n32_t<0>{});
+    if (lane == 0) {
+        nccl_ep::tma_store_wait<0>();
+    }
+    __syncwarp();
+}
+// Full completion of all but the newest kPending bulk store groups this warp committed.
+template <int kPending>
+__device__ __forceinline__ void bulk_wait_pending(int lane) {
+    if (lane == 0) {
+        nccl_ep::tma_store_wait_complete<kPending>();
+    }
     __syncwarp();
 }
 // Full completion of every bulk store issued by this warp; once before block exit.
 __device__ __forceinline__ void bulk_drain(int lane) {
-    if (lane == 0) cuda::ptx::cp_async_bulk_wait_group(cuda::ptx::n32_t<0>{});
-    __syncwarp();
+    bulk_wait_pending<0>(lane);
 }
 
 // TMA (cp.async.bulk) read -> per-warp smem row, then TMA-store scatter to each EM
@@ -6904,6 +6913,8 @@ __device__ __forceinline__ void local_permute_dup(
             const int32_t delivered = em_permute_cursors[e];
             const int32_t true_active = delivered < active ? delivered : active;
             if (true_active >= active) continue;
+            // Every lane has read active before lane 0 overwrites it.
+            __syncwarp();
             // Correct the handle-scoped field in place (see allow_overflow_drop above).
             if (lane == 0) per_expert_counts_active[e] = true_active;
             const int64_t zone_start = expert_token_offsets[e];
@@ -6928,22 +6939,26 @@ __device__ __forceinline__ void local_permute_dup(
 // smem, then TMA-store to each EM slot). Weights are pulled from the source's
 // per-token topk_weights row (position k aligns with flat2em_slot_map's k).
 //
-// Two concurrent warp groups per block:
+// Concurrent warp groups per block:
 //   - kPullWarps pull warps: one warp per recv token; TMA the remote token row once
 //     and scatter it to the token's EM slots. Each warp also pulls that token's
 //     topk_weights (and, for QUANT_FWD, its scale row) from the source rank and
 //     scatters them to the same slots.
 //   - kPadWarps pad warps: STG zero-fill the per-expert pad rows, kept off the
 //     TMA engine the pull warps use.
+//   - kPullDispatchMapWarps MAP warps (fused pull-count only): build the recv-slot and
+//     EM maps in the kernel from the pulled count rows. In the ordered signaled pull
+//     they also pool each mapped chunk for the pull warps, and zero the pad rows when
+//     the block has no pad warps.
 // Output rows are disjoint, so the groups overlap with only the block-exit sync.
 //
 // Pull warps per CTA. Each warp keeps one remote row in flight; the JIT picks the
 // largest count whose per-warp smem staging fits the device, capped here.
 constexpr int kPullDispatchMaxPullWarps = 24;
-constexpr int kPullDispatchPadWarps = 1;
+constexpr int kPullDispatchPadWarps = 2;
 constexpr int kPullDispatchThreadsPerSlot = 32;  // one warp per recv slot
-constexpr int pull_dispatch_threads(int pull_warps) {
-    return kPullDispatchThreadsPerSlot * (pull_warps + kPullDispatchPadWarps);
+constexpr int pull_dispatch_threads(int pull_warps, int pad_warps) {
+    return kPullDispatchThreadsPerSlot * (pull_warps + pad_warps);
 }
 // Max EM slots one recv token can scatter to on this rank (== MAX_NUM_TOPK: a token
 // routes to at most top_k <= 32 experts, so at most 32 kept copies land here).
@@ -6976,8 +6991,91 @@ __device__ __forceinline__ void pull_layout_ready_reset(int32_t* layout_ready) {
     layout_ready[kPullChunkClaimWord] = 0;
 }
 // Static smem of the MAP layout scan; counted in the host smem budget.
-constexpr size_t kPullDispatchMapScanBytes = kPullDispatchMapWarps * sizeof(int);
+__host__ __device__ constexpr size_t pull_dispatch_map_scan_bytes(int map_warps) {
+    return static_cast<size_t>(map_warps) * sizeof(int);
+}
 constexpr int kPullMapBarrierId = 1;
+// Ordered pull (signaled fused map): the MAP warps put each mapped chunk in a block-local pool, one bit per bucket of
+// local experts, and the payload warps pull the lowest bucket first and claim the EM rows as they pull, so tiles fill
+// expert by expert while the map is still being built. Ordered and plain pull share the MAP warp group
+// (kPullDispatchMapWarps) and pad warp count (kPullDispatchPadWarps). At two CTAs per SM the ordered MAP warps zero the
+// pad rows once they have mapped, so those CTAs have no separate pad warps.
+__host__ __device__ constexpr int pull_dispatch_pad_warps(bool ordered, int blocks_per_sm) {
+    if (ordered && blocks_per_sm != 1) {
+        return 0;
+    }
+    return kPullDispatchPadWarps;
+}
+// MAP chunks one fence publishes to the pool; two CTAs per SM have no registers for a batch.
+__host__ __device__ constexpr int pull_order_map_batch(int blocks_per_sm) {
+    return blocks_per_sm == 1 ? 8 : 1;
+}
+// Caps on the block pool smem (about 16 KB at the maximum). Experts beyond the bucket count share a bucket.
+constexpr int kPullOrderMaxBuckets = 64;
+// Pool bits the JIT admits (the flag word is extra). The pool is sized from the chunk count and the local expert
+// count alone, both group-uniform, so every rank of a team accepts or rejects a signaled dispatch alike; a per-rank
+// grid would make one rank reject while its peers waited for it in the head gate.
+constexpr size_t kPullOrderMaxPoolBytes = 16384;
+// Bucket of a lane that pulls nothing.
+constexpr int kPullNoBucket = 0xFF;
+// Chunk table entry: first recv slot, mask of the lanes that claimed one, then one bucket byte per lane. The bucket
+// bytes are read and updated a word at a time (concurrent splits of other buckets share the words).
+struct pull_dispatch_chunk_entry_t {
+    int32_t slot_base;
+    uint32_t lane_mask;
+    unsigned bucket_words[8];
+};
+constexpr int kPullDispatchChunkEntryBytes = sizeof(pull_dispatch_chunk_entry_t);
+static_assert(kPullDispatchChunkEntryBytes == 40, "the chunk table entry is 40 bytes");
+// A payload warp publishes each of its first 16 / blocks_per_sm tokens at once, so every SM flushes as many.
+constexpr int kPullOrderStartupFlushTokens = 16;
+// Pool smem: [MAP warps done | buckets * words bits].
+constexpr int kPullPoolFlagWords = 1;
+// Pool words per bucket the JIT admits and reserves: one bit per chunk of the launch. It is independent of the
+// grid, which the ranks of a team need not agree on.
+__host__ __device__ constexpr int pull_pool_words(size_t total_chunks) {
+    return static_cast<int>(nccl_ep::ceil_div(total_chunks, size_t{32}));
+}
+// Whether the ordered pull's pool bits (per expert bucket, one per chunk of 32 tokens of each team rank) fit
+// kPullOrderMaxPoolBytes.
+__host__ __device__ constexpr bool pull_order_pool_admitted(
+    int lsa_team_size, int tokens_per_rank, int experts_per_rank) {
+    const size_t chunks =
+        static_cast<size_t>(lsa_team_size) * nccl_ep::ceil_div(static_cast<size_t>(tokens_per_rank), size_t{32});
+    const int buckets = experts_per_rank < kPullOrderMaxBuckets ? experts_per_rank : kPullOrderMaxBuckets;
+    return static_cast<size_t>(buckets) * pull_pool_words(chunks) * sizeof(unsigned) <= kPullOrderMaxPoolBytes;
+}
+// Pool words per bucket of a block pool: one bit per chunk its MAP warps map (block 0 maps the most), so the drain
+// scans only the block's own chunks. Only the quantized pull uses it; the BF16 pull is faster on the launch pool.
+__host__ __device__ constexpr int pull_pool_block_words(size_t total_chunks, size_t grid_blocks) {
+    const size_t stride = grid_blocks * kPullDispatchMapWarps;
+    const size_t tail = total_chunks % stride;
+    const size_t chunks = (total_chunks / stride) * kPullDispatchMapWarps +
+                          (tail < kPullDispatchMapWarps ? tail : kPullDispatchMapWarps);
+    return static_cast<int>(nccl_ep::ceil_div(chunks, size_t{32}));
+}
+// Pool bit of a chunk this block maps (chunk = blockIdx.x * kPullDispatchMapWarps + map warp + j * stride), and back.
+// Both keep the chunk order. The launch pool indexes the chunk itself.
+template <bool kBlockPool>
+__device__ __forceinline__ int pull_pool_ordinal(size_t chunk, size_t stride) {
+    if constexpr (kBlockPool) {
+        return static_cast<int>((chunk / stride) * kPullDispatchMapWarps + chunk % kPullDispatchMapWarps);
+    } else {
+        return static_cast<int>(chunk);
+    }
+}
+template <bool kBlockPool>
+__device__ __forceinline__ size_t pull_pool_chunk(int ordinal, size_t stride) {
+    if constexpr (kBlockPool) {
+        return static_cast<size_t>(ordinal / kPullDispatchMapWarps) * stride +
+               static_cast<size_t>(blockIdx.x) * kPullDispatchMapWarps + ordinal % kPullDispatchMapWarps;
+    } else {
+        return static_cast<size_t>(ordinal);
+    }
+}
+__host__ __device__ constexpr size_t pull_pool_smem_bytes(int buckets, int words) {
+    return (kPullPoolFlagWords + static_cast<size_t>(buckets) * words) * sizeof(unsigned);
+}
 
 // Max NVLink single-LSA-team ranks. The peer-pointer arrays live inline in the kernel
 // param struct so they ride the stream-ordered launch marshaling; a persistent host
@@ -7055,25 +7153,36 @@ __device__ __forceinline__ void lsa_grid_head_gate(ncclDevComm_t* dcomm, uint32_
     lsa_grid_head_gate_elected(dcomm, head_sync_flag, leader, kReady);
 }
 
-// Block-uniform LSA grid tail barrier shared by pull dispatch and push combine.
-__device__ __forceinline__ void lsa_grid_tail_barrier(
+// The elected block's reset of the grid counters and the head gate flag, after the launch's last grid sync.
+__device__ __forceinline__ void lsa_grid_tail_reset(uint32_t* grid_barrier_counter, uint32_t* head_sync_flag) {
+    if (threadIdx.x == 0) {
+        atomicExch(grid_barrier_counter, 0u);
+        atomicExch(head_sync_flag, 0u);
+        // combine_push pool counter (combine_head_sync_counter word).
+        atomicExch(grid_barrier_counter + 1, 0u);
+    }
+}
+
+// Block-uniform LSA grid tail barrier of pull dispatch, the flat push relay and the push combine. Returns true in the
+// elected block, whose thread 0 has then passed the LSA barrier.
+__device__ __forceinline__ bool lsa_grid_tail_barrier(
     ncclDevComm_t* dcomm,
     uint32_t* grid_barrier_counter,
     uint32_t* head_sync_flag) {
     __threadfence_system();
-    if (elect_last_block(reinterpret_cast<const int*>(grid_barrier_counter), static_cast<int>(gridDim.x))) {
+    const bool elected =
+        elect_last_block(reinterpret_cast<const int*>(grid_barrier_counter), static_cast<int>(gridDim.x));
+    if (elected) {
         if (threadIdx.x < 32) {
             ncclLsaBarrierSession<ncclCoopWarp> bar(ncclCoopWarp(), *dcomm, ncclTeamTagLsa(), 1u);
             bar.sync(ncclCoopWarp(), cuda::memory_order_acq_rel);
         }
-        if (threadIdx.x == 0) {
-            atomicExch(grid_barrier_counter, 0u);
-            atomicExch(head_sync_flag, 0u);
-            // combine_push pool counter (combine_head_sync_counter word).
-            atomicExch(grid_barrier_counter + 1, 0u);
-        }
+        lsa_grid_tail_reset(grid_barrier_counter, head_sync_flag);
     }
+    return elected;
 }
+
+using dispatch_signal_param_t = nccl_ep::dispatch_signal_param_t;
 
 struct dispatch_pull_param_t {
     // Flat specialization: packed local-expert/source-position entries in srcpos_map.
@@ -7108,6 +7217,12 @@ struct dispatch_pull_param_t {
     uint32_t* grid_barrier_counter;             // head (fused) and tail elect-last-block
     // When set, head/tail sync runs as separate kernels; this kernel skips the inline sync.
     bool unfused_sync;
+    // Launched as the programmatic dependent of the kernel before it, which it waits for at entry.
+    bool programmatic;
+    // Fused head sync: this rank's source top-k weights, copied to its staging before the head gate (count 0: none).
+    const float* stage_weights_src;
+    float* stage_weights_dst;
+    int stage_weights_count;
 
     // Fused pull-count inputs; unused on the scan path.
     const uint8_t* meta_ptrs[kPullMaxLsaRanks];  // peer metadata inboxes (NVLink)
@@ -7133,17 +7248,197 @@ struct dispatch_pull_param_t {
     void* caller_counts;                // [experts_per_rank] padded per-expert counts
     void* caller_recv_total;            // scalar pre-drop padded total
     bool caller_out_is_int64;
+    dispatch_signal_param_t sig;
+};
+
+// Fused head sync: copies this rank's source top-k weights to its staging, over the grid. Peers read them after
+// the head gate.
+__device__ __forceinline__ void dispatch_pull_stage_weights(const dispatch_pull_param_t& p) {
+    for (int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x); i < p.stage_weights_count;
+         i += static_cast<int>(gridDim.x * blockDim.x)) {
+        p.stage_weights_dst[i] = p.stage_weights_src[i];
+    }
+}
+
+// Device view of the per-tile completion signaling buffers.
+struct dispatch_signal_ctx_t {
+    int tile_size_log2;                 // log2(tile_size); a row's tile index is em_slot >> tile_size_log2
+    // Overflow drop ends the output at the budget, possibly inside tile last_tile, which then has last_tile_rows;
+    // -1 without drop.
+    int last_tile;
+    uint32_t last_tile_rows;
+    int32_t* signal;
+    uint32_t* tile_fill;
+    // Recv slot + 1 of the token whose lowest EM row this is, else 0, built per call by build_row_map. Zero between
+    // calls. Unused by a pull that builds its maps (row_map false).
+    int32_t* first_row;
+    // Blocks that finished build_row_map: the group's grid barrier counter word 1, which the tail resets.
+    int* built;
+    __device__ dispatch_signal_ctx_t(const dispatch_pull_param_t& p, bool row_map)
+        : signal(p.sig.signal), tile_fill(p.sig.scratch) {
+        if (p.sig.tile_size <= 0) {
+            return;  // unsignaled: no member is used
+        }
+        tile_size_log2 = __ffs(p.sig.tile_size) - 1;
+        last_tile = p.allow_overflow_drop ? p.max_recv_tokens_per_rank >> tile_size_log2 : -1;
+        last_tile_rows = static_cast<uint32_t>(p.max_recv_tokens_per_rank & (p.sig.tile_size - 1));
+        first_row = reinterpret_cast<int32_t*>(tile_fill + nccl_ep::dispatch_signal_map_offset(p.max_recv_tokens_per_rank));
+        built = reinterpret_cast<int*>(p.grid_barrier_counter + 1);
+        // The host sizes the workspace for this launch's budget; a mismatch would write outside it.
+        const int need =
+            nccl_ep::dispatch_signal_scratch_words(p.max_recv_tokens_per_rank, p.sig.tile_size, row_map);
+        if (need > p.sig.scratch_words) {
+            if (blockIdx.x == 0 && threadIdx.x == 0) {
+                printf("ncclEpDispatch: dispatch_signal needs %d scratch words but the workspace holds %d\n", need,
+                       p.sig.scratch_words);
+            }
+            __trap();
+        }
+    }
+    // Maps each row below `rows` that is the lowest EM row of a received token to that token's slot + 1, over the
+    // grid's threads. first_row must be all zero on entry; pull_in_row_order clears what it reads.
+    __device__ __forceinline__ void build_row_map(const int32_t* flat2em, int num_recv, int top_k, int rows) const {
+        const int stride = static_cast<int>(gridDim.x * blockDim.x);
+        for (int s = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x); s < num_recv; s += stride) {
+            int first = INT_MAX;
+            for (int k = 0; k < top_k; ++k) {
+                const int32_t row = flat2em[static_cast<size_t>(s) * top_k + k];
+                if (row >= 0 && row < first) {
+                    first = row;
+                }
+            }
+            if (first < rows) {
+                first_row[first] = s + 1;
+            }
+        }
+    }
+    // Zeroes the tile counters of `rows` rows over the grid's threads; a grid barrier must follow.
+    __device__ __forceinline__ void clear_tile_counters(int rows) const {
+        const int words = nccl_ep::dispatch_signal_scratch_words(rows, 1 << tile_size_log2, false);
+        const int stride = static_cast<int>(gridDim.x * blockDim.x);
+        for (int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x); i < words; i += stride) {
+            tile_fill[i] = 0;
+        }
+    }
+    // Block-wide: this block's part of build_row_map is complete and visible to the grid once wait_row_map returns.
+    __device__ __forceinline__ void arrive_row_map() const {
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            nccl_ep::atomic_add_acqrel_global(built, 1);
+        }
+    }
+    __device__ __forceinline__ void wait_row_map() const {
+        if (threadIdx.x == 0) {
+            const long long start = clock64();
+            while (nccl_ep::ld_acquire_global(built) < static_cast<int>(gridDim.x)) {
+                if (clock64() - start > NUM_TIMEOUT_CYCLES) {
+                    printf("ncclEpDispatch: dispatch_signal row map build timed out\n");
+                    __trap();
+                }
+            }
+        }
+        __syncthreads();
+    }
+    // Pulls every received token once, in order of its lowest EM row, so tiles complete in row order. Warp `warp` of
+    // `warps` payload warps; build_row_map is complete grid-wide on entry. flush() publishes the warp's held rows
+    // after each token of its first kStartupRows rows, so the first tiles do not wait for a full batch.
+    static constexpr int kStartupRows = 16;
+    template <class ProcessSlot, class Flush>
+    __device__ __forceinline__ void pull_in_row_order(
+        int rows, int warp, int warps, int lane, ProcessSlot process_slot, Flush flush) const {
+        // One row per warp per step: the grid walks the rows in order, `warps` rows at a time.
+        for (int row = warp; row < rows; row += warps) {
+            const int slot = first_row[row] - 1;
+            if (slot >= 0) {
+                __syncwarp();
+                if (lane == 0) {
+                    first_row[row] = 0;
+                }
+                process_slot(slot);
+                if (row < warp + kStartupRows * warps) {
+                    flush();
+                }
+            }
+        }
+    }
+    // The caller fences the row's stores first. The row that fills tile t release-stores signal[t] = t.
+    // Two uint16 counts per word (odd t high; there is no 16-bit atomicAdd); a count below 65536 never carries.
+    __device__ __forceinline__ void mark_row(int64_t em_slot) const {
+        const int t = static_cast<int>(em_slot >> tile_size_log2);
+        const bool hi = (t & 1) != 0;
+        const uint32_t old_word = atomicAdd(&tile_fill[t >> 1], hi ? (1u << 16) : 1u);
+        const uint32_t old_half = hi ? (old_word >> 16) : (old_word & 0xFFFFu);
+        const uint32_t tile_rows = t == last_tile ? last_tile_rows : (1u << tile_size_log2);
+        // >=, not ==: re-storing signal[t] = t is idempotent, while a missed equality would leave the tile
+        // unflagged and time out its consumer.
+        if (old_half + 1 >= tile_rows) {
+            // The atomicAdd above and this fence acquire every row writer; then release at gpu scope: a same-GPU
+            // acquire of signal[t] sees every row.
+            nccl_ep::memory_fence_acquire_gpu();
+            nccl_ep::st_release_gpu_global(&signal[t], t);
+        }
+    }
+    // Fences the warp's stores, then counts rows row_at(i), i = lane, lane + 32, ... < n. Drain TMA stores first.
+    template <class RowAt>
+    __device__ __forceinline__ void publish_rows(int lane, int n, RowAt row_at) const {
+        __syncwarp();
+        nccl_ep::memory_fence_release_gpu();
+        for (int i = lane; i < n; i += 32) {
+            mark_row(row_at(i));
+        }
+    }
+};
+
+// Signaled pull: rows stored but not yet counted, one per lane. A full batch counts all but the newest kKeepRows once
+// their bulk stores complete, so the warp waits on older stores only. kGroupsPerRow: bulk groups committed per row.
+// All calls are warp-collective.
+template <int kGroupsPerRow>
+struct dispatch_signal_store_t {
+    static constexpr int kCapacity = 9;
+    static constexpr int kKeepRows = 1;
+    int32_t pending_row = 0;
+    int count = 0;
+
+    // After the row's bulk stores are committed.
+    __device__ __forceinline__ void commit(int lane, int32_t row, const dispatch_signal_ctx_t& sig) {
+        if (lane == count) {
+            pending_row = row;
+        }
+        if (++count == kCapacity) {
+            retire<kKeepRows>(lane, sig);
+        }
+    }
+    __device__ __forceinline__ void drain(int lane, const dispatch_signal_ctx_t& sig) {
+        if (count != 0) {
+            retire<0>(lane, sig);
+        }
+    }
+
+private:
+    template <int KeepRows>
+    __device__ __forceinline__ void retire(int lane, const dispatch_signal_ctx_t& sig) {
+        // The counted rows' bulk stores complete here; publish_rows fences their weight and scale stores.
+        bulk_wait_pending<KeepRows * kGroupsPerRow>(lane);
+        nccl_ep::fence_proxy_async();
+        const int completed = count - KeepRows;
+        // Lane i holds row i.
+        sig.publish_rows(lane, completed, [&](int) { return pending_row; });
+        if constexpr (KeepRows > 0) {
+            pending_row = __shfl_sync(0xffffffffu, pending_row, completed + lane);
+        }
+        count = KeepRows;
+    }
 };
 
 // Zero-fill the per-expert pad rows (disjoint from real slots) that the pull warps skip. One warp
 // per pad row; the 32 lanes stripe zero int4s across the token row (and scale row + weight on FWD).
 // Uses plain vectorized st.global (16B int4), not TMA: the source is a constant zero with no smem
 // payload to bulk-copy.
-template <int HiddenInt4, bool kFwd, int kThreadsPerSlot, int kPadWarps>
+template <int HiddenInt4, bool kFwd, int kThreadsPerSlot, int kPadWarps, bool kSignal>
 __device__ __forceinline__ void dispatch_pull_pad_fill(
     int4* dst_int4, uint8_t* recv_x_scale_em, float* recv_topk_weights_em,
     const int64_t* expert_token_offsets, const int32_t* per_expert_counts_active, int experts_per_rank,
-    int scale_row_bytes, int scale_row_int4, int pad_idx, int lane) {
+    int scale_row_bytes, int scale_row_int4, int pad_idx, int lane, const dispatch_signal_ctx_t& sig) {
     const int total_pad_warps = kPadWarps * static_cast<int>(gridDim.x);
     const int my_pad_warp = static_cast<int>(blockIdx.x) * kPadWarps + pad_idx;
     const bool zero_weights = (recv_topk_weights_em != nullptr);
@@ -7172,6 +7467,16 @@ __device__ __forceinline__ void dispatch_pull_pad_fill(
                 }
             }
             if (zero_weights && lane == 0) recv_topk_weights_em[slot] = 0.0f;
+        }
+        // Fence and mark per expert, so an expert's last tile does not wait on later experts' pad rows.
+        if constexpr (kSignal) {
+            static_assert(kThreadsPerSlot == 32, "pad marks: one warp per pad row group");
+            if (rel < pad_count) {
+                const int n = static_cast<int>(nccl_ep::ceil_div<int64_t>(pad_count - rel, total_pad_warps));
+                sig.publish_rows(lane, n, [&](int i) {
+                    return pad_begin + rel + static_cast<int64_t>(i) * total_pad_warps;
+                });
+            }
         }
     }
 }
@@ -7225,9 +7530,147 @@ __device__ __forceinline__ void dispatch_pull_map_publish_grid(
     }
 }
 
-// Two MAP warps build maps and publish completed chunk ranges.
-// Every block derives the layout from the published counts; CTA 0 also writes the global
-// outputs and releases them to the pad warps.
+// Counts the hits of one top-k row on this rank's experts and lowers emin to the lowest hit expert.
+__device__ __forceinline__ int pull_scan_topk_row(
+    const uint8_t* row_base, int top_k, bool row_vec_ok, int expert_base_gid, int experts_per_rank, int& emin) {
+    int n = 0;
+    if (row_vec_ok) {
+        for (int k = 0; k < top_k; k += 8) {
+            const uint4 v = *reinterpret_cast<const uint4*>(row_base + k * sizeof(uint16_t));
+            const uint16_t* vals = reinterpret_cast<const uint16_t*>(&v);
+#pragma unroll
+            for (int j = 0; j < 8; j++) {
+                const int el = static_cast<int>(vals[j]) - expert_base_gid;
+                if (el >= 0 && el < experts_per_rank) {
+                    ++n;
+                    emin = min(emin, el);
+                }
+            }
+        }
+    } else {
+        const uint16_t* row = reinterpret_cast<const uint16_t*>(row_base);
+        for (int k = 0; k < top_k; k++) {
+            const int el = static_cast<int>(row[k]) - expert_base_gid;
+            if (el >= 0 && el < experts_per_rank) {
+                ++n;
+                emin = min(emin, el);
+            }
+        }
+    }
+    return n;
+}
+
+// Publishes one mapped chunk to the block pool, one bit per bucket present among its lanes.
+__device__ __forceinline__ void pull_pool_publish(unsigned* pool_bits, int pool_words, int ordinal, int bucket,
+                                                  int lane) {
+    const unsigned group = __match_any_sync(0xffffffffu, bucket);
+    if (bucket != kPullNoBucket && lane == __ffs(group) - 1) {
+        atomicOr(&pool_bits[bucket * pool_words + (ordinal >> 5)], 1u << (ordinal & 31));
+    }
+}
+
+// Ordered MAP loop: kBatch chunks are scanned and claim their recv slots together so their latencies overlap, then
+// one fence orders their chunk entries and recv-slot sources before their pool bits.
+template <int kBatch, bool kBlockPool>
+__device__ __forceinline__ void dispatch_pull_map_ordered_chunks(
+    const uint8_t* local_meta, size_t meta_stride, int topk_off_bytes, int tokens_per_rank, int top_k, int nRanks,
+    int experts_per_rank, int expert_base_gid, bool row_vec_ok, size_t total_chunks, size_t stride,
+    size_t warp_base, int lane, const int32_t* s_base, int32_t* rank_cursor,
+    int32_t* recv_slot_to_src, int flat_recv_capacity, uint8_t* chunk_table, unsigned* pool_bits, int pool_words,
+    int bucket_experts) {
+    for (size_t first = warp_base; first < total_chunks; first += stride * kBatch) {
+        int base_r[kBatch];
+        int bucket[kBatch];
+        unsigned pmask_r[kBatch];
+#pragma unroll
+        for (int i = 0; i < kBatch; ++i) {
+            const size_t chunk = first + static_cast<size_t>(i) * stride;
+            if (chunk >= total_chunks) {
+                break;
+            }
+            const int r = static_cast<int>(chunk % nRanks);
+            const int t = static_cast<int>(chunk / nRanks) * 32 + lane;
+            int n = 0;
+            int emin = experts_per_rank;
+            if (t < tokens_per_rank) {
+                const uint8_t* row_base = local_meta + r * meta_stride + topk_off_bytes +
+                                          static_cast<size_t>(t) * top_k * sizeof(uint16_t);
+                n = pull_scan_topk_row(row_base, top_k, row_vec_ok, expert_base_gid, experts_per_rank, emin);
+            }
+            bucket[i] = n > 0 ? emin / bucket_experts : kPullNoBucket;
+            pmask_r[i] = __ballot_sync(0xffffffffu, n > 0);
+            base_r[i] = 0;
+            if (pmask_r[i] != 0 && lane == __ffs(pmask_r[i]) - 1) {
+                base_r[i] = atomicAdd(&rank_cursor[r], __popc(pmask_r[i]));
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < kBatch; ++i) {
+            const size_t chunk = first + static_cast<size_t>(i) * stride;
+            if (chunk >= total_chunks) {
+                break;
+            }
+            const int r = static_cast<int>(chunk % nRanks);
+            if (pmask_r[i] != 0) {
+                base_r[i] = __shfl_sync(0xffffffffu, base_r[i], __ffs(pmask_r[i]) - 1);
+            }
+            const int recv_slot = s_base[r] + base_r[i] + __popc(pmask_r[i] & ((1u << lane) - 1));
+            // Overflowing slots are skipped (see the plain MAP loop).
+            if (bucket[i] != kPullNoBucket && slot_overflows(recv_slot, flat_recv_capacity)) {
+                bucket[i] = kPullNoBucket;
+            }
+            if (bucket[i] != kPullNoBucket) {
+                recv_slot_to_src[recv_slot] = r * tokens_per_rank + static_cast<int>(chunk / nRanks) * 32 + lane;
+            }
+            pull_dispatch_chunk_entry_t* entry = reinterpret_cast<pull_dispatch_chunk_entry_t*>(chunk_table) + chunk;
+            reinterpret_cast<uint8_t*>(entry->bucket_words)[lane] = static_cast<uint8_t>(bucket[i]);
+            if (lane == 0) {
+                entry->slot_base = s_base[r] + base_r[i];
+                entry->lane_mask = pmask_r[i];
+            }
+        }
+        // The warp barrier puts every lane's MAP writes before the publisher's fence.
+        __syncwarp();
+        nccl_ep::memory_fence_cta();
+#pragma unroll
+        for (int i = 0; i < kBatch; ++i) {
+            const size_t chunk = first + static_cast<size_t>(i) * stride;
+            if (chunk >= total_chunks) {
+                break;
+            }
+            pull_pool_publish(pool_bits, pool_words, pull_pool_ordinal<kBlockPool>(chunk, stride), bucket[i], lane);
+        }
+    }
+}
+
+// Ordered MAP warps: map this block's chunks to the pool, then release the done flag. The payload warps already have
+// the block's layout.
+template <int kBatch, bool kBlockPool>
+__device__ __forceinline__ void dispatch_pull_map_ordered(
+    const uint8_t* local_meta, size_t meta_stride, int topk_off_bytes, int tokens_per_rank, int top_k, int nRanks,
+    int experts_per_rank, int my_rank, const int32_t* s_base, int32_t* rank_cursor, int32_t* recv_slot_to_src,
+    int flat_recv_capacity, uint8_t* chunk_table, unsigned* pool, int pool_words, int map_idx, int lane) {
+    constexpr int nMapThreads = kPullDispatchMapWarps * 32;
+    const size_t total_chunks = static_cast<size_t>(nRanks) * nccl_ep::ceil_div(tokens_per_rank, 32);
+    const bool row_vec_ok = (top_k % 8 == 0) && ((topk_off_bytes & 15) == 0);
+    const int buckets = min(experts_per_rank, kPullOrderMaxBuckets);
+    dispatch_pull_map_ordered_chunks<kBatch, kBlockPool>(
+        local_meta, meta_stride, topk_off_bytes, tokens_per_rank, top_k, nRanks, experts_per_rank,
+        my_rank * experts_per_rank, row_vec_ok, total_chunks, static_cast<size_t>(gridDim.x) * kPullDispatchMapWarps,
+        static_cast<size_t>(blockIdx.x) * kPullDispatchMapWarps + static_cast<size_t>(map_idx), lane, s_base,
+        rank_cursor, recv_slot_to_src, flat_recv_capacity, chunk_table, pool + kPullPoolFlagWords, pool_words,
+        nccl_ep::ceil_div(experts_per_rank, buckets));
+    // The MAP warps' barrier orders all their pool bits before thread 0 releases the done flag.
+    arrive_and_wait(nMapThreads, kPullMapBarrierId);
+    if (map_idx == 0 && lane == 0) {
+        cuda::atomic_ref<unsigned, cuda::thread_scope_block>(pool[0]).store(1u, cuda::memory_order_release);
+    }
+}
+
+// MAP warps build maps; every block derives the layout from the published counts, and CTA 0 also writes the global
+// outputs and releases them to the pad warps. kOrdered: only the layout (dispatch_pull_map_ordered maps the chunks);
+// otherwise the MAP warps also claim the EM rows and publish completed chunk ranges.
+template <bool kOrdered>
 __device__ __forceinline__ void dispatch_pull_map_warp(
     int topk_off_bytes,
     int32_t* __restrict__ recv_slot_to_src,
@@ -7266,7 +7709,8 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
     int32_t* chunk_claim,
     const int32_t* cached_cnt_rows,
     bool claim_dynamic) {
-    constexpr int nMapThreads = kPullDispatchMapWarps * 32;
+    constexpr int kMapWarps = kPullDispatchMapWarps;
+    constexpr int nMapThreads = kMapWarps * 32;
     const int tid = map_idx * 32 + lane;
     const int nRanks = lsa_team_size;
     const int epr = experts_per_rank;
@@ -7286,8 +7730,9 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
         s_base[r] = peer_count(r, my_rank);
     }
 
-    __shared__ int s_warp_total[kPullDispatchMapWarps];
-    static_assert(sizeof(s_warp_total) == kPullDispatchMapScanBytes, "update kPullDispatchMapScanBytes");
+    __shared__ int s_warp_total[kMapWarps];
+    static_assert(sizeof(s_warp_total) == pull_dispatch_map_scan_bytes(kMapWarps),
+                  "update pull_dispatch_map_scan_bytes");
     const int align = (em_alignment > 1) ? em_alignment : 1;
     int carry = 0;
     for (int tile = 0; tile < epr; tile += nMapThreads) {
@@ -7314,7 +7759,7 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
         arrive_and_wait(nMapThreads, kPullMapBarrierId);
         int warp_prefix = carry;
         int tile_total = 0;
-        for (int w = 0; w < kPullDispatchMapWarps; ++w) {
+        for (int w = 0; w < kMapWarps; ++w) {
             const int warp_total = s_warp_total[w];
             if (w < map_idx) {
                 warp_prefix += warp_total;
@@ -7346,11 +7791,13 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
                 if (allow_overflow_drop) {
                     out_padded = (padded < room) ? padded : room;
                 }
+                // Relaxed stores keep a concurrent poll of the offsets race-free.
                 if (caller_offsets) {
                     if (caller_out_is_int64) {
-                        static_cast<int64_t*>(caller_offsets)[k] = zone_base;
+                        nccl_ep::st_relaxed_gpu_global(static_cast<int64_t*>(caller_offsets) + k,
+                                                       static_cast<int64_t>(zone_base));
                     } else {
-                        static_cast<int32_t*>(caller_offsets)[k] = zone_base;
+                        nccl_ep::st_relaxed_gpu_global(static_cast<int32_t*>(caller_offsets) + k, zone_base);
                     }
                 }
                 if (caller_counts) {
@@ -7401,15 +7848,17 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
         if (is_layout_writer) {
             // Also clamp to flat_recv_capacity: slots beyond it were never written by the MAP phase.
             const int capped_total = overflow ? max_recv_tokens_per_rank : true_total;
-            *num_recv_tokens_dev = (capped_total < flat_recv_capacity) ? capped_total : flat_recv_capacity;
+            const int num_recv = (capped_total < flat_recv_capacity) ? capped_total : flat_recv_capacity;
+            *num_recv_tokens_dev = num_recv;
             expert_token_offsets[epr] = (ecum > max_recv_tokens_per_rank) ? max_recv_tokens_per_rank : ecum;
             // recv_total_counter reports the pre-drop padded total (unclamped ecum); equals the
             // unpadded FLAT recv total when em_alignment == 1. Matches dispatch_push_map_warp.
             if (caller_recv_total) {
                 if (caller_out_is_int64) {
-                    *static_cast<int64_t*>(caller_recv_total) = ecum;
+                    nccl_ep::st_relaxed_gpu_global(static_cast<int64_t*>(caller_recv_total),
+                                                   static_cast<int64_t>(ecum));
                 } else {
-                    *static_cast<int32_t*>(caller_recv_total) = ecum;
+                    nccl_ep::st_relaxed_gpu_global(static_cast<int32_t*>(caller_recv_total), ecum);
                 }
             }
         }
@@ -7418,6 +7867,10 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
     if (is_layout_writer && tid == 0) {
         // Publish the completed layout for the pad warps.
         nccl_ep::st_release_sys_global(layout_ready, 1);
+    }
+    if constexpr (kOrdered) {
+        // dispatch_pull_map_ordered maps the chunks once the whole block has the layout.
+        return;
     }
 
     // Each warp reads 32 contiguous tokens from one source rank. Cycling ranks
@@ -7432,17 +7885,17 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
     unsigned built = 0;
     // Each MAP warp's first chunk is static. Later chunks are claimed from the grid counter, or follow
     // the same stride when claiming is off. round is warp-uniform (built is only advanced by lane 0).
-    const size_t stride = static_cast<size_t>(gridDim.x) * kPullDispatchMapWarps;
+    const size_t stride = static_cast<size_t>(gridDim.x) * kMapWarps;
     unsigned round = 0;
     for (;;) {
-        size_t chunk = round * stride + static_cast<size_t>(blockIdx.x) * kPullDispatchMapWarps + map_idx;
+        size_t chunk = round * stride + static_cast<size_t>(blockIdx.x) * kMapWarps + map_idx;
         if (claim_dynamic && round > 0) {
             int claimed = 0;
             if (lane == 0) {
                 cuda::atomic_ref<unsigned, cuda::thread_scope_block> next(*chunk_next);
-                while (built * kPullDispatchMapWarps + map_idx >=
+                while (built * kMapWarps + map_idx >=
                        next.load(cuda::memory_order_relaxed) / kPullDispatchChunkTokens +
-                           kPullDispatchChunkLookahead * kPullDispatchMapWarps) {
+                           kPullDispatchChunkLookahead * kMapWarps) {
                 }
                 claimed = atomicAdd(chunk_claim, 1);
             }
@@ -7538,11 +7991,13 @@ __device__ __forceinline__ void dispatch_pull_map_warp(
         __syncwarp();
         const unsigned pmask = __ballot_sync(0xffffffffu, produce);
         if (lane == 0) {
-            const unsigned ring_slot = (built % kPullDispatchChunkRing) * kPullDispatchMapWarps + map_idx;
-            // Before reusing the slot, wait until every reader of its previous chunk has read it.
-            cuda::atomic_ref<unsigned, cuda::thread_scope_block> read(chunks_read[ring_slot]);
-            const unsigned reads_needed = (built / kPullDispatchChunkRing) * kPullDispatchChunkReaders;
-            while (read.load(cuda::memory_order_acquire) < reads_needed) {
+            const unsigned ring_slot = (built % kPullDispatchChunkRing) * kMapWarps + map_idx;
+            // Before reusing the slot, wait until every reader of its previous chunk has read it (null: no readers).
+            if (chunks_read != nullptr) {
+                cuda::atomic_ref<unsigned, cuda::thread_scope_block> read(chunks_read[ring_slot]);
+                const unsigned reads_needed = (built / kPullDispatchChunkRing) * kPullDispatchChunkReaders;
+                while (read.load(cuda::memory_order_acquire) < reads_needed) {
+                }
             }
             chunk_ranges[ring_slot] =
                 make_int2(s_base[r] + base_r, __popc(pmask));
@@ -7589,15 +8044,176 @@ __device__ __forceinline__ PullChunkState dispatch_pull_wait_chunk(
     return PullChunkState::kReady;
 }
 
+// Ordered pull: claim single tokens while a bucket's expected EM rows fit in one pull round of the grid (a row per
+// payload warp). Larger buckets take several rounds either way, so a split only adds a fence.
+__device__ __forceinline__ bool pull_pool_token_claims(
+    int tokens_per_rank, int top_k, int experts_per_rank, int bucket_experts, int payload_warps) {
+    return static_cast<int64_t>(tokens_per_rank) * top_k * bucket_experts <=
+           static_cast<int64_t>(experts_per_rank) * gridDim.x * payload_warps;
+}
+
+// Returns the lanes of a claimed chunk that this warp pulls. Under token claims it keeps the lowest one, marks it taken
+// in the chunk entry and returns the others to the pool, so idle warps pull them in parallel.
+__device__ __forceinline__ unsigned pull_pool_split_chunk(
+    unsigned group, bool token_claims, pull_dispatch_chunk_entry_t* entry, unsigned* pool_bits, int pool_words, int ordinal, int bucket,
+    int lane) {
+    if (!token_claims || (group & (group - 1)) == 0) {
+        return group;
+    }
+    const int l = __ffs(group) - 1;
+    if (lane == 0) {
+        // 32-bit atomic set of lane l's bucket byte to kPullNoBucket: another bucket's payload warp reads this chunk
+        // entry a word at a time, so a byte store here would be a mixed-size race on the shared word.
+        cuda::atomic_ref<unsigned, cuda::thread_scope_block>(entry->bucket_words[l >> 2]).fetch_or(
+            0xFFu << (8 * (l & 3)), cuda::memory_order_relaxed);
+    }
+    // Same publish as the MAP warps: the entry write before the pool bit.
+    nccl_ep::memory_fence_cta();
+    __syncwarp();
+    pull_pool_publish(pool_bits, pool_words, ordinal, bucket, lane);
+    return 1u << l;
+}
+
+// Ordered pull, one payload warp: once the block's layout is ready, takes chunks from the pool lowest bucket first and
+// pulls their tokens of that bucket, until the MAP warps are done and the pool is empty. flush() publishes the warp's
+// held rows after each of its first startup_tokens tokens and whenever the pool is empty.
+template <bool kBlockPool, class ProcessSlot, class Flush>
+__device__ __forceinline__ void dispatch_pull_drain_pool(
+    unsigned* pool, int pool_words, int buckets, uint8_t* chunk_table, bool token_claims, int startup_tokens, int lane,
+    ProcessSlot process_slot, Flush flush) {
+    unsigned* const bits = pool + kPullPoolFlagWords;
+    // The first non-empty pool word (the lowest bucket's lowest word) and its value, or -1.
+    const int total_words = buckets * pool_words;
+    auto first_word = [&](unsigned& picked) {
+        for (int first = 0; first < total_words; first += 32) {
+            const int i = first + lane;
+            unsigned word = 0;
+            if (i < total_words) {
+                word = cuda::atomic_ref<unsigned, cuda::thread_scope_block>(bits[i]).load(cuda::memory_order_relaxed);
+            }
+            const unsigned nonempty = __ballot_sync(0xffffffffu, word != 0);
+            if (nonempty != 0) {
+                const int l = __ffs(nonempty) - 1;
+                picked = __shfl_sync(0xffffffffu, word, l);
+                return first + l;
+            }
+        }
+        return -1;
+    };
+    int flushed = 0;
+    for (;;) {
+        unsigned picked = 0;
+        const int w = first_word(picked);
+        if (w < 0) {
+            flush();
+            // Done once nothing can arrive: the MAP warps are done and the pool is still empty. Every lane must
+            // acquire the completion flag (__all_sync, not a vote) before the collective re-scan: a lane that read a
+            // stale 0 has no happens-before with the producers and could miss their pool bits in first_word().
+            const unsigned done =
+                cuda::atomic_ref<unsigned, cuda::thread_scope_block>(pool[0]).load(cuda::memory_order_acquire);
+            if (__all_sync(0xffffffffu, done != 0) && first_word(picked) < 0) {
+                break;
+            }
+            __nanosleep(32);
+            continue;
+        }
+        const int bit = __ffs(picked) - 1;
+        int won = 0;
+        if (lane == 0) {
+            won = static_cast<int>((atomicAnd(&bits[w], ~(1u << bit)) >> bit) & 1u);
+            if (won) {
+                // Acquire the chunk entry the producer released before setting the pool bit; the atomicAnd
+                // above is the paired strong read.
+                cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_block);
+            }
+        }
+        if (__shfl_sync(0xffffffffu, won, 0) == 0) {
+            continue;
+        }
+        __syncwarp();
+        const int bucket = w / pool_words;
+        const int ordinal = (w % pool_words) * 32 + bit;
+        const size_t chunk =
+            pull_pool_chunk<kBlockPool>(ordinal, static_cast<size_t>(gridDim.x) * kPullDispatchMapWarps);
+        pull_dispatch_chunk_entry_t* entry = reinterpret_cast<pull_dispatch_chunk_entry_t*>(chunk_table) + chunk;
+        const int slot_base = __ldcg(&entry->slot_base);
+        const unsigned pmask = __ldcg(&entry->lane_mask);
+        // Atomic word load: a concurrent split of another bucket may be updating a byte of this word.
+        const unsigned lane_bucket =
+            (cuda::atomic_ref<unsigned, cuda::thread_scope_block>(entry->bucket_words[lane >> 2])
+                 .load(cuda::memory_order_relaxed) >> (8 * (lane & 3))) & 0xFFu;
+        unsigned group = pull_pool_split_chunk(__ballot_sync(0xffffffffu, lane_bucket == static_cast<unsigned>(bucket)),
+                                               token_claims, entry, bits, pool_words, ordinal, bucket, lane);
+        while (group != 0) {
+            const int l = __ffs(group) - 1;
+            group &= group - 1;
+            process_slot(slot_base + __popc(pmask & ((1u << l) - 1)));
+            if (flushed < startup_tokens) {
+                ++flushed;
+                flush();
+            }
+        }
+    }
+}
+
+// Ordered pull: claims the EM rows of recv slot `token` in pull order, so each expert's rows fill in the order they
+// are pulled. Writes the token's slot and source-position maps and its weights (src_w null: none), lists the kept
+// rows in active and returns their count.
+__device__ __forceinline__ int pull_claim_em_rows(
+    const uint16_t* topk_row, int token, int top_k, int expert_base_gid, int experts_per_rank,
+    const int32_t* s_expert_base, int32_t* expert_cursor, bool allow_overflow_drop, int max_recv_tokens_per_rank,
+    int caller_num_recv_tokens, int32_t* flat2em_slot_map, int32_t* srcpos_map,
+    float* recv_topk_weights_em, const float* src_w, int32_t* active, int lane) {
+    int c = 0;
+    int hits = 0;
+    for (int base = 0; base < top_k; base += 32) {
+        const int k = base + lane;
+        const int el = (k < top_k) ? static_cast<int>(topk_row[k]) - expert_base_gid : -1;
+        const bool hit = el >= 0 && el < experts_per_rank;
+        const unsigned hit_mask = __ballot_sync(0xffffffffu, hit);
+        int32_t es = -1;
+        if (hit) {
+            const int em_slot = s_expert_base[el] + atomicAdd(&expert_cursor[el], 1);
+            if (!allow_overflow_drop || !slot_overflows(em_slot, max_recv_tokens_per_rank)) {
+                es = em_slot;
+            }
+            const size_t o = static_cast<size_t>(token) * top_k + hits + __popc(hit_mask & ((1u << lane) - 1));
+            flat2em_slot_map[o] = es;
+            srcpos_map[o] = es >= 0 ? k : -1;
+        }
+        const bool keep = es >= 0;
+        if (keep) {
+            EP_DEVICE_ASSERT(es < caller_num_recv_tokens);
+            if (src_w != nullptr) {
+                recv_topk_weights_em[es] = __ldg(src_w + k);
+            }
+        }
+        const unsigned mask = __ballot_sync(0xffffffffu, keep);
+        const int pos = c + __popc(mask & ((1u << lane) - 1));
+        if (keep && pos < kPullDispatchMaxActive) {
+            active[pos] = es;
+        }
+        c += __popc(mask);
+        hits += __popc(hit_mask);
+    }
+    for (int j = hits + lane; j < top_k; j += 32) {
+        flat2em_slot_map[static_cast<size_t>(token) * top_k + j] = -1;
+        srcpos_map[static_cast<size_t>(token) * top_k + j] = -1;
+    }
+    return c;
+}
+
 // ScaleInt4PerLane: per-lane int4 capacity for the QUANT_FWD scale row (loaded once
 // into registers, scattered to every EM slot). JIT-sized from the actual scale row
 // (ceil(scale_row_int4 / 32)), so any scale dtype / quantization block size is covered.
 // ScaleTmaRowBytes: when non-zero, the scale row is moved by TMA through smem instead
 // (exact row size; 0 keeps the register-held ld/st path).
-// Fused count uses two MAP producers; scan consumes prebuilt maps.
+// Fused count uses MAP producers; scan consumes prebuilt maps.
+// BlocksPerSm: CTAs per SM of the launch.
 template <int HiddenInt4, class Policy,
           ncclEpDispQuant_t kRecipe = NCCL_EP_DISP_QUANT_NONE, int ScaleInt4PerLane = 1,
-          int ScaleTmaRowBytes = 0, int PullWarps = kPullDispatchMaxPullWarps, bool FusedMap = false>
+          int ScaleTmaRowBytes = 0, int PullWarps = kPullDispatchMaxPullWarps, bool FusedMap = false,
+          bool kSignal, int BlocksPerSm>
 __device__ __forceinline__ void dispatch_pull(
     const dispatch_pull_param_t& dp,
     // FusedMap literal-substitutes these at JIT-source-generation time, so they stay
@@ -7605,6 +8221,9 @@ __device__ __forceinline__ void dispatch_pull(
     int top_k,
     int experts_per_rank,
     int lsa_team_size) {
+    if (dp.programmatic) {
+        nccl_ep::grid_dependency_wait();
+    }
     uint8_t* __restrict__ recv_x_em = static_cast<uint8_t*>(dp.recv_x_em);
     float* __restrict__ recv_topk_weights_em = dp.recv_topk_weights_em;
     uint8_t* __restrict__ recv_x_scale_em = dp.recv_x_scale_em;
@@ -7648,16 +8267,23 @@ __device__ __forceinline__ void dispatch_pull(
     constexpr bool kFwd = (kRecipe == NCCL_EP_DISP_QUANT_FWD);
     constexpr bool kScaleTma = kFwd && (ScaleTmaRowBytes > 0);
     constexpr bool kFusedMap = FusedMap;
+    // The signaled fused map is always the ordered pull; the JIT rejects a signaled fused map that cannot be ordered.
+    constexpr bool kOrdered = FusedMap && kSignal;
     constexpr int kMapWarps = FusedMap ? kPullDispatchMapWarps : 0;
     constexpr int kPayloadWarps = PullWarps - kMapWarps;
     static_assert(kPayloadWarps > 0, "dispatch requires a payload warp");
+    // Pad warps after the pull warps; none when the MAP warps zero the pad rows (kMapPads).
+    constexpr int kExtraPadWarps = pull_dispatch_pad_warps(kOrdered, BlocksPerSm);
+    constexpr bool kMapPads = kExtraPadWarps == 0;
+    constexpr int kPadWarps = kMapPads ? kMapWarps : kExtraPadWarps;
+    const dispatch_signal_ctx_t sig(dp, !FusedMap);
     const size_t meta_stride = pull_meta_stride(topk_off_bytes, tokens_per_rank);
     using ScalePolicy = PullTmaStage<kScaleTma ? ScaleTmaRowBytes : 16>;
 
     const int warp_id = threadIdx.x / kPullDispatchThreadsPerSlot;
     const int lane = threadIdx.x & (kPullDispatchThreadsPerSlot - 1);
-    const bool is_pad = warp_id >= PullWarps;
-    const int pad_idx = warp_id - PullWarps;
+    const bool is_pad = kMapPads ? warp_id < kMapWarps : warp_id >= PullWarps;
+    const int pad_idx = kMapPads ? warp_id : warp_id - PullWarps;
     const bool is_map = kFusedMap && warp_id < kMapWarps;
     const int map_idx = warp_id;
     const int payload_warp = warp_id - kMapWarps;
@@ -7691,6 +8317,16 @@ __device__ __forceinline__ void dispatch_pull(
     int32_t* s_map_base = nullptr;
     int32_t* s_map_expert_base = nullptr;
     int2* s_chunk_ranges = nullptr;
+    // kOrdered: the pool (pull_pool_smem_bytes) takes the place of the chunk_ranges ring.
+    unsigned* s_pool = nullptr;
+    const int pool_buckets = min(experts_per_rank, kPullOrderMaxBuckets);
+    // The quantized pull scans only its block's chunks; the BF16 pull indexes the launch's chunks.
+    constexpr bool kBlockPool = kOrdered && kFwd;
+    int pool_words = 0;
+    if constexpr (kOrdered) {
+        const size_t pool_chunks = static_cast<size_t>(lsa_team_size) * nccl_ep::ceil_div(tokens_per_rank, 32);
+        pool_words = kBlockPool ? pull_pool_block_words(pool_chunks, gridDim.x) : pull_pool_words(pool_chunks);
+    }
     if constexpr (kFusedMap) {
         constexpr size_t kPolicyTotalBytes =
             static_cast<size_t>(kPayloadWarps) * Policy::smem_bytes_per_warp +
@@ -7700,19 +8336,29 @@ __device__ __forceinline__ void dispatch_pull(
         s_map_expert_base = s_map_base + lsa_team_size;
         const size_t map_bytes = static_cast<size_t>(lsa_team_size + experts_per_rank) * sizeof(int32_t);
         s_chunk_ranges = reinterpret_cast<int2*>(s_policy + kPolicyTotalBytes +
-            ((map_bytes + alignof(int2) - 1) & ~size_t(alignof(int2) - 1)));
+            nccl_ep::align<size_t>(map_bytes, alignof(int2)));
+        if constexpr (kOrdered) {
+            s_pool = reinterpret_cast<unsigned*>(s_chunk_ranges);
+        }
     }
 
-    __shared__ unsigned s_chunks_ready[kFusedMap ? kPullDispatchMapWarps : 1];
-    __shared__ unsigned s_chunks_done[kFusedMap ? kPullDispatchMapWarps : 1];
-    __shared__ unsigned s_chunks_read[kFusedMap ? kPullDispatchChunkRing * kPullDispatchMapWarps : 1];
+    __shared__ unsigned s_chunks_ready[kFusedMap ? kMapWarps : 1];
+    __shared__ unsigned s_chunks_done[kFusedMap ? kMapWarps : 1];
+    __shared__ unsigned s_chunks_read[kFusedMap ? kPullDispatchChunkRing * kMapWarps : 1];
     __shared__ unsigned s_chunk_next;
-    if constexpr (kFusedMap) {
+    if constexpr (kOrdered) {
+        // The chunk counters above stay unused, so they take no smem.
+        const int pool_ints = static_cast<int>(pull_pool_smem_bytes(pool_buckets, pool_words) / sizeof(unsigned));
+        for (int i = threadIdx.x; i < pool_ints; i += blockDim.x) {
+            s_pool[i] = 0;
+        }
+        __syncthreads();
+    } else if constexpr (kFusedMap) {
         if (threadIdx.x < kMapWarps) {
             s_chunks_ready[threadIdx.x] = 0;
             s_chunks_done[threadIdx.x] = 0;
         }
-        for (int i = threadIdx.x; i < kPullDispatchChunkRing * kPullDispatchMapWarps; i += blockDim.x) {
+        for (int i = threadIdx.x; i < kPullDispatchChunkRing * kMapWarps; i += blockDim.x) {
             s_chunks_read[i] = 0;
         }
         if (threadIdx.x == 0) s_chunk_next = 0;
@@ -7722,6 +8368,8 @@ __device__ __forceinline__ void dispatch_pull(
     const bool copy_weights = (recv_topk_weights_em != nullptr && peer_weight_ptrs != nullptr);
     const int kNWarps = PullWarps * static_cast<int>(gridDim.x);
     const int gwarp = static_cast<int>(blockIdx.x) * PullWarps + warp_id;
+    // Each row's token store and, with kScaleTma, its scale store commit one bulk group each.
+    dispatch_signal_store_t<kScaleTma ? 2 : 1> signal_stores;
     // Read + scatter one recv slot: NVLink token pull + destination resolve + EM store.
     auto process_slot = [&](int token) {
         // Decode the source (rank, token) that routes to this recv slot.
@@ -7777,25 +8425,37 @@ __device__ __forceinline__ void dispatch_pull(
             : nullptr;
         const int32_t* srcpos_row = srcpos_map ? srcpos_map + static_cast<size_t>(token) * top_k : nullptr;
         int c = 0;
-        for (int base = 0; base < top_k; base += 32) {
-            const int k = base + lane;
-            // MAP warps can write these rows during this kernel.
-            const int32_t es = (k < top_k) ? slot_row[k] : -1;
-            const bool keep = (es >= 0);
-            if (keep) {
-                // Per-slot capacity backstop (mirror of local_permute_dup).
-                EP_DEVICE_ASSERT(es < caller_num_recv_tokens);
-                // Read the weight at the source's top-k position (order-preserving),
-                // not the packed flat2em index. srcpos_row aligns 1:1 with slot_row.
-                if (copy_weights) {
-                    const int wpos = srcpos_row ? srcpos_row[k] : k;
-                    recv_topk_weights_em[es] = __ldg(src_w + wpos);
+        if constexpr (kOrdered) {
+            const uint16_t* topk_row = reinterpret_cast<const uint16_t*>(
+                own_meta_staging + static_cast<size_t>(src_rank) * meta_stride + topk_off_bytes) +
+                static_cast<size_t>(src_token) * top_k;
+            c = pull_claim_em_rows(topk_row, token, top_k, my_rank * experts_per_rank, experts_per_rank,
+                                   s_map_expert_base, expert_cursor, allow_overflow_drop, max_recv_tokens_per_rank,
+                                   caller_num_recv_tokens, flat2em_slot_map, srcpos_map,
+                                   recv_topk_weights_em, src_w, s_active[payload_warp], lane);
+        } else {
+            for (int base = 0; base < top_k; base += 32) {
+                const int k = base + lane;
+                // MAP warps can write these rows during this kernel.
+                const int32_t es = (k < top_k) ? slot_row[k] : -1;
+                const bool keep = (es >= 0);
+                if (keep) {
+                    // Per-slot capacity backstop (mirror of local_permute_dup).
+                    EP_DEVICE_ASSERT(es < caller_num_recv_tokens);
+                    // Read the weight at the source's top-k position (order-preserving),
+                    // not the packed flat2em index. srcpos_row aligns 1:1 with slot_row.
+                    if (copy_weights) {
+                        const int wpos = srcpos_row ? srcpos_row[k] : k;
+                        recv_topk_weights_em[es] = __ldg(src_w + wpos);
+                    }
                 }
+                const unsigned mask = __ballot_sync(0xffffffffu, keep);
+                const int pos = c + __popc(mask & ((1u << lane) - 1));
+                if (keep && pos < kPullDispatchMaxActive) {
+                    s_active[payload_warp][pos] = es;
+                }
+                c += __popc(mask);
             }
-            const unsigned mask = __ballot_sync(0xffffffffu, keep);
-            const int pos = c + __popc(mask & ((1u << lane) - 1));
-            if (keep && pos < kPullDispatchMaxActive) s_active[payload_warp][pos] = es;
-            c += __popc(mask);
         }
         if (lane == 0) s_count[payload_warp] = c;
         __syncwarp();
@@ -7807,6 +8467,9 @@ __device__ __forceinline__ void dispatch_pull(
             const int32_t slot = s_active[payload_warp][a];
             p.store(dst_int4 + static_cast<size_t>(slot) * HiddenInt4);
             if constexpr (kFwd) scatter_scale(slot);
+            if constexpr (kSignal) {
+                signal_stores.commit(lane, slot, sig);
+            }
         }
         bulk_wait_reads(lane);
     };
@@ -7815,6 +8478,11 @@ __device__ __forceinline__ void dispatch_pull(
         // When unfused, a standalone publish kernel and head-sync kernel already did this.
         if (!unfused_sync) {
             constexpr int kMapReady = 2;
+            // The tile counters are written after the head gate.
+            if constexpr (kSignal) {
+                sig.clear_tile_counters(max_recv_tokens_per_rank);
+            }
+            dispatch_pull_stage_weights(dp);
             dispatch_pull_map_publish_grid(cached_cnt_rows ? nullptr : own_row, own_topk_snapshot,
                 meta_ptrs, meta_stride, topk_off_bytes, tokens_per_rank, top_k, my_rank,
                 lsa_team_size);
@@ -7836,12 +8504,37 @@ __device__ __forceinline__ void dispatch_pull(
             lsa_grid_head_gate_elected(dcomm, head_sync_flag, head_leader, kMapReady);
         }
     } else if (!unfused_sync) {
-        lsa_grid_head_gate(dcomm, head_sync_flag);
+        if constexpr (kSignal) {
+            // The row map reads only this rank's maps, so every thread builds it while the gate waits on the peers.
+            sig.build_row_map(flat2em_slot_map, *num_recv_tokens_dev, top_k,
+                              static_cast<int>(expert_token_offsets[experts_per_rank]));
+            sig.clear_tile_counters(max_recv_tokens_per_rank);
+            sig.arrive_row_map();
+            lsa_grid_head_gate(dcomm, head_sync_flag);
+            sig.wait_row_map();
+        } else {
+            lsa_grid_head_gate(dcomm, head_sync_flag);
+        }
+    }
+    // A programmatic dependent of this kernel (the consumer of the signaled tiles) may start once every block is here.
+    if constexpr (kSignal) {
+        nccl_ep::launch_dependents();
+    }
+    // Peer rows are read through the async proxy after the gate's generic acquire.
+    if (!is_pad && !is_map && lane == 0) {
+        nccl_ep::fence_proxy_async_global();
     }
 
     if constexpr (kFusedMap) {
+        auto wait_layout = [&] {
+            if (lane == 0) {
+                while (nccl_ep::ld_acquire_sys_global(layout_ready) == 0) {
+                }
+            }
+            __syncwarp();
+        };
         if (is_map) {
-            dispatch_pull_map_warp(
+            dispatch_pull_map_warp<kOrdered>(
                 topk_off_bytes, recv_slot_to_src, srcpos_map, flat2em_slot_map,
                 num_recv_tokens_dev, expert_token_offsets, per_expert_counts_active, rank_cursor,
                 expert_cursor, layout_ready, s_map_base, s_map_expert_base, top_k, experts_per_rank,
@@ -7849,14 +8542,24 @@ __device__ __forceinline__ void dispatch_pull(
                 max_recv_tokens_per_rank, flat_recv_capacity, em_alignment, allow_overflow_drop,
                 caller_offsets, caller_counts, caller_recv_total, caller_out_is_int64,
                 map_idx, lane, own_meta_staging, meta_stride, s_chunk_ranges, s_chunks_ready,
-                s_chunks_done, s_chunks_read, &s_chunk_next, layout_ready + kPullChunkClaimWord, cached_cnt_rows,
-                dp.claim_dynamic);
+                // A signaled pull reads no chunk ranges, so its MAP warps neither wait for readers nor claim.
+                s_chunks_done, kSignal ? nullptr : s_chunks_read, &s_chunk_next, layout_ready + kPullChunkClaimWord,
+                cached_cnt_rows, !kSignal && dp.claim_dynamic);
         } else if (is_pad) {
-            if (lane == 0) {
-                while (nccl_ep::ld_acquire_sys_global(layout_ready) == 0) {
+            wait_layout();
+        }
+        if constexpr (kOrdered) {
+            // The block's layout is complete: the payload warps claim EM rows from it while the MAP warps map.
+            __syncthreads();
+            if (is_map) {
+                dispatch_pull_map_ordered<pull_order_map_batch(BlocksPerSm), kBlockPool>(
+                    own_meta_staging, meta_stride, topk_off_bytes, tokens_per_rank, top_k, lsa_team_size,
+                    experts_per_rank, my_rank, s_map_base, rank_cursor, recv_slot_to_src, flat_recv_capacity,
+                    dp.sig.chunk_table, s_pool, pool_words, map_idx, lane);
+                if constexpr (kMapPads) {
+                    wait_layout();
                 }
             }
-            __syncwarp();
         }
     }
 
@@ -7867,11 +8570,29 @@ __device__ __forceinline__ void dispatch_pull(
     }
 
     if (is_pad) {
-        dispatch_pull_pad_fill<HiddenInt4, kFwd, kPullDispatchThreadsPerSlot, kPullDispatchPadWarps>(
+        dispatch_pull_pad_fill<HiddenInt4, kFwd, kPullDispatchThreadsPerSlot, kPadWarps, kSignal>(
             dst_int4, recv_x_scale_em, recv_topk_weights_em, expert_token_offsets,
-            per_expert_counts_active, experts_per_rank, scale_row_bytes, scale_row_int4, pad_idx, lane);
+            per_expert_counts_active, experts_per_rank, scale_row_bytes, scale_row_int4, pad_idx, lane, sig);
     } else {
-        if constexpr (kFusedMap) {
+        if constexpr (kOrdered) {
+            if (!is_map) {
+                const bool token_claims = pull_pool_token_claims(
+                    tokens_per_rank, top_k, experts_per_rank, nccl_ep::ceil_div(experts_per_rank, pool_buckets),
+                    kPayloadWarps);
+                dispatch_pull_drain_pool<kBlockPool>(s_pool, pool_words, pool_buckets, dp.sig.chunk_table,
+                                                     token_claims, kPullOrderStartupFlushTokens / BlocksPerSm, lane,
+                                                     process_slot, [&] { signal_stores.drain(lane, sig); });
+                signal_stores.drain(lane, sig);
+            }
+        } else if constexpr (kSignal) {
+            if (!is_map) {
+                sig.pull_in_row_order(static_cast<int>(expert_token_offsets[experts_per_rank]),
+                                      static_cast<int>(blockIdx.x) * kPayloadWarps + payload_warp,
+                                      static_cast<int>(gridDim.x) * kPayloadWarps, lane, process_slot,
+                                      [&] { signal_stores.drain(lane, sig); });
+                signal_stores.drain(lane, sig);
+            }
+        } else if constexpr (kFusedMap) {
             if (!is_map) {
                 // Claim small batches from the slot positions of each chunk; skip the unused tail.
                 constexpr unsigned kSlotBatch = kPullDispatchSlotBatch;
@@ -7932,12 +8653,14 @@ __device__ __forceinline__ void dispatch_pull(
         // and correct per_expert_counts_active[e] in place.
         if (allow_overflow_drop && expert_cursor != nullptr &&
             elect_last_block(expert_cursor + experts_per_rank, static_cast<int>(gridDim.x))) {
-            const int total_warps = PullWarps + kPullDispatchPadWarps;
+            const int total_warps = PullWarps + kExtraPadWarps;
             for (int e = warp_id; e < experts_per_rank; e += total_warps) {
                 const int32_t active = per_expert_counts_active[e];
                 const int32_t delivered = expert_cursor[e];
                 const int32_t true_active = delivered < active ? delivered : active;
                 if (true_active >= active) continue;
+                // Every lane has read active before lane 0 overwrites it.
+                __syncwarp();
                 if (lane == 0) per_expert_counts_active[e] = true_active;
                 const int64_t zone_start = expert_token_offsets[e];
                 for (int64_t slot = zone_start + true_active; slot < zone_start + active; slot++) {
@@ -7953,6 +8676,12 @@ __device__ __forceinline__ void dispatch_pull(
                             nccl_ep::st_cg_global(&srow[j], int4{0, 0, 0, 0});
                         }
                     }
+                }
+                // The dropped rows no pull warp writes: zeroed above, counted here.
+                if constexpr (kSignal) {
+                    sig.publish_rows(lane, active - true_active, [&](int i) {
+                        return zone_start + true_active + i;
+                    });
                 }
             }
         }
@@ -8217,8 +8946,10 @@ __host__ __device__ constexpr int comb_stage_push_stride_bytes(int row_bytes, bo
 // expert rank locally gathers+reduces its K em copies of a recv token and PUSHES
 // the reduced row into the destination attn-rank's staging over NVLink; a final
 // combine_reduce sums the team_size partials per attn token. Head/tail intra-LSA syncs
-// are fused into the push kernel. Forward reduces tokens; backward (BACKWARD_COMBINE)
-// also scatters input weights into peer prob staging. NONE recipe, single LSA team only.
+// are fused into the push kernel, which ends with the LSA tail barrier. Forward reduces
+// tokens; backward (BACKWARD_COMBINE) also scatters input weights into peer prob staging.
+// NONE and MXFP8 recipes, single LSA team only. A signaled push (NONE only) is the first
+// kernel of a programmatic chain with its reduce; see combine_push_signaled_tail.
 // ============================================================================
 
 // Exact n / divisor for 0 <= n < 2^31 by multiply-high; g < 0 falls back to decode_src.
@@ -8269,7 +9000,17 @@ struct combine_push_param_t {
     bool claim_dynamic;
     // Byte offset to the per-row pushed flags (0 = off); see combine_reduce_param_t::retained_slots.
     size_t row_flag_offset;
+    // Signaled push (combine_signal): ready[s] == s once chunk s of every EM row is complete; null: plain.
+    const int32_t* ready;
+    // Signaled push: the resolved chunk width in hidden elements; 0 on a plain push, which reads the environment.
+    int chunk_width_elems;
+    // Signaled push whose reduce starts before it completes (see combine_push_signaled_tail); null otherwise.
+    uint32_t* push_done;
 };
+
+// What one push adds to its done word, and one reduce to its call word (combine_reduce_count_call). A counting reduce
+// splits it over its blocks, so it is at least the largest grid.
+constexpr uint32_t kCombinePushDoneQuota = 1u << 16;
 
 // Unpack one int4 of BF16 into four float pairs by bit placement; fewer instructions than
 // ld_token_pair<ncclBfloat16> in the fused quantize loop.
@@ -8478,7 +9219,7 @@ struct combine_push_claim_t {
             }
             own_done = true;
         }
-        while (true) {
+        while (num_tickets > 0) {
             int ticket = 0;
             if (wlane == 0) {
                 ticket = static_cast<int>(atomicAdd(pool_counter, 1u));
@@ -8493,6 +9234,7 @@ struct combine_push_claim_t {
                 return claimed;
             }
         }
+        return num_recv;
     }
 };
 
@@ -8560,6 +9302,25 @@ struct combine_push_chunk_store_t {
     }
 };
 
+// Block-uniform end of a signaled push: the tail barrier, then completion after the kernel before it. With push_done,
+// the elected block adds kCombinePushDoneQuota to it once the LSA barrier has passed, which the reduce waits on
+// (combine_reduce_wait_push), and only block 0 waits, which still orders the grid's completion after that kernel's.
+__device__ __forceinline__ void combine_push_signaled_tail(
+    ncclDevComm_t* dcomm,
+    uint32_t* grid_barrier_counter,
+    uint32_t* head_sync_flag,
+    uint32_t* push_done,
+    bool unfused_sync) {
+    if (!unfused_sync && lsa_grid_tail_barrier(dcomm, grid_barrier_counter, head_sync_flag) && push_done != nullptr) {
+        if (threadIdx.x == 0) {
+            nccl_ep::red_add_release_sys_global(push_done, kCombinePushDoneQuota);
+        }
+    }
+    if (push_done == nullptr || blockIdx.x == 0) {
+        nccl_ep::grid_dependency_wait();
+    }
+}
+
 // One recv slot per warp (kSlotsPerBlock in parallel), identical
 // gather-reduce to local_permute_reduce; the reduced row is assembled in a per-warp smem buffer
 // and pushed to the remote destination staging slot [t*team_size + R], one TMA store per row
@@ -8572,8 +9333,12 @@ struct combine_push_chunk_store_t {
 //                in place in the smem row buffer and pushes the packed [FP8 H | E8M0 H/32] row.
 //   kDirectStore - the multi-chunk path stores the row int4 by int4 to the destination, without
 //                the smem buffer (combine_push_direct_store).
+//   kSignal    - chunk-major push, chunk s once ready[s] == s, its rows claimed per chunk; a block that finds
+//                every chunk of the launch ready at entry walks its rows row-major instead. A programmatic
+//                dependent with no wait at entry; it waits for the kernel before it before exit
+//                (combine_push_signaled_tail).
 template <int MaxTopK, int HiddenInt4, ncclDataType_t kTokenDtype, ncclEpCombQuant_t kCombineRecipe,
-          bool BACKWARD_COMBINE = false, int kChunkSize = 0, bool kClaimDynamic, bool kDirectStore>
+          bool BACKWARD_COMBINE = false, int kChunkSize = 0, bool kClaimDynamic, bool kSignal, bool kDirectStore>
 __device__ __forceinline__ void combine_push(
     void* const* __restrict__ peer_staging_ptrs,
     const uint8_t* __restrict__ recv_x_em,
@@ -8591,10 +9356,12 @@ __device__ __forceinline__ void combine_push(
     int lsa_team_size,
     size_t row_flag_offset,
     // Backward-only: sparse-direct prob scatter into the token staging pad (null/unused on forward).
-    const float* __restrict__ topk_weights_em = nullptr,
-    const int32_t* __restrict__ srcpos_map = nullptr,
-    bool unfused_sync = false,
-    uint8_t* __restrict__ smem_bytes = nullptr) {
+    const float* __restrict__ topk_weights_em,
+    const int32_t* __restrict__ srcpos_map,
+    bool unfused_sync,
+    uint8_t* __restrict__ smem_bytes,
+    const int32_t* __restrict__ ready,
+    uint32_t* __restrict__ push_done) {
     constexpr int kRowBytes = HiddenInt4 * 16;
     constexpr bool kMxfp8 = (kCombineRecipe == NCCL_EP_COMB_QUANT_MXFP8);
     static_assert(!kMxfp8 || kTokenDtype == ncclBfloat16, "MXFP8 push combine reduces BF16 rows");
@@ -8606,6 +9373,7 @@ __device__ __forceinline__ void combine_push(
                   "MXFP8 push row must be 16B-aligned (hidden multiple of 512)");
     static_assert(!kMxfp8 || Mxfp8Traits::kScaleBlock == 32, "MXFP8 scale blocks span four int4");
     static_assert(!kMxfp8 || kChunkSize == 0, "MXFP8 push is whole-row");
+    static_assert(!kMxfp8 || !kSignal, "combine_signal requires NCCL_EP_COMB_QUANT_NONE");
     // One warp per recv slot: narrow reduction granularity keeps many rows in flight per
     // block, saturating the NVLink write path. Each token is reduced into a per-warp smem row,
     // then pushed with one whole-row TMA (cp.async.bulk) store. The hidden is walked in
@@ -8617,7 +9385,9 @@ __device__ __forceinline__ void combine_push(
     // ---- HEAD SYNC: gates peer pushes until all ranks reach combine, so a push can't
     // land while the previous iteration's combine_reduce is still reading staging. ----
     // Skipped when a separate head-sync kernel runs it.
-    if (!unfused_sync) lsa_grid_head_gate(dcomm, head_sync_flag);
+    if (!unfused_sync) {
+        lsa_grid_head_gate(dcomm, head_sync_flag);
+    }
 
     // Metadata smem is sized to the max block; only the first kSlotsPerBlock rows are used.
     __shared__ int32_t smem_flat2em_slot_map[kCombinePushMaxSlots][MaxTopK];
@@ -8637,17 +9407,24 @@ __device__ __forceinline__ void combine_push(
     // This warp's push staging buffer (one chunk of the row); null for kDirectStore.
     constexpr int kBufInt4 =
         kMxfp8 ? combine_push_mxfp8_fused_int4(HiddenInt4) : combine_push_buf_int4(HiddenInt4, kChunkSize);
-    constexpr bool kSingleChunk = kMxfp8 || combine_push_num_chunks(HiddenInt4, kChunkSize) == 1;
+    constexpr int kNumChunks = combine_push_num_chunks(HiddenInt4, kChunkSize);
+    // A signaled push walks chunks in its outer loop, so it takes the chunk path even for one chunk.
+    constexpr bool kSingleChunk = kMxfp8 || (!kSignal && kNumChunks == 1);
     static_assert(!kDirectStore || !kSingleChunk, "the direct store serves the multi-chunk path only");
     int4* const my_row = kDirectStore ? nullptr : s_rows + static_cast<size_t>(slot_in_block) * kBufInt4;
 
     const int num_recv = *num_recv_tokens_dev;
     // Rows are claimed dynamically (see combine_push_claim_t). The pool counter is the
     // combine_head_sync_counter word (idle in pull/push), cleared by lsa_grid_tail_barrier.
-    __shared__ int s_claim;
+    // Signaled: one block counter per chunk; the block's own region only, as the one pool counter
+    // cannot serve several chunks.
+    static_assert(!kSignal || kClaimDynamic, "a signaled push claims each chunk's rows dynamically");
+    constexpr int kClaimCounters = kSignal ? kNumChunks : 1;
+    constexpr int kClaimRowBytes = kSignal ? 0 : kRowBytes;
+    __shared__ int s_claim[kClaimCounters];
     uint32_t* const pool_counter = grid_barrier_counter + 1;
     combine_push_claim_t<kClaimDynamic> claim;
-    claim.init(num_recv, my_lsa_rank, lsa_team_size, kRowBytes, kSlotsPerBlock, slot_in_block);
+    claim.init(num_recv, my_lsa_rank, lsa_team_size, kClaimRowBytes, kSlotsPerBlock, slot_in_block);
 
     // TMA-load relay: init this warp's mbarrier once (1 arrival: the load's complete_tx).
     uint32_t mbar_phase = 0;
@@ -8655,10 +9432,22 @@ __device__ __forceinline__ void combine_push(
         if (wlane == 0) nccl_ep::mbarrier_init(&s_mbar[slot_in_block], 1);
         nccl_ep::fence_barrier_init();
     }
-    if (tid == 0) {
-        s_claim = 0;
+    for (int c = tid; c < kClaimCounters; c += static_cast<int>(blockDim.x)) {
+        s_claim[c] = 0;
+    }
+    // Signaled: when every chunk of the launch is already published, the block walks its rows row-major.
+    __shared__ bool s_row_major;
+    if constexpr (kSignal) {
+        if (tid == 0) {
+            bool all_ready = true;
+            for (int c = 0; c < kNumChunks && all_ready; c++) {
+                all_ready = nccl_ep::ld_acquire_global(ready + c) == c;
+            }
+            s_row_major = all_ready;
+        }
     }
     __syncthreads();
+    [[maybe_unused]] const bool row_major = kSignal && s_row_major;
 
     const tokens_fast_div_t tokens_div = make_tokens_fast_div(static_cast<uint32_t>(tokens_per_rank));
     // Next slot's routing metadata is loaded one wave ahead to hide its latency.
@@ -8669,24 +9458,63 @@ __device__ __forceinline__ void combine_push(
         next_s = (ok && wlane < top_k) ? __ldg(flat2em_slot_map + static_cast<size_t>(sl) * top_k + wlane) : -1;
         next_g = (ok && wlane == 0) ? __ldg(recv_slot_to_src + sl) : 0;
     };
-    int slot = claim.next(&s_claim, pool_counter, wlane);
+    int pass = 0;
+    int slot = claim.next(&s_claim[kSignal ? pass : 0], pool_counter, wlane);
     int next_slot = 0;
     load_meta(slot, slot < num_recv);
+    // Weak coherent loads when the producer may still be writing other chunks; plain otherwise.
+    const auto load_em = [](const int4* ptr) {
+        if constexpr (kSignal) {
+            return nccl_ep::ld_coherent_global(ptr);
+        } else {
+            return *ptr;
+        }
+    };
 
+    // Signaled, chunk-major: one pass per chunk, chunk `pass` once the producer published
+    // it; each pass claims its rows from the block's counter of that chunk.
+    [[maybe_unused]] bool pass_start = true;
     for (; slot < num_recv; slot = next_slot) {
+        if constexpr (kSignal) {
+            if (pass_start) {
+                // A flag the producer never sets is reported, then traps.
+                const long long start = clock64();
+                while (!row_major && nccl_ep::ld_acquire_global(ready + pass) != pass) {
+                    __nanosleep(100);
+                    if (clock64() - start > NUM_TIMEOUT_CYCLES) {
+                        if (wlane == 0) {
+                            printf("ncclEpCombine: combine_signal.signal[%d] was not set before the timeout "
+                                   "(LSA rank %d)\n", pass, my_lsa_rank);
+                        }
+                        __trap();
+                    }
+                }
+                __syncwarp();
+                if (pass > 0) {
+                    load_meta(slot, true);
+                }
+                pass_start = false;
+            }
+        }
+        const int chunk_lo = kSignal ? pass : 0;
+        int chunk_hi = kNumChunks;
+        if constexpr (kSignal) {
+            chunk_hi = row_major ? kNumChunks : pass + 1;
+        }
         const bool slot_valid = (slot < num_recv);
 
         static_assert(MaxTopK <= 32, "cooperative pack assumes MaxTopK <= 32");
         // Backward: per-copy prob metadata (srcpos + input weight), prefetched in the metadata
         // phase but stored only after the token push loop so its load latency hides behind the
-        // NVLink token writes. Carried at wave scope across both blocks.
+        // NVLink token writes. Only the pass with chunk_lo == 0 writes it. Carried at wave scope
+        // across both blocks.
         int32_t prob_p = -1;
         float prob_w = 0.0f;
         if (slot_valid && wlane < 32) {
             const int32_t s = next_s;
             EP_DEVICE_ASSERT(s < caller_num_recv_tokens);
             if constexpr (BACKWARD_COMBINE) {
-                if (wlane < top_k && s >= 0) {
+                if (chunk_lo == 0 && wlane < top_k && s >= 0) {
                     prob_p = __ldg(srcpos_map + static_cast<size_t>(slot) * top_k + wlane);
                     prob_w = __ldg(topk_weights_em + s);
                 }
@@ -8704,13 +9532,13 @@ __device__ __forceinline__ void combine_push(
                 s_dst[slot_in_block] = reinterpret_cast<int4*>(
                     static_cast<uint8_t*>(peer_staging_ptrs[dst_rank]) +
                     static_cast<size_t>(dst_row) * comb_stage_push_stride_bytes(kPushRowBytes, kMxfp8, BACKWARD_COMBINE));
-                if (row_flag_offset != 0) {
+                if (row_flag_offset != 0 && chunk_lo == 0) {
                     mark_row_pushed(peer_staging_ptrs[dst_rank], row_flag_offset, dst_row);
                 }
             }
         }
         __syncwarp();
-        next_slot = claim.next(&s_claim, pool_counter, wlane);
+        next_slot = claim.next(&s_claim[kSignal ? pass : 0], pool_counter, wlane);
         load_meta(next_slot, next_slot < num_recv);
 
         if (slot_valid) {
@@ -8747,8 +9575,8 @@ __device__ __forceinline__ void combine_push(
             // combine_push_tile_int4 must match the tile size the kernel computes here.
             static_assert(kHiddenVec * kThreadsPerSlot == combine_push_tile_int4(HiddenInt4));
             static_assert(kNTiles == combine_push_ntiles(HiddenInt4));
-            constexpr int kChunkTiles = kBufInt4 / (kHiddenVec * kThreadsPerSlot);
-            constexpr int kNumChunks = combine_push_num_chunks(HiddenInt4, kChunkSize);
+            // A whole-row chunk includes the row's partial last tile.
+            constexpr int kChunkTiles = nccl_ep::ceil_div(kBufInt4, kHiddenVec * kThreadsPerSlot);
             if constexpr (kSingleChunk) {
                 // Single-copy relay: TMA-load the one source row straight into the smem buffer,
                 // bypassing the register round-trip below entirely. n==1 dominates at high EP
@@ -8844,13 +9672,13 @@ __device__ __forceinline__ void combine_push(
                     nccl_ep::tma_store_1d(my_row, dst_int4, kPushRowBytes);
                 }
             } else {
-            for (int chunk = 0; chunk < kNumChunks; chunk++) {
+            for (int chunk = chunk_lo; chunk < chunk_hi; chunk++) {
                 const int tile0 = chunk * kChunkTiles;
                 const int tile1 = tile0 + kChunkTiles < kNTiles ? tile0 + kChunkTiles : kNTiles;
                 const int base_j = tile_j(tile0);
                 const int end_j = tile_j(tile1);
                 const combine_push_chunk_store_t<kDirectStore> store{my_row, dst_int4 + base_j};
-                store.wait_buffer(wlane, chunk > 0);  // reuse buffer after prior chunk push
+                store.wait_buffer(wlane, chunk > chunk_lo);  // reuse buffer after prior chunk push
                 for (int tile = tile0; tile < tile1; tile++) {
                     const int32_t* const f2e = smem_flat2em_slot_map[slot_in_block];
                     float2 acc[kHiddenVec][4];
@@ -8871,8 +9699,11 @@ __device__ __forceinline__ void combine_push(
                             const int4* src = reinterpret_cast<const int4*>(
                                 recv_x_em + static_cast<size_t>(f2e[kb + kk]) * kRowBytes);
 #pragma unroll
-                            for (int u = 0; u < kHiddenVec; u++)
-                                if (tile_valid(tile, u)) b[kk][u] = src[src_j(tile, u)];
+                            for (int u = 0; u < kHiddenVec; u++) {
+                                if (tile_valid(tile, u)) {
+                                    b[kk][u] = load_em(src + src_j(tile, u));
+                                }
+                            }
                         }
 #pragma unroll
                         for (int kk = 0; kk < kCopyBatch; kk++) {
@@ -8909,16 +9740,27 @@ __device__ __forceinline__ void combine_push(
             // Backward: store the prefetched weight to its srcpos in this (t,R) token row's trailing
             // pad (co-located, one remote write per slot), after the token push has hidden the load.
             if constexpr (BACKWARD_COMBINE) {
-                float* prob_dst = reinterpret_cast<float*>(
-                    reinterpret_cast<uint8_t*>(dst_int4) + kPushRowBytes);
-                if (row_flag_offset != 0) {
-                    write_drop_prob_pad(prob_dst, prob_p, prob_w, top_k, wlane);
-                } else if (prob_p >= 0) {
-                    prob_dst[prob_p] = prob_w;
+                if (chunk_lo == 0) {
+                    float* prob_dst = reinterpret_cast<float*>(
+                        reinterpret_cast<uint8_t*>(dst_int4) + kPushRowBytes);
+                    if (row_flag_offset != 0) {
+                        write_drop_prob_pad(prob_dst, prob_p, prob_w, top_k, wlane);
+                    } else if (prob_p >= 0) {
+                        prob_dst[prob_p] = prob_w;
+                    }
                 }
             }
         }
         __syncwarp();
+        // Signaled, chunk-major: once the chunk's rows are claimed, the warp claims the next chunk's.
+        if constexpr (kSignal) {
+            if (next_slot >= num_recv && !row_major && pass + 1 < kNumChunks) {
+                ++pass;
+                pass_start = true;
+                claim.init(num_recv, my_lsa_rank, lsa_team_size, kClaimRowBytes, kSlotsPerBlock, slot_in_block);
+                next_slot = claim.next(&s_claim[pass], pool_counter, wlane);
+            }
+        }
     }
     // Drain all outstanding bulk pushes (global writes complete) before the tail sync makes them
     // visible to combine_reduce. A direct store issues no bulk push.
@@ -8927,9 +9769,13 @@ __device__ __forceinline__ void combine_push(
     }
     __syncwarp();
 
-    // ---- TAIL SYNC: all peer pushes globally visible before combine_reduce reads ----
+    // ---- TAIL SYNC: publish this launch's rows to their destinations ----
     // Skipped when a separate tail-sync kernel runs it.
-    if (!unfused_sync) lsa_grid_tail_barrier(dcomm, grid_barrier_counter, head_sync_flag);
+    if constexpr (kSignal) {
+        combine_push_signaled_tail(dcomm, grid_barrier_counter, head_sync_flag, push_done, unfused_sync);
+    } else if (!unfused_sync) {
+        lsa_grid_tail_barrier(dcomm, grid_barrier_counter, head_sync_flag);
+    }
 }
 
 struct combine_reduce_param_t {
@@ -8951,14 +9797,53 @@ struct combine_reduce_param_t {
     int lsa_team_size;                // number of per-token partials to sum
     int row_bytes;
     int top_k;                        // backward-only: combined_topk_weights width
+    // The push's done word, then this rank's reduce call word, when the reduce starts before its push completes: it
+    // counts its call, lets the next launch in and waits on the push (combine_reduce_wait_push), and its last block
+    // takes no tokens and only completes after the push. Null otherwise.
+    uint32_t* push_done;
 };
+
+// Block-collective: this reduce's target in push_done. The blocks add one kCombinePushDoneQuota between them to the
+// call word, so each block reads its call's index whatever the order, and the target is the push count of that call.
+// The words only grow (wrapping), so no reset is needed between calls or graph replays. Out of line, to leave the
+// reduce's register allocation untouched.
+__device__ __noinline__ uint32_t combine_reduce_count_call(const combine_reduce_param_t& p) {
+    __shared__ uint32_t target;
+    if (threadIdx.x == 0) {
+        constexpr uint64_t kQuota = kCombinePushDoneQuota;
+        const uint64_t b = blockIdx.x;
+        const uint32_t share = static_cast<uint32_t>(kQuota * (b + 1) / gridDim.x - kQuota * b / gridDim.x);
+        const uint32_t calls = nccl_ep::atomic_add_relaxed_global(p.push_done + 1, share) / kCombinePushDoneQuota;
+        target = (calls + 1) * kCombinePushDoneQuota;
+    }
+    __syncthreads();
+    return target;
+}
+
+// Block-collective: wait until this rank's push has passed the tail barrier of the call (combine_push_signaled_tail).
+// A push that never gets there (ranks that disagree on the combine) is reported, then traps.
+__device__ __forceinline__ void combine_reduce_wait_push(const combine_reduce_param_t& p, uint32_t target) {
+    if (threadIdx.x == 0) {
+        const long long start = clock64();
+        while (static_cast<int32_t>(nccl_ep::ld_relaxed_sys_global(p.push_done) - target) < 0) {
+            if (clock64() - start > NUM_TIMEOUT_CYCLES) {
+                printf("ncclEpCombine: the push did not complete before the timeout; every rank must run the same "
+                       "combine\n");
+                __trap();
+            }
+        }
+        nccl_ep::memory_fence_acquire_sys();
+    }
+    __syncthreads();
+}
 
 // One attn token per 128-thread sub-warp: sum the pushed team_size staging partials
 // [t*team_size + 0..team_size) into attn_output[t]. Which partials exist is derived from
 // this rank's own routing (topk_idx): token t has a partial from rank R iff one of its
 // top-k experts lives on R -- unwritten slots are skipped (no staging zero-init needed).
+//   kWaitBlocks  - the grid's last blocks take no tokens (see launch_combine_reduce_stage).
 template <int HiddenInt4, ncclDataType_t kTokenDtype, ncclEpCombQuant_t kCombineRecipe, bool BACKWARD_COMBINE,
-          bool CheckRetained, bool Flat>
+          bool CheckRetained, bool Flat, int kWaitBlocks>
 __device__ __forceinline__ void combine_reduce(
     uint8_t* __restrict__ attn_output,
     const uint8_t* __restrict__ staging,
@@ -8997,7 +9882,7 @@ __device__ __forceinline__ void combine_reduce(
 
     const int tid = threadIdx.x;
     const int slot_in_block = tid / kThreadsPerSlot;
-    const int slot_stride = kSlotsPerBlock * static_cast<int>(gridDim.x);
+    const int slot_stride = kSlotsPerBlock * (static_cast<int>(gridDim.x) - kWaitBlocks);  // the last kWaitBlocks: none
 
     // One expert per warp lane, so num_topk must fit the warp width.
     EP_DEVICE_ASSERT(num_topk <= MAX_NUM_TOPK);
@@ -9169,6 +10054,7 @@ __device__ __forceinline__ void flat_dispatch_head(const dispatch_pull_param_t& 
         return;
     }
     if constexpr (FusedMap) {
+        dispatch_pull_stage_weights(p);
         dispatch_pull_map_publish_grid(p.cached_cnt_rows ? nullptr : p.own_row, p.own_topk_snapshot,
             p.meta_ptrs, pull_meta_stride(p.topk_off_bytes, p.tokens_per_rank), p.topk_off_bytes,
             p.tokens_per_rank, p.top_k, p.my_rank, p.lsa_team_size);
@@ -9510,6 +10396,10 @@ __device__ __forceinline__ void dispatch_pull_flat(const dispatch_pull_param_t& 
     }
     TokenStage::block_init_fence();
     flat_dispatch_head<FusedMap>(p);
+    // Peer rows are read through the async proxy after the gate's generic acquire.
+    if (!is_map && lane == 0) {
+        nccl_ep::fence_proxy_async_global();
+    }
 
     constexpr size_t kPayloadBytes = kPayloadWarps * (TokenStage::smem_bytes_per_warp +
         (kScaleTma ? ScaleStage::smem_bytes_per_warp : 0));

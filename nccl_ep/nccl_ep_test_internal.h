@@ -83,3 +83,6 @@ ncclEpHtFlow_t ncclEpGroup_test_getHtFlow(ncclEpGroup_t group);
 void ncclEpHandle_test_getSmBudgets(
     ncclEpHandle_t handle, unsigned int* dispatch_num_sms, unsigned int* combine_num_sms);
 int ncclEpHandle_test_getCombineTokensPerChunk(ncclEpHandle_t handle);
+
+// Number of combine signal flags for a token row of hidden elements at the given signal granularity.
+int ncclEpGroup_test_getCombineSignalChunks(ncclEpGroup_t group, int hidden, ncclDataType_t dtype, int granularity);

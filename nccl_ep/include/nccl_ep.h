@@ -494,6 +494,45 @@ typedef struct {
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpDispatchInputs_t, NCCL_EP_DISPATCH_INPUTS);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchInputs_t, NCCL_EP_DISPATCH_INPUTS, 1);
 
+// The unit that ncclEpSignal_t::granularity counts. AUTO selects the op's natural unit; an explicit unit the op
+// does not support is rejected.
+typedef enum {
+    NCCL_EP_SIGNAL_UNIT_AUTO = 0,         // dispatch: tile rows; combine: chunk elements
+    NCCL_EP_SIGNAL_UNIT_TILE_ROWS = 1,    // dispatch only: granularity counts EM rows per tile
+    NCCL_EP_SIGNAL_UNIT_CHUNK_ELEMS = 2,  // combine only: granularity counts hidden elements per chunk
+} ncclEpSignalUnit_t;
+
+// A readiness signal for an HT expert-major pull-push op: the producer sets one int32 flag per unit as it finishes
+// it, so a consumer on the same GPU can start on the finished units. flag[i] == i once unit i is complete; reset the
+// flags to -1 before the op. Used as ncclEpDispatchOutputs_t::dispatch_signal (producer: dispatch; consumer: e.g. the
+// FC1 GEMM; one flag per output tile) and as ncclEpCombineInputs_t::combine_signal (producer: e.g. the FC2 GEMM;
+// consumer: push combine; one flag per hidden-dim chunk). See "Dispatch tile completion" and "Combine readiness
+// signaling" in docs/documentation/api_reference.md.
+// Launching the next kernel with programmatic stream serialization lets it start before the op ends. It runs
+// griddepcontrol.wait before it exits or triggers, and touches no memory the op reads or writes on any rank until then.
+typedef struct {
+    unsigned int size;  // = sizeof(this struct); first field, never moves
+    unsigned int magic; // = NCCL_EP_MAGIC; second field, never moves
+    int granularity;          // flags span this many units. Dispatch: EM rows per tile, a power of two <= 32768
+                              // dividing the handle's per-expert alignment. Combine: hidden elements per chunk, 0
+                              // inherits NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE
+    ncclEpSignalUnit_t unit;  // what granularity counts; AUTO (default) = the op's natural unit
+    ncclEpTensor_t* signal;   // 1D ncclInt32 [>= number of units], reset to -1; the producer sets signal[i] = i
+} ncclEpSignal_t;
+
+#define NCCL_EP_SIGNAL_INIT \
+    NCCL_EP_STRUCT_INIT(ncclEpSignal_t, NCCL_EP_MAGIC)
+
+#define NCCL_EP_SIGNAL_SIZE ((unsigned int)sizeof(ncclEpSignal_t))
+
+#define NCCL_EP_SIGNAL_V1_LAST_FIELD signal
+#define NCCL_EP_SIGNAL_V1_SIZE 24u
+
+#define NCCL_EP_SIGNAL_CURRENT_VERSION 1
+
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpSignal_t, NCCL_EP_SIGNAL);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpSignal_t, NCCL_EP_SIGNAL, 1);
+
 // Output tensors for ncclEpDispatch.
 // All fields except tokens are optional (NULL = not provided). Each field is a
 // pointer to a caller-owned descriptor.
@@ -512,6 +551,12 @@ typedef struct {
   // source top-k order, paired with their weights; unused columns are -1/zero.
   // Set NCCL_EP_HT_RECV_TOPK_ORDER=expert-ascend before group creation to retain ascending
   // expert order. Dense fallback and pull-push retain their existing behavior.
+    // optional; per-tile completion flags (NULL = off). A signaled forward dispatch that builds its routing maps orders
+    // tiles with a chunk pool of bounded capacity, which grows with lsa_team_size * ceil(max_dispatch_tokens_per_rank /
+    // 32) and the local expert count (up to 64 buckets) and does not depend on the SM budget. A request over it
+    // returns ncclInvalidArgument. A backward or re-dispatch rebuilds its row order from the handle's maps and has no
+    // pool.
+    ncclEpSignal_t* dispatch_signal;
 } ncclEpDispatchOutputs_t;
 
 #define NCCL_EP_DISPATCH_OUTPUTS_INIT \
@@ -521,11 +566,14 @@ typedef struct {
 
 #define NCCL_EP_DISPATCH_OUTPUTS_V1_LAST_FIELD topk_idx
 #define NCCL_EP_DISPATCH_OUTPUTS_V1_SIZE 40u
+#define NCCL_EP_DISPATCH_OUTPUTS_V2_LAST_FIELD dispatch_signal
+#define NCCL_EP_DISPATCH_OUTPUTS_V2_SIZE 48u
 
-#define NCCL_EP_DISPATCH_OUTPUTS_CURRENT_VERSION 1
+#define NCCL_EP_DISPATCH_OUTPUTS_CURRENT_VERSION 2
 
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpDispatchOutputs_t, NCCL_EP_DISPATCH_OUTPUTS);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchOutputs_t, NCCL_EP_DISPATCH_OUTPUTS, 1);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchOutputs_t, NCCL_EP_DISPATCH_OUTPUTS, 2);
 
 // Input tensors for ncclEpCombine.
 // All fields except tokens are optional (NULL = not provided). Each field is a
@@ -534,13 +582,14 @@ typedef struct {
     unsigned int size; // = sizeof(this struct); first field, never moves
     unsigned int magic; // = NCCL_EP_MAGIC; second field, never moves
     ncclEpTensor_t* tokens; // required post-expert activations; omitted on AFD attention ranks
-    ncclEpTensor_t* topk_weights; // optional; HT backward combine only:
-  //   2D [num_recv_tokens, top_k], ncclFloat32
+    ncclEpTensor_t* topk_weights; // optional; HT backward combine only, ncclFloat32:
+  //   expert-major 1D [N(r)] (one weight per received row), FLAT 2D [N(r), top_k]
     // Optional; recipe-dependent:
     // - NCCL_EP_COMB_QUANT_NONE / NCCL_EP_COMB_QUANT_MXFP8 / NCCL_EP_COMB_QUANT_NVFP4:
     //   must be NULL. MXFP8 generates E8M0 block scales internally; NVFP4 derives its
     //   per-row global scales internally.
     ncclEpTensor_t* scales;
+    ncclEpSignal_t* combine_signal; // optional; per-chunk readiness flags of tokens (NULL = off)
 } ncclEpCombineInputs_t;
 
 #define NCCL_EP_COMBINE_INPUTS_INIT \
@@ -552,12 +601,15 @@ typedef struct {
 #define NCCL_EP_COMBINE_INPUTS_V1_SIZE 24u
 #define NCCL_EP_COMBINE_INPUTS_V2_LAST_FIELD scales
 #define NCCL_EP_COMBINE_INPUTS_V2_SIZE 32u
+#define NCCL_EP_COMBINE_INPUTS_V3_LAST_FIELD combine_signal
+#define NCCL_EP_COMBINE_INPUTS_V3_SIZE 40u
 
-#define NCCL_EP_COMBINE_INPUTS_CURRENT_VERSION 2
+#define NCCL_EP_COMBINE_INPUTS_CURRENT_VERSION 3
 
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS, 1);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS, 2);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS, 3);
 
 // Output tensors for ncclEpCombine.
 // All fields except tokens are optional (NULL = not provided). Each field is a
@@ -703,12 +755,13 @@ ncclResult_t ncclEpInitHandle(
 // For forward dispatch: handle_mem may be snapshotted any time after
 // ncclEpUpdateHandle completes on the source stream.
 //
-// For backward dispatch or combine in count mode (expert-major local-permute
-// and Flat; see ncclEpDispatch's layout_info notes): handle_mem must be
-// snapshotted after the matching forward ncclEpDispatch has completed, with
-// the copy ordered after that work. ncclEpUpdateHandle alone does not write
-// the per-token maps that backward dispatch and combine read. Outside count
-// mode the per-token maps are complete after ncclEpUpdateHandle.
+// For backward dispatch or combine under fused metadata (push-count: expert-major
+// local-permute and Flat; pull-count: the expert-major pull/push flow; see
+// ncclEpDispatch's layout_info notes): handle_mem must be snapshotted after the
+// matching forward ncclEpDispatch has completed, with the copy ordered after that
+// work. ncclEpUpdateHandle alone does not write the per-token maps that backward
+// dispatch and combine read. Otherwise the per-token maps are complete after
+// ncclEpUpdateHandle.
 //
 // Arguments:
 //   handle     - [OUT] Newly imported handle

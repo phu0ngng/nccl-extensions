@@ -435,23 +435,88 @@ __host__ __device__ inline bool s_hist_ints_fit(int num_experts, int n_ranks) {
     return num_experts + n_ranks <= kPackHistMaxInts;
 }
 
-// Pack the handle-local top-k snapshot and accumulate its send-count histogram.
+// The count row is zeroed in-kernel. row_sync is the handle's [arrivals and departures | row zeroed], zero between
+// launches: the first block to arrive zeroes the row and raises row_sync[1], every block waits for it before its
+// first count, and the last block to leave resets both words. The zeroing block waits on nothing first, so no
+// co-residency is needed.
+template <bool FlatChunks>
+__device__ __forceinline__ void count_row_zero_if_first(
+    int32_t* row_sync, int32_t* cnt_rank, int32_t* cnt_expert, int32_t* chunk_counts, int n_ranks, int num_experts,
+    int max_tokens) {
+    __shared__ int s_first;
+    if (threadIdx.x == 0) {
+        s_first = atomicAdd(&row_sync[0], 1) == 0;
+    }
+    __syncthreads();
+    if (!s_first) {
+        return;
+    }
+    for (int i = threadIdx.x; i < n_ranks; i += blockDim.x) {
+        cnt_rank[i] = 0;
+    }
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+        cnt_expert[i] = 0;
+    }
+    if constexpr (FlatChunks) {
+        const int chunk_ints = nccl_ep::ceil_div(max_tokens, kFlatMetadataChunkTokens) * n_ranks;
+        for (int i = threadIdx.x; i < chunk_ints; i += blockDim.x) {
+            chunk_counts[i] = 0;
+        }
+    }
+    // The block's zeroes, then the flag (bar.sync, then a gpu-scope release).
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        nccl_ep::st_release_gpu_global(&row_sync[1], 1);
+    }
+}
+
+// Block-uniform: returns once the count row is zeroed.
+__device__ __forceinline__ void count_row_wait_zeroed(const int32_t* row_sync) {
+    if (threadIdx.x == 0) {
+        const long long start = clock64();
+        while (nccl_ep::ld_acquire_global(&row_sync[1]) == 0) {
+            if (clock64() - start > NUM_TIMEOUT_CYCLES) {
+                printf("ncclEpUpdateHandle: count row zeroing timed out\n");
+                __trap();
+            }
+        }
+    }
+    __syncthreads();
+}
+
+// Block-uniform, after the block's last count: the last block to leave resets row_sync for the next launch.
+__device__ __forceinline__ void count_row_leave(int32_t* row_sync) {
+    __syncthreads();
+    if (threadIdx.x == 0 && atomicAdd(&row_sync[0], 1) == 2 * static_cast<int>(gridDim.x) - 1) {
+        row_sync[0] = 0;
+        row_sync[1] = 0;
+    }
+}
+
+// Pack the handle-local top-k snapshot and accumulate its send-count histogram into the count row, which it zeroes.
 template <typename TopkIdxT, bool FlatChunks>
 __global__ void pack_topk_and_count_row_kernel(
     const TopkIdxT* __restrict__ topk_idx, uint16_t* __restrict__ topk_idx_u16, int num_tokens,
     int max_tokens, int num_topk, int experts_per_rank, int num_experts,
     int32_t* __restrict__ cnt_rank, int32_t* __restrict__ cnt_expert,
-    int32_t* __restrict__ chunk_counts) {
+    int32_t* __restrict__ chunk_counts, int32_t* row_sync) {
     // Per-CTA histogram in shared memory ([cnt_expert(num_experts) | cnt_rank(nRanks)], sized by the launcher; empty
     // when it does not fit, then the counts go straight to global memory as before), flushed once per CTA.
     extern __shared__ int32_t s_hist[];
     const int n_ranks = (num_experts + experts_per_rank - 1) / experts_per_rank;
+    count_row_zero_if_first<FlatChunks>(row_sync, cnt_rank, cnt_expert, chunk_counts, n_ranks, num_experts,
+                                        max_tokens);
     const bool use_smem = s_hist_ints_fit(num_experts, n_ranks);
+    // Without the smem histogram, and for the flat chunk counts, the token loop counts in global memory.
+    const bool count_in_loop = !use_smem || FlatChunks;
     int32_t* const h_expert = use_smem ? s_hist : cnt_expert;
     int32_t* const h_rank = use_smem ? s_hist + num_experts : cnt_rank;
     if (use_smem) {
         for (int i = threadIdx.x; i < num_experts + n_ranks; i += blockDim.x) s_hist[i] = 0;
         __syncthreads();
+    }
+    if (count_in_loop) {
+        count_row_wait_zeroed(row_sync);
     }
     const int stride = static_cast<int>(gridDim.x) * static_cast<int>(blockDim.x);
     for (int token = blockIdx.x * blockDim.x + threadIdx.x; token < max_tokens; token += stride) {
@@ -482,18 +547,22 @@ __global__ void pack_topk_and_count_row_kernel(
     }
     if (use_smem) {
         __syncthreads();
+        if (!count_in_loop) {
+            count_row_wait_zeroed(row_sync);
+        }
         for (int i = threadIdx.x; i < num_experts; i += blockDim.x)
             if (s_hist[i] != 0) atomicAdd(&cnt_expert[i], s_hist[i]);
         for (int i = threadIdx.x; i < n_ranks; i += blockDim.x)
             if (s_hist[num_experts + i] != 0) atomicAdd(&cnt_rank[i], s_hist[num_experts + i]);
     }
+    count_row_leave(row_sync);
 }
 
 template <typename TopkIdxT>
 void pack_topk_and_count_row(
     const TopkIdxT* topk_idx, uint16_t* topk_idx_u16, int num_tokens, int max_tokens, int num_topk,
     int experts_per_rank, int num_experts, int32_t* cnt_rank, int32_t* cnt_expert, int num_sms,
-    cudaStream_t stream, int32_t* chunk_counts) {
+    cudaStream_t stream, int32_t* chunk_counts, int32_t* row_sync) {
     // Dynamic shared memory: one per-CTA histogram of num_experts + nRanks ints when it fits, else none.
     const int n_ranks = (num_experts + experts_per_rank - 1) / experts_per_rank;
     const bool use_smem_hist = s_hist_ints_fit(num_experts, n_ranks);
@@ -508,18 +577,18 @@ void pack_topk_and_count_row(
     if (chunk_counts != nullptr) {
         pack_topk_and_count_row_kernel<TopkIdxT, true><<<grid, block, smem, stream>>>(
             topk_idx, topk_idx_u16, num_tokens, max_tokens, num_topk, experts_per_rank, num_experts,
-            cnt_rank, cnt_expert, chunk_counts);
+            cnt_rank, cnt_expert, chunk_counts, row_sync);
     } else {
         pack_topk_and_count_row_kernel<TopkIdxT, false><<<grid, block, smem, stream>>>(
             topk_idx, topk_idx_u16, num_tokens, max_tokens, num_topk, experts_per_rank, num_experts,
-            cnt_rank, cnt_expert, nullptr);
+            cnt_rank, cnt_expert, nullptr, row_sync);
     }
 }
 
 template void pack_topk_and_count_row<int32_t>(
-    const int32_t*, uint16_t*, int, int, int, int, int, int32_t*, int32_t*, int, cudaStream_t, int32_t*);
+    const int32_t*, uint16_t*, int, int, int, int, int, int32_t*, int32_t*, int, cudaStream_t, int32_t*, int32_t*);
 template void pack_topk_and_count_row<int64_t>(
-    const int64_t*, uint16_t*, int, int, int, int, int, int32_t*, int32_t*, int, cudaStream_t, int32_t*);
+    const int64_t*, uint16_t*, int, int, int, int, int, int32_t*, int32_t*, int, cudaStream_t, int32_t*, int32_t*);
 
 // ============================================================================
 // Kernel: Convert sparse topk_weights to dense prob
@@ -2596,7 +2665,12 @@ ncclResult_t launch_dispatch_pull(
     int64_t* recv_topk_idx,
     int output_expert_base,
     int32_t* retained_slots,
-    bool claim_dynamic) {
+    bool claim_dynamic,
+    const dispatch_signal_param_t& signal,
+    bool programmatic,
+    const float* stage_weights_src,
+    float* stage_weights_dst,
+    int stage_weights_count) {
     assert(experts_per_rank > 0 && top_k <= ::ht_ep::kPullDispatchMaxActive);
     assert(row_bytes > 0 && (row_bytes % 16) == 0);
     assert(top_k > 0);
@@ -2641,6 +2715,17 @@ ncclResult_t launch_dispatch_pull(
     p.head_sync_flag = head_sync_flag;
     p.grid_barrier_counter = grid_barrier_counter;
     p.unfused_sync = unfused_sync;
+    p.sig = signal;
+    EP_HOST_ASSERT(!unfused_sync || !programmatic);
+    EP_HOST_ASSERT(!flat || !programmatic);
+    EP_HOST_ASSERT(stage_weights_count == 0 || (layout_ready != nullptr && !unfused_sync));
+    p.programmatic = programmatic;
+    p.stage_weights_src = stage_weights_src;
+    p.stage_weights_dst = stage_weights_dst;
+    p.stage_weights_count = stage_weights_count;
+    // Every path: the signaled pull also uses them to find the tile an overflow-drop budget ends inside.
+    p.max_recv_tokens_per_rank = max_recv_tokens_per_rank;
+    p.allow_overflow_drop = allow_overflow_drop;
     // Fused pull-count: layout_ready != nullptr is what jit::launch_dispatch_pull checks to
     // select the MAP-warp-group variant, so every field here must be set together.
     if (layout_ready != nullptr) {
@@ -2650,10 +2735,8 @@ ncclResult_t launch_dispatch_pull(
         p.expert_cursor = expert_cursor;
         p.layout_ready = layout_ready;
         p.my_rank = my_rank;
-        p.max_recv_tokens_per_rank = max_recv_tokens_per_rank;
         p.flat_recv_capacity = flat_recv_capacity;
         p.em_alignment = em_alignment;
-        p.allow_overflow_drop = allow_overflow_drop;
         p.claim_dynamic = claim_dynamic;
         p.own_row = own_row;
         p.own_topk_snapshot = own_topk_snapshot;
@@ -2686,8 +2769,24 @@ size_t dispatch_pull_smem_bytes(int hidden_int4) {
                                ::nccl_ep::ht::jit::pull_static_smem_bytes_per_warp());
 }
 
+size_t dispatch_pull_chunk_table_bytes(int lsa_team_size, int tokens_per_rank) {
+    return static_cast<size_t>(lsa_team_size) * nccl_ep::ceil_div(tokens_per_rank, 32) * ::ht_ep::kPullDispatchChunkEntryBytes;
+}
+
 size_t comb_stage_stride_bytes(int row_bytes, bool reserve_prob) {
     return static_cast<size_t>(::ht_ep::comb_stage_stride_bytes(row_bytes, reserve_prob));
+}
+
+int combine_push_chunk_bytes(int row_bytes, int ep_size, unsigned int device_sm, ncclDataType_t token_dtype,
+                             int requested_chunk_elems) {
+    const int row_int4 = row_bytes / 16;
+    return jit::combine_push_chunk_int4(row_int4, row_int4, ep_size, device_sm, false, false, token_dtype,
+                                        requested_chunk_elems) *
+           16;
+}
+
+bool dispatch_pull_order_pool_admitted(int lsa_team_size, int tokens_per_rank, int experts_per_rank) {
+    return ::ht_ep::pull_order_pool_admitted(lsa_team_size, tokens_per_rank, experts_per_rank);
 }
 
 ncclResult_t launch_combine_reduce(
@@ -2768,6 +2867,8 @@ ncclResult_t launch_combine_push(
     cudaStream_t stream,
     ncclDataType_t token_dtype,
     ncclEpCombQuant_t combine_recipe,
+    const int32_t* ready,
+    int chunk_width_elems,
     const float* topk_weights_em,
     const int32_t* srcpos_map,
     bool backward,
@@ -2776,14 +2877,18 @@ ncclResult_t launch_combine_push(
     bool nucs,
     bool flat,
     size_t row_flag_offset,
+    uint32_t* push_done,
     ::nccl_ep::CombinePushLaunch* launch_record) {
     assert(row_bytes > 0 && (row_bytes % 16) == 0);
     assert(top_k > 0);
     assert(sm_count > 0);
     assert(tokens_per_rank > 0 && lsa_team_size > 0);
+    assert(push_done == nullptr || (ready != nullptr && !unfused_sync));
+    assert((ready != nullptr) == (chunk_width_elems > 0));
     assert(my_lsa_rank >= 0 && my_lsa_rank < lsa_team_size);
+    assert(ready == nullptr || !flat);
     // A zero-recv rank (eager mode) pushes nothing but must still launch to
-    // participate in the head-gate and tail-barrier sync; its empty EM input
+    // participate in the head-gate and tail sync; its empty EM input
     // weights are null, so only require topk_weights_em when it has recv tokens.
     assert(!backward || (srcpos_map != nullptr &&
                          (topk_weights_em != nullptr || caller_num_recv_tokens == 0)));
@@ -2820,8 +2925,12 @@ ncclResult_t launch_combine_push(
     p.topk_weights_em = topk_weights_em;
     p.srcpos_map = srcpos_map;
     p.unfused_sync = unfused_sync;
-    p.claim_dynamic = claim_dynamic;
+    // A signaled push claims each chunk's rows dynamically.
+    p.claim_dynamic = claim_dynamic || ready != nullptr;
     p.row_flag_offset = row_flag_offset;
+    p.ready = ready;
+    p.chunk_width_elems = chunk_width_elems;
+    p.push_done = push_done;
 
     if (unfused_sync) NCCLCHECK(jit::launch_lsa_head_sync(dcomm, head_sync_flag, stream));
     const ncclResult_t status = ::nccl_ep::ht::jit::launch_combine_push(
@@ -2853,16 +2962,18 @@ ncclResult_t launch_combine_reduce_stage(
     int top_k,
     bool backward,
     int32_t* retained_slots,
-    bool flat) {
+    bool flat,
+    uint32_t* push_done) {
     assert(row_bytes > 0 && (row_bytes % 16) == 0);
     assert(sm_count > 0);
     assert(lsa_team_size > 0);
-    // The collective push has already completed. A rank with no source
-    // tokens has no local reduction work and may have null output storage.
-    if (num_combined_tokens == 0) {
+    // A rank with no source tokens has no local reduction work and may have null output storage. A reduce that
+    // counts its call still launches.
+    if (num_combined_tokens == 0 && push_done == nullptr) {
         return ncclSuccess;
     }
-    assert(!backward || (combined_topk_weights != nullptr && top_k > 0));
+    assert(!backward || top_k > 0);
+    assert(!backward || combined_topk_weights != nullptr || num_combined_tokens == 0);
 
     const unsigned int grid = local_permute_grid(sm_count, shuffle_sms);
 
@@ -2879,6 +2990,7 @@ ncclResult_t launch_combine_reduce_stage(
     p.row_bytes = row_bytes;
     p.combined_topk_weights = combined_topk_weights;
     p.top_k = top_k;
+    p.push_done = push_done;
 
     return ::nccl_ep::ht::jit::launch_combine_reduce_stage(
         row_bytes, static_cast<int>(grid), p, stream, combine_recipe, token_dtype, backward, flat);

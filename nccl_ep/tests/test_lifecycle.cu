@@ -203,6 +203,15 @@ TEST(LlCombineSmem, Nvfp4ReceiveBufferMatchesDevicePacketLayout) {
         nccl_ep::ll::combine_smem::kRecvTmaBarrierBytes + kAlignedPacketBytes);
 }
 
+// The ordered pull admits a 256-expert model at 16384 tokens per rank at every team size, and rejects one more chunk
+// of tokens.
+TEST(PullOrderPool, Admits256ExpertsAt16384Tokens) {
+    for (int team : {4, 8, 16}) {
+        EXPECT_TRUE(ht_ep::pull_order_pool_admitted(team, 16384, 256 / team)) << "team " << team;
+        EXPECT_FALSE(ht_ep::pull_order_pool_admitted(team, 16384 + 32, 256 / team)) << "team " << team;
+    }
+}
+
 // Pure host-side sizing tests for combine_push's chunking (see
 // combine_push_chunk_size/combine_push_slots_per_block in device/ht_ep.cuh). smem_cap is passed
 // explicitly (never queried from the live device) so these stay deterministic and portable across

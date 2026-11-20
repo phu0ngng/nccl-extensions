@@ -65,6 +65,10 @@ __device__ __forceinline__ int atomic_add_relaxed_global(int* ptr, int value) {
     return atomicAdd(ptr, value);
 }
 
+__device__ __forceinline__ uint32_t atomic_add_relaxed_global(uint32_t* ptr, uint32_t value) {
+    return atomicAdd(ptr, value);
+}
+
 __device__ __forceinline__ unsigned long long atomic_or_relaxed_shared(
     unsigned long long* ptr, unsigned long long value) {
     return atomicOr(ptr, value);
@@ -226,6 +230,16 @@ __device__ __forceinline__ void trap() {
     asm("trap;");
 }
 
+// PDL: let this grid's programmatic dependent start before this grid exits.
+__device__ __forceinline__ void launch_dependents() {
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+}
+
+// PDL: wait until the preceding grid has completed and its writes are visible; no-op without PDL.
+__device__ __forceinline__ void grid_dependency_wait() {
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+}
+
 __forceinline__ __device__ int get_lane_id() {
     int lane_id;
     asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
@@ -337,6 +351,14 @@ __device__ __forceinline__ void memory_fence_gpu() {
     asm volatile("fence.acq_rel.gpu;" ::: "memory");
 }
 
+// Release-only GPU-scope fence: orders this thread's preceding writes before
+// whatever it stores next, without also acquiring (cheaper than
+// memory_fence_gpu() when only the publish side is needed, e.g. before a
+// relaxed counter update that a peer will separately acquire on its own read).
+__device__ __forceinline__ void memory_fence_release_gpu() {
+    asm volatile("fence.release.gpu;" ::: "memory");
+}
+
 // Acquire-only GPU-scope fence: a strong read (e.g. the read half of an
 // atomic RMW) followed by this fence forms an acquire pattern on the read
 // location. It does not order the thread's earlier writes (no release half),
@@ -353,6 +375,11 @@ __device__ __forceinline__ void memory_fence_cta() {
 // the thread that issued the cp.async.bulk, after cp_async_bulk_wait_group.
 __device__ __forceinline__ void fence_proxy_async() {
     asm volatile("fence.proxy.async;" ::: "memory");
+}
+
+// Orders generic-proxy and async-proxy accesses to global memory, in both directions.
+__device__ __forceinline__ void fence_proxy_async_global() {
+    asm volatile("fence.proxy.async.global;" ::: "memory");
 }
 
 //==============================================================================
@@ -454,6 +481,15 @@ __device__ __forceinline__ int ld_acquire_global(const int* ptr) {
 __device__ __forceinline__ int ld_acquire_cta(const int* ptr) {
     int ret;
     asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
+    return ret;
+}
+
+// Weak 16B load, never ld.global.nc: data another running kernel writes, read after acquiring its flag.
+__device__ __forceinline__ int4 ld_coherent_global(const int4* ptr) {
+    int4 ret;
+    asm volatile("ld.global.v4.s32 {%0, %1, %2, %3}, [%4];"
+                 : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w)
+                 : "l"(ptr));
     return ret;
 }
 
@@ -577,6 +613,14 @@ __device__ __forceinline__ void st_relaxed_sys_global(const uint64_t* ptr, uint6
 
 __device__ __forceinline__ void st_relaxed_gpu_global(uint64_t* ptr, uint64_t val) {
     asm volatile("st.relaxed.gpu.global.b64 [%0], %1;" : : "l"(__cvta_generic_to_global(ptr)), "l"(val) : "memory");
+}
+
+__device__ __forceinline__ void st_relaxed_gpu_global(int32_t* ptr, int32_t val) {
+    asm volatile("st.relaxed.gpu.global.s32 [%0], %1;" : : "l"(__cvta_generic_to_global(ptr)), "r"(val) : "memory");
+}
+
+__device__ __forceinline__ void st_relaxed_gpu_global(int64_t* ptr, int64_t val) {
+    asm volatile("st.relaxed.gpu.global.s64 [%0], %1;" : : "l"(__cvta_generic_to_global(ptr)), "l"(val) : "memory");
 }
 
 __device__ __forceinline__ void st_na_relaxed(const uint8_t* ptr, uint8_t val) {

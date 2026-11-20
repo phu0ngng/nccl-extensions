@@ -175,6 +175,7 @@ SUITES=(
     "test_mxfp8_combine|EP MXFP8 Combine Tests|0"
     "test_mxfp8_combine_conversion|EP MXFP8 Conversion Coverage Tests|0"
     "test_ht_compact_prob|EP HT Compact Prob Tests|1"
+    "test_ht_signal|EP HT Signal Tests|0"
 )
 
 for entry in "${SUITES[@]}"; do
@@ -272,7 +273,7 @@ unset NCCL_EP_HT_COUNT_UNFUSED
 # phantom-row overflow path via the local-permute tests, plus the flat prefix-DROP case.
 # Other overflow tests exercise specific transports or early layout-query contracts and
 # are excluded from this focused rerun.
-PULL_PUSH_SUITES="test_output_layout test_ht_bwd test_quantization_recipe test_ht_combine_pp_interleave test_ht_dispatch_pp_interleave test_ht_compact_prob test_ht_pull_chunk_ring"
+PULL_PUSH_SUITES="test_output_layout test_ht_bwd test_quantization_recipe test_ht_combine_pp_interleave test_ht_dispatch_pp_interleave test_ht_compact_prob test_ht_pull_chunk_ring test_ht_signal"
 export NCCL_EP_HT_PULL_PUSH=1
 export NCCL_LSA_TEAM_SIZE="${NUM_GPUS}"
 for entry in "${SUITES[@]}"; do
