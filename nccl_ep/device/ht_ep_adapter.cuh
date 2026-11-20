@@ -555,6 +555,10 @@ int combine_push_chunk_bytes(int row_bytes, int ep_size, unsigned int device_sm,
 // Whether a signaled forward dispatch that builds its maps fits the ordered pull's pool.
 bool dispatch_pull_order_pool_admitted(int lsa_team_size, int tokens_per_rank, int experts_per_rank);
 
+// Whether a signaled expert-major push of rows of row_bytes in chunks of chunk_bytes stores directly to the peers
+// rather than by TMA store.
+bool combine_push_signal_direct_store(int lsa_team_size, int row_bytes, int chunk_bytes);
+
 // Push EM combine (mirror of pull EM dispatch). The push kernel does the local
 // gather-reduce + remote push with the head/tail intra-LSA syncs fused in; the reduce
 // kernel does the final team_size sum. peer_staging_ptrs is a [lsa_team_size] array of
@@ -586,6 +590,9 @@ ncclResult_t launch_combine_push(
     const int32_t* ready,
     // Signaled push: the resolved chunk width in hidden elements (combine_push_chunk_bytes); 0 on a plain push.
     int chunk_width_elems,
+    // Signaled push: chunks [chunk_begin, chunk_end) of the row (combine_push_param_t::chunk_begin).
+    int chunk_begin,
+    int chunk_end,
     // Backward combine (sparse-direct prob scatter into the token staging pad); null/false on forward.
     const float* topk_weights_em,
     const int32_t* srcpos_map,
@@ -624,6 +631,10 @@ ncclResult_t launch_combine_reduce_stage(
     bool backward,
     int32_t* retained_slots,
     bool flat,
+    // Row columns [col_begin_int4, col_end_int4) to reduce; a part of the row only in a split signaled combine, where
+    // a range without push_done completes after the push beside it through one extra block.
+    int col_begin_int4,
+    int col_end_int4,
     // The push's done and call words when the reduce starts before its push completes, which launches one extra
     // block; null otherwise. See combine_reduce_param_t::push_done.
     uint32_t* push_done);

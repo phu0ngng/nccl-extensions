@@ -577,6 +577,12 @@ has passed its LSA tail barrier, and completes after the push, which completes a
 another stream must have every block resident before the push starts, or the push can fill the GPU and the ranks
 hang.
 
+In an LSA team of 8 or more ranks, where the push stores by TMA, a row of two or more chunks runs the chain in two
+parts, unless the group uses `NCCL_EP_OVERFLOW_DROP`: the push of every chunk but the last; then the push of the last
+chunk on half the SMs, beside the reduce of the other chunks on the rest; then the reduce of the last chunk. Each push
+ends on the LSA tail barrier. Every rank therefore passes `combine_signal` to a combine, or none does: a rank that
+splits runs one more LSA barrier than a rank that does not, and the ranks hang.
+
 The reduce lets the next kernel on `stream` start at its entry, as a signaled dispatch does for its consumer. A
 kernel launched next with programmatic stream serialization runs `griddepcontrol.wait` before it exits or triggers,
 and until then neither reads nor writes `outputs` or any memory the combine reads or writes on any rank. A kernel

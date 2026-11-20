@@ -285,11 +285,22 @@ TEST(CombinePushLaunchShape, DirectStoreHasNoChunkBuffer) {
     const int tight_cap = ht_ep::combine_push_meta_reserve_bytes() + chunk_bytes / 2;
 
     for (int team : {2, ht_ep::kCombinePushTmaStoreMinTeam - 1}) {
-        EXPECT_TRUE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk));
-        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, 0));
+        EXPECT_TRUE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk, false));
+        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, 0, false));
     }
     for (int team : {ht_ep::kCombinePushTmaStoreMinTeam, 2 * ht_ep::kCombinePushTmaStoreMinTeam}) {
-        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk));
+        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk, false));
+    }
+    // A signaled push stores a single-chunk row directly in every team; a multi-chunk row follows the threshold.
+    for (int team : {2, ht_ep::kCombinePushTmaStoreMinTeam - 1, ht_ep::kCombinePushTmaStoreMinTeam,
+                     2 * ht_ep::kCombinePushTmaStoreMinTeam}) {
+        EXPECT_TRUE(ht_ep::combine_push_direct_store(team, kHiddenInt4, 0, true));
+    }
+    for (int team : {2, ht_ep::kCombinePushTmaStoreMinTeam - 1}) {
+        EXPECT_TRUE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk, true));
+    }
+    for (int team : {ht_ep::kCombinePushTmaStoreMinTeam, 2 * ht_ep::kCombinePushTmaStoreMinTeam}) {
+        EXPECT_FALSE(ht_ep::combine_push_direct_store(team, kHiddenInt4, chunk, true));
     }
 
     for (int cap : {kRoomyCap, tight_cap}) {

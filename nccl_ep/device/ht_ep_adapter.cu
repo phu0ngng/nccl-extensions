@@ -2789,6 +2789,10 @@ bool dispatch_pull_order_pool_admitted(int lsa_team_size, int tokens_per_rank, i
     return ::ht_ep::pull_order_pool_admitted(lsa_team_size, tokens_per_rank, experts_per_rank);
 }
 
+bool combine_push_signal_direct_store(int lsa_team_size, int row_bytes, int chunk_bytes) {
+    return jit::combine_push_stores_directly(lsa_team_size, row_bytes / 16, chunk_bytes / 16, true);
+}
+
 ncclResult_t launch_combine_reduce(
     void* flat_staging,
     const void* recv_x_em,
@@ -2869,6 +2873,8 @@ ncclResult_t launch_combine_push(
     ncclEpCombQuant_t combine_recipe,
     const int32_t* ready,
     int chunk_width_elems,
+    int chunk_begin,
+    int chunk_end,
     const float* topk_weights_em,
     const int32_t* srcpos_map,
     bool backward,
@@ -2885,6 +2891,7 @@ ncclResult_t launch_combine_push(
     assert(tokens_per_rank > 0 && lsa_team_size > 0);
     assert(push_done == nullptr || (ready != nullptr && !unfused_sync));
     assert((ready != nullptr) == (chunk_width_elems > 0));
+    assert(0 <= chunk_begin && chunk_begin < chunk_end && (ready != nullptr || chunk_begin == 0));
     assert(my_lsa_rank >= 0 && my_lsa_rank < lsa_team_size);
     assert(ready == nullptr || !flat);
     // A zero-recv rank (eager mode) pushes nothing but must still launch to
@@ -2930,6 +2937,8 @@ ncclResult_t launch_combine_push(
     p.row_flag_offset = row_flag_offset;
     p.ready = ready;
     p.chunk_width_elems = chunk_width_elems;
+    p.chunk_begin = chunk_begin;
+    p.chunk_end = chunk_end;
     p.push_done = push_done;
 
     if (unfused_sync) NCCLCHECK(jit::launch_lsa_head_sync(dcomm, head_sync_flag, stream));
@@ -2963,17 +2972,22 @@ ncclResult_t launch_combine_reduce_stage(
     bool backward,
     int32_t* retained_slots,
     bool flat,
+    int col_begin_int4,
+    int col_end_int4,
     uint32_t* push_done) {
     assert(row_bytes > 0 && (row_bytes % 16) == 0);
     assert(sm_count > 0);
     assert(lsa_team_size > 0);
+    assert(0 <= col_begin_int4 && col_begin_int4 < col_end_int4 && col_end_int4 <= row_bytes / 16);
     // A rank with no source tokens has no local reduction work and may have null output storage. A reduce that
     // counts its call still launches.
     if (num_combined_tokens == 0 && push_done == nullptr) {
         return ncclSuccess;
     }
     assert(!backward || top_k > 0);
-    assert(!backward || combined_topk_weights != nullptr || num_combined_tokens == 0);
+    // A split reduce gathers the weights in one of its launches only.
+    assert(!backward || combined_topk_weights != nullptr || num_combined_tokens == 0 || col_begin_int4 != 0 ||
+           col_end_int4 != row_bytes / 16);
 
     const unsigned int grid = local_permute_grid(sm_count, shuffle_sms);
 
@@ -2990,6 +3004,8 @@ ncclResult_t launch_combine_reduce_stage(
     p.row_bytes = row_bytes;
     p.combined_topk_weights = combined_topk_weights;
     p.top_k = top_k;
+    p.col_begin_int4 = col_begin_int4;
+    p.col_end_int4 = col_end_int4;
     p.push_done = push_done;
 
     return ::nccl_ep::ht::jit::launch_combine_reduce_stage(

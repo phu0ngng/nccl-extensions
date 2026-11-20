@@ -7692,6 +7692,8 @@ static int32_t* ht_combine_retained_slots(ncclEpGroup_t group, ncclEpHandle_t ha
 struct CombineSignalArgs {
     const int32_t* ready = nullptr;
     int chunk_width_elems = 0;  // resolved chunk width in hidden elements, whole push tiles; the push launches with it as is
+    int num_chunks = 1;
+    int chunk_int4 = 0;
 };
 
 static ncclResult_t combineSignalFail(const char* message) {
@@ -7755,6 +7757,8 @@ static ncclResult_t resolveCombineSignal(
                                        signal_tensor));
     signal_args.ready = static_cast<const int32_t*>(signal_tensor.data);
     signal_args.chunk_width_elems = chunk_bytes / static_cast<int>(ncclTypeSize(x->datatype));
+    signal_args.num_chunks = num_chunks;
+    signal_args.chunk_int4 = chunk_bytes / 16;
     return ncclSuccess;
 }
 
@@ -8329,67 +8333,108 @@ ncclResult_t ncclEpCombine(
                                 "recreate the group\n");
                 return ncclInternalError;
             }
+            const auto push = [&](int chunk_begin, int chunk_end, int push_sms, uint32_t* done) {
+                return nccl_ep::ht::launch_combine_push(
+                    reinterpret_cast<void* const*>(group->ht_buffers.combine_expert_input_token_buffer_ptrs),
+                    x->data,
+                    handle->ht.flat2em_slot_map,
+                    handle->ht.recv_slot_to_src,
+                    handle->ht.num_tokens_for_experts,
+                    group->gin_config.d_dcomm,
+                    group->ht_buffers.dispatch_grid_barrier_counter, // head gate (idle during combine)
+                    group->ht_buffers.combine_grid_barrier_counter,  // tail elect-last-block
+                    handle->num_topk,
+                    row_bytes,
+                    num_tokens,  // caller EM buffer rows: slot backstop in the kernel
+                    group->lsa_rank,
+                    static_cast<int>(group->config.max_dispatch_tokens_per_rank),
+                    team_size,
+                    group->nRanks,
+                    group->device_sm,
+                    push_sms,
+                    0u,
+                    stream,
+                    x->datatype,
+                    mxfp8_combine ? NCCL_EP_COMB_QUANT_MXFP8 : NCCL_EP_COMB_QUANT_NONE,
+                    signal_args.ready,
+                    signal_args.chunk_width_elems,
+                    chunk_begin,
+                    chunk_end,
+                    backward_combine ? static_cast<const float*>(topk_weights->data) : nullptr,
+                    backward_combine ? handle->ht.srcpos_map : nullptr,
+                    backward_combine,
+                    unfused_sync,
+                    // Dynamic row claiming from the handle's token count; threshold defaults to 512 here.
+                    static_cast<unsigned long>(handle->num_tokens) >=
+                        (group->env.ht_combine_dynamic_claim_min_tokens.is_set
+                             ? group->env.ht_combine_dynamic_claim_min_tokens.value.ul
+                             : 512UL),
+                    nccl_ep_env_flag_on(group->env.nucs),
+                    flat_combine,
+                    em_drop ? group->ht_buffers.ipc_combine_prob_offset - group->ht_buffers.ipc_combine_token_offset
+                            : 0,
+                    done,
+                    &group->last_combine_push_launch);
+            };
+            const auto reduce = [&](int col_begin_int4, int col_end_int4, int reduce_sms, unsigned int shuffle_sms,
+                                    bool gather_weights, uint32_t* done) {
+                return nccl_ep::ht::launch_combine_reduce_stage(
+                    combined_x->data,
+                    staging,
+                    self_topk_idx,
+                    handle->num_topk,
+                    group->num_local_experts,
+                    group->lsa_team_size * group->num_local_experts,
+                    num_combined_tokens,
+                    team_size,
+                    row_bytes,
+                    reduce_sms,
+                    shuffle_sms,
+                    stream,
+                    x->datatype,
+                    mxfp8_combine ? NCCL_EP_COMB_QUANT_MXFP8 : NCCL_EP_COMB_QUANT_NONE,
+                    backward_combine && gather_weights ? static_cast<float*>(combined_topk_weights->data) : nullptr,
+                    backward_combine ? handle->num_topk : 0,
+                    backward_combine,
+                    retained_slots,
+                    flat_combine,
+                    col_begin_int4,
+                    col_end_int4,
+                    done);
+            };
+            const int sms = static_cast<int>(group->device_sm_count);
+            const int row_int4 = row_bytes / 16;
             // Push combine is a comm kernel (NVLink push), so it uses the combine SM budget.
-            NCCLCHECK(nccl_ep::ht::launch_combine_push(
-                reinterpret_cast<void* const*>(group->ht_buffers.combine_expert_input_token_buffer_ptrs),
-                x->data,
-                handle->ht.flat2em_slot_map,
-                handle->ht.recv_slot_to_src,
-                handle->ht.num_tokens_for_experts,
-                group->gin_config.d_dcomm,
-                group->ht_buffers.dispatch_grid_barrier_counter, // head gate (idle during combine)
-                group->ht_buffers.combine_grid_barrier_counter,  // tail elect-last-block
-                handle->num_topk,
-                row_bytes,
-                num_tokens,  // caller EM buffer rows: slot backstop in the kernel
-                group->lsa_rank,
-                static_cast<int>(group->config.max_dispatch_tokens_per_rank),
-                team_size,
-                group->nRanks,
-                group->device_sm,
-                static_cast<int>(ht_combine_num_sms(group, handle->layout)),
-                0u,
-                stream,
-                x->datatype,
-                mxfp8_combine ? NCCL_EP_COMB_QUANT_MXFP8 : NCCL_EP_COMB_QUANT_NONE,
-                signal_args.ready,
-                signal_args.chunk_width_elems,
-                backward_combine ? static_cast<const float*>(topk_weights->data) : nullptr,
-                backward_combine ? handle->ht.srcpos_map : nullptr,
-                backward_combine,
-                unfused_sync,
-                // Dynamic row claiming from the handle's token count; threshold defaults to 512 here.
-                static_cast<unsigned long>(handle->num_tokens) >=
-                    (group->env.ht_combine_dynamic_claim_min_tokens.is_set
-                         ? group->env.ht_combine_dynamic_claim_min_tokens.value.ul
-                         : 512UL),
-                nccl_ep_env_flag_on(group->env.nucs),
-                flat_combine,
-                em_drop ? group->ht_buffers.ipc_combine_prob_offset - group->ht_buffers.ipc_combine_token_offset
-                        : 0,
-                push_done,
-                &group->last_combine_push_launch));
-            const ncclResult_t reduce_status = nccl_ep::ht::launch_combine_reduce_stage(
-                combined_x->data,
-                staging,
-                self_topk_idx,
-                handle->num_topk,
-                group->num_local_experts,
-                group->lsa_team_size * group->num_local_experts,
-                num_combined_tokens,
-                team_size,
-                row_bytes,
-                static_cast<int>(group->device_sm_count),
-                group->shuffle_sms,
-                stream,
-                x->datatype,
-                mxfp8_combine ? NCCL_EP_COMB_QUANT_MXFP8 : NCCL_EP_COMB_QUANT_NONE,
-                backward_combine ? static_cast<float*>(combined_topk_weights->data) : nullptr,
-                backward_combine ? handle->num_topk : 0,
-                backward_combine,
-                retained_slots,
-                flat_combine,
-                push_done);
+            const int comb_sms = static_cast<int>(ht_combine_num_sms(group, handle->layout));
+            // Split: the push of the last chunk on half the SMs and the reduce of the other chunks on the rest run
+            // together once the push of the other chunks has passed its LSA tail barrier; the reduce of the last chunk
+            // then waits on push_done. It depends only on settings every rank shares, so each rank runs the same
+            // barriers. One whole-row reduce re-arms the pushed-row flags, so a group that uses NCCL_EP_OVERFLOW_DROP
+            // does not split. Only a TMA-store push (LSA teams of 8 or more) leaves its SMs free for the reduce beside
+            // it; a direct-store push issues every store from its SMs and is faster whole.
+            const bool split = push_done != nullptr && signal_args.num_chunks > 1 && !em_drop &&
+                               !nccl_ep::ht::combine_push_signal_direct_store(team_size, row_bytes,
+                                                                              signal_args.chunk_int4 * 16);
+            int last_col_int4 = 0;
+            if (split) {
+                const int last = signal_args.num_chunks - 1;
+                const int last_push_sms = std::max(1, sms / 2);
+                last_col_int4 = signal_args.chunk_int4 * last;
+                NCCLCHECK(push(0, last, comb_sms, nullptr));
+                NCCLCHECK(push(last, signal_args.num_chunks, last_push_sms, push_done));
+                // Enters once every block of the last push has waited for the first push, whose LSA tail barrier has
+                // then seen every peer's head columns land in staging.
+                const ncclResult_t head_status =
+                    reduce(0, last_col_int4, std::max(1, sms - last_push_sms), 0u, true, nullptr);
+                if (head_status != ncclSuccess) {
+                    group->ht_buffers.combine_push_done_stale = true;
+                }
+                NCCLCHECK(head_status);
+            } else {
+                NCCLCHECK(push(0, signal_args.num_chunks, comb_sms, push_done));
+            }
+            const ncclResult_t reduce_status =
+                reduce(last_col_int4, row_int4, sms, group->shuffle_sms, !split, push_done);
             if (push_done != nullptr && reduce_status != ncclSuccess) {
                 group->ht_buffers.combine_push_done_stale = true;
             }

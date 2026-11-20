@@ -1074,8 +1074,9 @@ __global__ void producerKernel(const nv_bfloat16* golden, nv_bfloat16* live, int
             }
         }
         __syncthreads();
-        for (int i = threadIdx.x; i < rows * chunk; i += blockDim.x) {
-            const size_t at = static_cast<size_t>(i / chunk) * hidden + s * chunk + i % chunk;
+        const int width = min(chunk, hidden - s * chunk);  // the last chunk of a row can be partial
+        for (int i = threadIdx.x; i < rows * width; i += blockDim.x) {
+            const size_t at = static_cast<size_t>(i / width) * hidden + s * chunk + i % width;
             live[at] = golden[at];
         }
         __threadfence();
@@ -1247,7 +1248,7 @@ protected:
         }
         if (signal != nullptr) {
             const int chunk = chunk_elems > 0 ? chunk_elems : hidden_;
-            const int chunks = rows_ > 0 ? hidden_ / chunk : 0;
+            const int chunks = rows_ > 0 ? nccl_ep::ceil_div(hidden_, chunk) : 0;
             EXPECT_EQ(cudaMemsetAsync(d_live_, 0xFF, kMaxRecvSlots * hidden_ * sizeof(nv_bfloat16), g_stream),
                       cudaSuccess);
             EXPECT_EQ(cudaMemsetAsync(d_ready_, 0xFF, hidden_ * sizeof(int32_t), g_stream), cudaSuccess);
@@ -1341,20 +1342,26 @@ protected:
 
 // The signaled combine behind its producer equals the plain combine bitwise, forward and backward, for multiple push
 // chunks and the whole row on a four-tile row, with overflow drop and eager sizing (the last two with an empty rank),
-// and for a whole-row chunk of a row that ends in a partial push tile, with the chunks published during the push
-// (chunk-major walk) or before it (row-major). A plain combine of zeroed rows runs first, so a column the signaled
-// push skips keeps a wrong value.
+// and for a row that ends in a partial push tile, as one whole-row chunk and as three chunks of which the last holds
+// the final 832 elements, with the chunks published during the push or before it. The fixed four-tile row also runs
+// its 1024-element chunks through the TMA store, which splits the combine at every team size. A plain combine of
+// zeroed rows runs first, so a column the signaled push skips keeps a wrong value.
 TEST_P(CombineSignalModeTest, MatchesUnsignaledBitwise) {
-    std::vector<int> chunk_elems = {0};
-    if (hidden_ == kSigHidden) {
-        if (mode_ == RecvMode::Fixed) {
-            chunk_elems = {1024, 0};
-        } else {
-            chunk_elems = {mode_ == RecvMode::Drop ? 1024 : 2048};
-        }
+    struct Pass {
+        int chunk;
+        const char* tma_store;
+    };
+    std::vector<Pass> passes = {{1024, "0"}, {0, "0"}};
+    if (hidden_ == kSigHidden && mode_ != RecvMode::Fixed) {
+        passes = {{mode_ == RecvMode::Drop ? 1024 : 2048, "0"}};
     }
-    for (int chunk : chunk_elems) {
-        const int chunks = chunk > 0 ? hidden_ / chunk : 1;
+    if (hidden_ == kSigHidden && mode_ == RecvMode::Fixed) {
+        passes.push_back({1024, "1"});
+    }
+    for (const Pass& pass : passes) {
+        const int chunk = pass.chunk;
+        ScopedEnv store("NCCL_EP_TEST_COMBINE_PUSH_TMA_STORE", pass.tma_store);
+        const int chunks = chunk > 0 ? nccl_ep::ceil_div(hidden_, chunk) : 1;
         ncclEpSignal_t sig = make_signal(chunks);
         sig.granularity = chunk;  // 0 = whole row; exercises the struct granularity override
         for (bool backward : {false, true}) {
@@ -1369,7 +1376,8 @@ TEST_P(CombineSignalModeTest, MatchesUnsignaledBitwise) {
                 combine(nullptr, backward, &rc, t_live_, chunk);
                 ASSERT_EQ(rc, ncclSuccess);
                 EXPECT_EQ(combine(&sig, backward, &rc, nullptr, chunk), base)
-                    << "chunk " << chunk << " backward " << backward << " producer done " << done;
+                    << "chunk " << chunk << " TMA store " << pass.tma_store << " backward " << backward
+                    << " producer done " << done;
                 ASSERT_EQ(rc, ncclSuccess);
             }
             producer_done_ = false;
