@@ -2767,7 +2767,8 @@ ncclResult_t launch_dispatch_pull(
 
 size_t dispatch_pull_smem_bytes(int hidden_int4) {
     return static_cast<size_t>(::nccl_ep::ht::jit::pull_smem_bytes_per_warp(hidden_int4) +
-                               ::nccl_ep::ht::jit::pull_static_smem_bytes_per_warp());
+                               ::nccl_ep::ht::jit::pull_static_smem_bytes_per_warp()) +
+           ::ht_ep::kPullStageAlign;
 }
 
 size_t dispatch_pull_chunk_table_bytes(int lsa_team_size, int tokens_per_rank) {

@@ -47,7 +47,7 @@
 //
 // Contract (all calls warp-collective, 32 lanes; kRowBytes must be a multiple of 16):
 //   using P = PullTmaStage<kRowBytes>;
-//   P p; p.init(lane, warp_smem);          // per-warp setup; mbarrier_init here
+//   P p; pull_stages_init<false>(lane, smem, warps, w, p, p); // per-warp setup; mbarrier_init here
 //   P::block_init_fence();                 // driver: barrier+fence after ALL warps init
 //   for (recv token t) {
 //     p.load(remote_row_ptr);              // ingest the remote row
@@ -55,7 +55,7 @@
 //     bulk_wait_reads(lane);               // release the smem buffer for the next row
 //   }
 //   bulk_drain(lane);                      // once, before the block exits
-// Driver lays out dynamic smem as warpId * P::smem_bytes_per_warp (16B-aligned base).
+// Drivers lay out dynamic smem with pull_stages_init from a kPullStageAlign-aligned base.
 namespace ht_ep {
 
 // Compile-time scheduling avoids tail-indexing overhead that can regress coarse-kernel performance.
@@ -162,25 +162,33 @@ __device__ __forceinline__ void bulk_drain(int lane) {
     __syncwarp();
 }
 
+// Pull-stage row alignment: on H100 a bulk copy from or to a row that is not 128B-aligned runs slower.
+constexpr int kPullStageAlign = 128;
+// Dynamic smem of one warp's stage: its row padded to kPullStageAlign, plus its mbarrier.
+__host__ __device__ constexpr int pull_stage_bytes(int row_bytes) {
+    return nccl_ep::align(row_bytes, kPullStageAlign) + static_cast<int>(sizeof(uint64_t));
+}
+
 // TMA (cp.async.bulk) read -> per-warp smem row, then TMA-store scatter to each EM
 // slot. Used for both the token row and the QUANT_FWD scale row.
 template <int kRowBytes>
 struct PullTmaStage {
     static_assert(kRowBytes > 0 && (kRowBytes % 16) == 0,
                   "PullTmaStage: row must be a non-zero multiple of 16B (cp.async.bulk granularity)");
-    // One 16B-aligned row buffer + one mbarrier per warp.
-    static constexpr int smem_bytes_per_warp = kRowBytes + 16;
+    static constexpr int smem_bytes_per_warp = pull_stage_bytes(kRowBytes);
+    static constexpr int kRowStride = smem_bytes_per_warp - static_cast<int>(sizeof(uint64_t));
 
     int lane_;
     uint32_t phase_;
     uint8_t* buf_;
     uint64_t* mbar_;
 
-    __device__ __forceinline__ void init(int lane, uint8_t* warp_smem) {
+    // Warp w's row at rows + w * kRowStride and its mbarrier at mbars[w].
+    __device__ __forceinline__ void init(int lane, uint8_t* rows, uint64_t* mbars, int w) {
         lane_ = lane;
         phase_ = 0;
-        buf_ = warp_smem;
-        mbar_ = reinterpret_cast<uint64_t*>(warp_smem + kRowBytes);
+        buf_ = rows + static_cast<size_t>(w) * kRowStride;
+        mbar_ = mbars + w;
         if (lane_ == 0) cuda::ptx::mbarrier_init(mbar_, 1);
     }
     // Make the mbarrier inits visible to the async proxy before any load; call once
@@ -220,6 +228,20 @@ struct PullTmaStage {
         }
     }
 };
+
+// Pull stages of `warps` warps from a kPullStageAlign-aligned base: every token row, then every scale row
+// (kScale), then all their mbarriers. Spans warps * smem_bytes_per_warp summed over the stages used.
+template <bool kScale, class Token, class Scale>
+__device__ __forceinline__ void pull_stages_init(int lane, uint8_t* smem, int warps, int w, Token& token,
+                                                 Scale& scale) {
+    uint8_t* const scale_rows = smem + static_cast<size_t>(warps) * Token::kRowStride;
+    const int scale_stride = kScale ? Scale::kRowStride : 0;
+    uint64_t* const mbars = reinterpret_cast<uint64_t*>(scale_rows + static_cast<size_t>(warps) * scale_stride);
+    token.init(lane, smem, mbars, w);
+    if constexpr (kScale) {
+        scale.init(lane, scale_rows, mbars + warps, w);
+    }
+}
 
 // Conditionally allocate compile-time arrays only when enabled.
 template <bool ENABLE, int N>
@@ -6647,9 +6669,9 @@ struct combine_push_launch_shape_t {
 __host__ __device__ constexpr combine_push_launch_shape_t combine_push_launch_shape(
     bool flat, bool direct_store, int row_bytes, int row_int4, int chunk_size, int smem_cap) {
     if (flat) {
-        const int fit = smem_cap / (row_bytes + 16);
+        const int fit = smem_cap / pull_stage_bytes(row_bytes);
         const int slots = fit < kCombinePushMaxSlots ? fit : kCombinePushMaxSlots;
-        return {slots, slots * (row_bytes + 16), true};
+        return {slots, slots * pull_stage_bytes(row_bytes), true};
     }
     if (direct_store) {
         return {kCombinePushMaxSlots, 0, true};
@@ -8328,19 +8350,14 @@ __device__ __forceinline__ void dispatch_pull(
     __shared__ int32_t s_active[kPayloadWarps][kPullDispatchMaxActive];
     __shared__ int s_count[kPayloadWarps];
     // Per-pull-warp policy staging.
-    extern __shared__ uint8_t s_policy[];
+    extern __shared__ __align__(kPullStageAlign) uint8_t s_policy[];
 
     // One transfer policy per pull warp; smem policies publish their mbarrier
     // inits before the block-wide fence, which every warp (incl. pad) must reach.
     Policy p;
     ScalePolicy sp;
     if (!is_pad && !is_map) {
-        p.init(lane, s_policy + static_cast<size_t>(payload_warp) * Policy::smem_bytes_per_warp);
-        if constexpr (kScaleTma) {
-            sp.init(lane, s_policy +
-                              static_cast<size_t>(kPayloadWarps) * Policy::smem_bytes_per_warp +
-                              static_cast<size_t>(payload_warp) * ScalePolicy::smem_bytes_per_warp);
-        }
+        pull_stages_init<kScaleTma>(lane, s_policy, kPayloadWarps, payload_warp, p, sp);
     }
     Policy::block_init_fence();
 
@@ -10798,17 +10815,13 @@ __device__ __forceinline__ void dispatch_pull_flat(const dispatch_pull_param_t& 
     using ScaleStage = PullTmaStage<kScaleTma ? ScaleTmaRowBytes : 16>;
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    extern __shared__ uint8_t smem[];
+    extern __shared__ __align__(kPullStageAlign) uint8_t smem[];
     TokenStage token_stage;
     ScaleStage scale_stage;
     const bool is_map = warp < kMapWarps;
     const int payload_warp = warp - kMapWarps;
     if (!is_map) {
-        token_stage.init(lane, smem + payload_warp * TokenStage::smem_bytes_per_warp);
-        if constexpr (kScaleTma) {
-            scale_stage.init(lane, smem + kPayloadWarps * TokenStage::smem_bytes_per_warp +
-                                       payload_warp * ScaleStage::smem_bytes_per_warp);
-        }
+        pull_stages_init<kScaleTma>(lane, smem, kPayloadWarps, payload_warp, token_stage, scale_stage);
     }
     TokenStage::block_init_fence();
     flat_dispatch_head<FusedMap>(p);
@@ -10875,9 +10888,9 @@ __device__ __forceinline__ void combine_push_flat(const combine_push_param_t& p)
     using Stage = PullTmaStage<HiddenInt4 * 16>;
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    extern __shared__ uint8_t smem[];
+    extern __shared__ __align__(kPullStageAlign) uint8_t smem[];
     Stage stage;
-    stage.init(lane, smem + warp * Stage::smem_bytes_per_warp);
+    pull_stages_init<false>(lane, smem, PushWarps, warp, stage, stage);
     Stage::block_init_fence();
     if (!p.unfused_sync) {
         lsa_grid_head_gate(p.dcomm, p.head_sync_flag);

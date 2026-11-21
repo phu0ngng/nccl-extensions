@@ -563,8 +563,8 @@ inline std::string pull_stage_literal(int hidden_int4) {
 // Per-pull-warp staging: token row buffer + mbarrier, plus the scale-row region when
 // the QUANT_FWD scale row is moved by TMA (scale_tma_row_bytes != 0).
 inline int pull_smem_bytes_per_warp(int hidden_int4, int scale_tma_row_bytes = 0) {
-    const int per_warp = hidden_int4 * 16 + 16; // row buffer + mbarrier
-    const int scale_per_warp = scale_tma_row_bytes ? (scale_tma_row_bytes + 16) : 0;
+    const int per_warp = ::ht_ep::pull_stage_bytes(hidden_int4 * 16);
+    const int scale_per_warp = scale_tma_row_bytes ? ::ht_ep::pull_stage_bytes(scale_tma_row_bytes) : 0;
     return per_warp + scale_per_warp;
 }
 
@@ -593,7 +593,8 @@ inline size_t pull_static_smem_bytes(int payload_warps, int map_only_warps, bool
         const int scratch_warps = map_only_warps > 0 ? map_only_warps : payload_warps;
         static_bytes = (scratch_warps + 4) * sizeof(int);
     }
-    return nccl_ep::align<size_t>(static_bytes, 16);
+    // The static region ends on the kPullStageAlign-aligned dynamic smem base.
+    return nccl_ep::align<size_t>(static_bytes, ::ht_ep::kPullStageAlign);
 }
 
 // Largest pull-warp count (payload + map_only_warps) whose smem fits the device cap. Each
@@ -647,7 +648,7 @@ inline int pull_scale_tma_row_bytes(int hidden_int4, ncclEpDispQuant_t recipe, i
     if (recipe != NCCL_EP_DISP_QUANT_FWD) return 0;
     if (scale_row_bytes <= 0 || (scale_row_bytes % 16) != 0) return 0;
     const size_t one_warp = static_cast<size_t>(pull_smem_bytes_per_warp(hidden_int4, scale_row_bytes) +
-                                                pull_static_smem_bytes_per_warp());
+                                                pull_static_smem_bytes_per_warp()) + ::ht_ep::kPullStageAlign;
     if (one_warp * static_cast<size_t>(std::max(1, blocks_per_sm)) > smem_optin) return 0;
     return scale_row_bytes;
 }
