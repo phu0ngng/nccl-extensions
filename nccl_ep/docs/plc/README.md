@@ -8,6 +8,7 @@ exclusion without an explicit review.
 
 - [375: Hierarchical dispatch](375-ll-hierarchical-dispatch/README.md) — illustrated design, shared protocol, selection policy, kernel walkthrough, and performance evidence.
 
+- [429: HT dispatch and combine readiness signals](429-ht-signals/README.md) - per-tile dispatch and per-chunk combine flags for expert-major pull-push, and the combine as one programmatic chain.
 - [HT scan workspace ownership](ht-scan-workspace.md) — group-shared update-only metadata scan buffers.
 - [Attention-FFN Disaggregation (AFD) for Low-Latency EP](attention-ffn-disaggregation/README.md) — partitions one LL communicator into token-owning attention ranks and expert-owning FFN ranks, with role-checked C/Python APIs.
 - [271: Low latency LSA FP8 dispatch optimization](271-ll-lsa-fp8-dispatch/README.md) — shared quantization reuse, compact block geometry, vector stores, and capacity fallback.

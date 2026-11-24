@@ -39,6 +39,7 @@ TEST_BINARIES := \
         $(DST_DIR)/test_ll_dispatch_policy \
         $(DST_DIR)/test_ep_bench_recv_budget \
         $(DST_DIR)/test_cft_driver_api \
+        $(DST_DIR)/test_ht_signal \
         $(DST_DIR)/test_elastic_buffer \
         $(DST_DIR)/test_handle_maps \
         $(DST_DIR)/test_ht_bwd \
@@ -81,6 +82,8 @@ $(DST_DIR)/test_ep_bench_recv_budget: test_ep_bench_recv_budget.cpp $(NCCL_EP_SR
 $(DST_DIR)/test_ht_compact_prob: NVLDFLAGS := $(NCCL_EP_LIBDIR)/libnccl_ep.a $(filter-out -lnccl_ep,$(NVLDFLAGS))
 $(DST_DIR)/test_ht_compact_prob: $(NCCL_EP_LIBDIR)/libnccl_ep.a
 $(DST_DIR)/test_ht_compact_prob.o: $(NCCL_EP_SRCDIR)/device/ht_ep_adapter.cuh $(NCCL_EP_SRCDIR)/ht_compact_prob.h
+
+$(DST_DIR)/test_ht_signal.o: $(NCCL_EP_SRCDIR)/device/device_primitives.cuh
 
 # This test also probes the private TMA setup helper used by group creation.
 $(DST_DIR)/test_ht_dispatch_async: NVLDFLAGS := $(NCCL_EP_LIBDIR)/libnccl_ep.a $(filter-out -lnccl_ep,$(NVLDFLAGS))

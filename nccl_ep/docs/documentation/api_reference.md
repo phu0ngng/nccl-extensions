@@ -432,6 +432,80 @@ ncclResult_t ncclEpDispatch(
 );
 ```
 
+### Dispatch tile completion
+
+Set `ncclEpDispatchOutputs_t.dispatch_signal` to let a consumer on the same GPU (for example the FC1 GEMM) start on
+output tiles before the dispatch ends. `nullptr` keeps the unsignaled path. Both signal fields need
+`NCCL_EP_API_VERSION` >= 5.
+
+**Requirements**
+
+- HT expert-major pull dispatch: the pull/push flow (`ncclEpGroupConfig_t::ht_flow`, or AUTO or
+  `NCCL_EP_HT_PULL_PUSH=1` selecting it) within one LSA team, in either pass direction. A group of several LSA teams
+  returns `ncclInvalidUsage`; any other unsupported group returns `ncclInvalidArgument`.
+- A handle created with a per-expert alignment that `granularity` divides.
+- Fused sync: `NCCL_EP_HT_UNFUSED_SYNC` is not supported; a signaled dispatch there returns `ncclInvalidArgument`.
+- A forward dispatch that builds its maps (pull-count): `ceil(lsa_team_size * ceil(max_dispatch_tokens_per_rank / 32) /
+  32) * 4 <= 16384`, else `ncclInvalidArgument`.
+- The `ncclEpSignal_t` is read at call time. The `signal` memory stays valid until the dispatch and its consumer
+  complete on `stream`.
+
+**`ncclEpSignal_t`** (shared with the combine signal)
+
+| Field | Contract |
+|---|---|
+| `granularity` | Rows per tile: a power of two up to 32768 that divides the handle's per-expert alignment |
+| `unit` | `NCCL_EP_SIGNAL_UNIT_AUTO` (default) or `NCCL_EP_SIGNAL_UNIT_ROWS`; any other value returns `ncclInvalidArgument` |
+| `signal` | Bound, 4-byte aligned device int32 tensor of at least `ceil(outputs.tokens.sizes[0] / granularity)` entries: sized for the declared output rows, not the rows received. A rank whose `outputs.tokens` has no rows may pass any tensor, empty or unbound |
+
+**Protocol**
+
+1. Reset `signal` to -1 before each dispatch.
+2. Tile `t` is rows `[t * granularity, (t + 1) * granularity)` of the padded output. Once a same-GPU acquire load reads
+   `signal[t] == t`, its tokens, weights and scales, padding included, are visible (a TMA reader adds
+   `fence.proxy.async`).
+3. The published rows are `min(recv_total_counter, outputs.tokens.sizes[0])`, further clamped to
+   `max_recv_tokens_per_rank` under `NCCL_EP_OVERFLOW_DROP` (`ncclEpLayoutInfo_t::recv_total_counter` is the padded
+   total, pre-drop). Tiles `[0, ceil(published rows / granularity))` are published, approximately in row order;
+   under drop the last one can be partial. Later entries stay -1. Take `recv_total_counter` of this routing from:
+   - `ncclEpUpdateHandle`: complete before the dispatch starts.
+   - This forward dispatch's `layout_info` (HT count mode): the dispatch writes it and `expert_offsets` with relaxed
+     stores while the consumer may already run, and until then they keep their old values. Reset both to -1 before
+     the dispatch and poll them with GPU-scope relaxed or acquire loads until they are not -1, or read them after
+     `griddepcontrol.wait`. `expert_counters` is valid only after `griddepcontrol.wait`.
+   - A backward dispatch writes no `layout_info`: its consumer uses the count of the forward whose maps it follows.
+4. Wait only for those tiles. A rank that receives no token publishes none; waiting for every allocated flag can
+   hang.
+
+**Consumer launch.** A kernel launched next on `stream` with `cudaLaunchAttributeProgrammaticStreamSerialization`
+starts once every dispatch block has passed the cross-rank barrier at its start. The consumer:
+
+1. reads only tiles whose flag it has acquired;
+2. executes `griddepcontrol.wait` before it exits or calls `griddepcontrol.launch_dependents`, so later work on
+   `stream` also follows the dispatch;
+3. is not a signaled combine (see "Combine readiness signaling");
+4. writes no memory the dispatch reads or writes on any rank before its `griddepcontrol.wait`. Peers still pull
+   `inputs` (tokens, weights, scales), so keep them alive and unmodified until then.
+
+A consumer on another stream leaves room for every dispatch block to be resident, or the ranks can hang.
+
+**Dispatch launch.** A signaled forward dispatch that builds its maps is a programmatic dependent of the kernel
+before it on `stream` and runs `griddepcontrol.wait` at entry. That kernel completes only after every earlier kernel
+on `stream`: it is launched without programmatic stream serialization, or runs its own `griddepcontrol.wait`. Every
+other dispatch launches plainly.
+
+**Limits**
+
+- A signaled dispatch of a fixed-budget group allocates nothing, so every one of them can be captured, including the
+  first. An eager group (`max_recv_tokens_per_rank` = `NCCL_EP_AUTO`) cannot be captured; it allocates or grows the
+  scratch before a signaled dispatch whose handle pads each expert zone past it, which waits for `stream` to drain.
+
+**Memory.** Groups that can carry a dispatch signal reserve its buffers at creation, whether or not a call
+requests one: a chunk table of 40 bytes per source chunk (`lsa_team_size * ceil(max_dispatch_tokens_per_rank / 32)`
+chunks) per group. A fixed-budget group also reserves the group-shared per-call scratch at creation, at about 6
+bytes per `max_recv_tokens_per_rank` row; an eager group allocates it at its first signaled dispatch, sized to its
+handles' padded rows.
+
 ### `ncclEpCombine()`
 
 Perform EP combine: gather expert outputs and return in original token order.
@@ -473,6 +547,80 @@ ncclResult_t ncclEpCombine(
     cudaStream_t stream
 );
 ```
+
+### Combine readiness signaling
+
+Set `ncclEpCombineInputs_t.combine_signal` to let the push combine overlap the producer of `inputs.tokens` (for
+example the FC2 GEMM). `nullptr` keeps the unsignaled path.
+
+**Requirements**
+
+- HT expert-major push combine: the pull/push flow, as for the dispatch signal, within one LSA team. A group of
+  several LSA teams returns `ncclInvalidUsage`; any other unsupported call returns `ncclInvalidArgument`.
+- `NCCL_EP_COMB_QUANT_NONE`, `send_only == 0`, and no `NCCL_EP_HT_UNFUSED_SYNC`.
+- A 2D `inputs.tokens` whose rows are a multiple of 16 bytes.
+- Fixed or eager receive sizing, `NCCL_EP_OVERFLOW_DROP` and backward combine are supported.
+- The `ncclEpSignal_t` is read at call time. The `signal` memory stays valid until the combine completes on `stream`.
+
+**`ncclEpSignal_t`** (shared with the dispatch signal)
+
+| Field | Contract |
+|---|---|
+| `granularity` | Push chunk width in hidden elements: a positive multiple of the push tile, else `ncclInvalidArgument`. A push tile is `min(ceil(row bytes / 512), 4) * 512` bytes (1024 BF16 elements for rows of at least 2048 bytes). Chunk `s` is columns `[s * granularity, min((s + 1) * granularity, hidden))`, so the signal has `ceil(hidden / granularity)` flags. Match it on every rank |
+| `unit` | `NCCL_EP_SIGNAL_UNIT_AUTO` (default) or `NCCL_EP_SIGNAL_UNIT_COLUMNS`; any other value returns `ncclInvalidArgument` |
+| `signal` | Bound, 4-byte aligned device int32 tensor of at least one entry per chunk |
+
+For example, with BF16 hidden 4096 and `granularity` 2048, the signal has two flags: publish `signal[0] = 0` once
+columns [0, 2048) of every received row are written, then `signal[1] = 1` once [2048, 4096) are.
+
+**Protocol**
+
+1. Reset `signal` to -1 before the producer starts.
+2. Once columns of chunk `s` of every received expert-major row are written and fenced, the producer release-stores
+   `signal[s] = s` at GPU scope.
+3. The combine pushes chunk by chunk as the flags arrive. The output matches the unsignaled combine for finite
+   values. A flag that is never set traps after the device timeout.
+
+**Launch.** The push is the programmatic dependent of the kernel before it on `stream`, with no
+`griddepcontrol.wait` at entry: it starts when that kernel calls `griddepcontrol.launch_dependents`, or ends.
+
+1. The kernel directly before the combine triggers only once every earlier kernel on `stream` has completed: it is
+   launched without programmatic stream serialization, or it triggers after its own `griddepcontrol.wait`.
+2. That kernel is not a signaled dispatch, whose dependent starts while the dispatch still writes the maps the push
+   reads.
+3. The reset of `signal`, and `inputs.topk_weights`, are complete before the producer starts.
+
+The push and the reduce are a programmatic chain: the reduce starts beside the push, reads the staging once the push
+has passed its LSA tail barrier, and completes after the push, which completes after the producer. A producer on
+another stream must have every block resident before the push starts, or the push can fill the GPU and the ranks
+hang.
+
+A row of two or more chunks runs the chain in two parts, unless the group uses `NCCL_EP_OVERFLOW_DROP`: the push of
+every chunk but the last on the combine SM budget; then the push of the last chunk, beside the reduce of the other
+chunks on the shuffle SMs (as an unsplit reduce); then the reduce of the last chunk. The last chunk's push and reduce
+run on the SMs of the other chunks' push and reduce unless `NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS` or
+`NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS` sets them (1 to the device SM count, read at group creation; another value
+is ignored with a warning). These two may differ across ranks. Each push ends on the LSA tail barrier. Every rank
+therefore passes `combine_signal` to a combine, or none does: a rank that splits runs one more LSA barrier than a rank
+that does not, and the ranks hang.
+
+The reduce lets the next kernel on `stream` start at its entry, as a signaled dispatch does for its consumer. A
+kernel launched next with programmatic stream serialization runs `griddepcontrol.wait` before it exits or triggers,
+and until then neither reads nor writes `outputs` or any memory the combine reads or writes on any rank. A kernel
+therefore stays between a signaled combine and the next one. The reduce also writes `outputs`, `outputs.topk_weights`
+included, while the kernel before the combine may still run. That kernel does not access `outputs`, and no memory it
+reads or writes is freed and handed back as `outputs` (as a caching allocator may do on the same stream).
+
+**Streams and memory.** The push waits for its predecessor on the combine stream. When the producer runs on another
+stream, `signal[s] == s` establishes only that chunk `s` is ready: the producer may still run after it publishes the
+last flag, so order the producer's stream independently (an event or stream wait) before freeing or reusing
+`inputs.tokens`. The flags are GPU-scope, so the producer and the combine must be in the same CUDA memory
+synchronization domain.
+
+If the reduce launch of a signaled combine fails, every later signaled combine on the group returns
+`ncclInternalError`: recreate the group.
+
+The combine signal reserves no memory. See the [PLC document](../plc/429-ht-signals/README.md) for the design.
 
 ### AFD role wrappers
 

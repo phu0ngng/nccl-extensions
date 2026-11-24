@@ -548,6 +548,7 @@ inline ncclResult_t launch_combine_push(
     const bool mxfp8 = recipe == NCCL_EP_COMB_QUANT_MXFP8;
     // MXFP8 sizes the per-warp smem row by the in-place quantize buffer.
     const int row_int4 = mxfp8 ? ::ht_ep::combine_push_mxfp8_fused_int4(hidden_int4) : hidden_int4;
+    const bool signaled = param.ready != nullptr;
     // Size the block so the per-warp smem row buffer fits the device opt-in cap, before building
     // the source so __launch_bounds__ matches the actual block (right register budget per block
     // size, not a fixed max that would spill small blocks).
@@ -558,7 +559,10 @@ inline ncclResult_t launch_combine_push(
     // width in hidden elements; unset: see ht_combine_push_default_whole_row. 0 forces the whole
     // row; other values round up to whole tiles, clamped.
     int requested_int4 = 0;
-    if (!param.flat && !mxfp8) {
+    if (signaled && !param.flat && !mxfp8) {
+        // A signaled push takes the caller's chunk, not the environment.
+        requested_int4 = param.chunk_int4;
+    } else if (!param.flat && !mxfp8) {
         const std::string chunk_env = ::nccl_ep::jit::env_value("NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE");
         const ::nccl_ep::CombinePushChunkResolution chunk_req = ::nccl_ep::resolve_combine_push_chunk(
             device_sm, ep_size, static_cast<int>(::nccl_ep::ncclTypeSize(token_dtype)), chunk_env);
@@ -601,8 +605,14 @@ inline ncclResult_t launch_combine_push(
         return ncclInvalidArgument;
     }
 
+    // A push of part of a signaled row's chunks, in a split combine.
+    const bool chunk_range =
+        signaled && (param.chunk_begin > 0 ||
+                     param.chunk_end < ::ht_ep::combine_push_num_chunks(hidden_int4, kernel_chunk_size));
+
     int ring = 0;
-    if (!param.flat && !mxfp8 && !direct_store && (force_ring || ::nccl_ep::ht_combine_push_ring_enabled(device_sm))) {
+    if (!param.flat && !mxfp8 && !direct_store && !signaled &&
+        (force_ring || ::nccl_ep::ht_combine_push_ring_enabled(device_sm))) {
         ring = ::ht_ep::combine_push_ring_depth(row_int4, smem_cap, chunk_size, slots, top_k, param.lsa_team_size);
     }
 
@@ -613,8 +623,9 @@ inline ncclResult_t launch_combine_push(
         name << "combine_push_topk" << top_k << "_h" << hidden_int4
              << ::nccl_ep::jit::token_dtype_name_tag(token_dtype) << ::nccl_ep::jit::combine_recipe_name_tag(recipe)
              << (backward ? "_bwd" : "")
-             << "_c" << chunk_size << (param.claim_dynamic ? "_dyn" : "") << (param.flat ? "_flat" : "")
-             << "_w" << slots << (direct_store ? "_direct" : "");
+             << "_c" << chunk_size << (param.claim_dynamic ? "_dyn" : "") << (signaled ? "_sig" : "")
+             << (chunk_range ? "_chunks" : "") << (param.flat ? "_flat" : "") << "_w" << slots
+             << (direct_store ? "_direct" : "");
         if (ring > 0) {
             name << "_r" << ring;
         }
@@ -632,11 +643,20 @@ inline ncclResult_t launch_combine_push(
                 << backward_literal << ">(p);\n}\n";
             return src.str();
         }
-        src << "  extern __shared__ uint8_t smem_bytes[];\n"
-            << "  ::ht_ep::combine_push<" << top_k << ", " << hidden_int4 << ", " << token_dtype_literal
+        // A split push lets the next launch in at entry; a push of later chunks first waits for the push before it.
+        // A whole push lets it in only when its reduce starts before it completes.
+        src << "  extern __shared__ uint8_t smem_bytes[];\n";
+        if (chunk_range) {
+            src << "  if (p.chunk_begin > 0) {\n    ::nccl_ep::grid_dependency_wait();\n  }\n"
+                << "  if (p.ready) {\n    ::nccl_ep::launch_dependents();\n  }\n";
+        } else if (signaled) {
+            src << "  if (p.push_done) {\n    ::nccl_ep::launch_dependents();\n  }\n";
+        }
+        src << "  ::ht_ep::combine_push<" << top_k << ", " << hidden_int4 << ", " << token_dtype_literal
             << ", " << recipe_literal << ", " << backward_literal << ", " << kernel_chunk_size << ", "
-            << (param.claim_dynamic ? "true" : "false") << ", " << ring << ", "
-            << ::nccl_ep::jit::bool_literal(direct_store) << ">(\n"
+            << (param.claim_dynamic ? "true" : "false") << ", " << (signaled ? "true" : "false") << ", " << ring
+            << ", " << ::nccl_ep::jit::bool_literal(direct_store) << ", "
+            << ::nccl_ep::jit::bool_literal(chunk_range) << ">(\n"
             << "      p.peer_staging_ptrs,\n"
             << "      reinterpret_cast<const uint8_t*>(p.recv_x_em),\n"
             << "      p.flat2em_slot_map,\n"
@@ -655,7 +675,11 @@ inline ncclResult_t launch_combine_push(
             << "      p.topk_weights_em,\n"
             << "      p.srcpos_map,\n"
             << "      p.unfused_sync,\n"
-            << "      smem_bytes);\n"
+            << "      smem_bytes,\n"
+            << "      p.ready,\n"
+            << "      p.chunk_begin,\n"
+            << "      p.chunk_end,\n"
+            << "      p.push_done);\n"
             << "}\n";
         return src.str();
     }();
@@ -676,6 +700,9 @@ inline ncclResult_t launch_combine_push(
                                                 row_int4, slots, chunk_size, ring))
                                           : shape.dynamic_smem_bytes;
     variant.nucs = nucs;
+    variant.programmatic = signaled;
+    // A signaled push starts on SMs that a max-shared-memory GEMM just left, and would keep their minimum-L1 split.
+    variant.prefer_max_l1 = signaled;
 
     std::string error;
     const ::nccl_ep::jit::JitKernelStatus status =
@@ -712,18 +739,28 @@ inline ncclResult_t launch_combine_reduce_stage(
         std::fprintf(stderr, "[nccl_ep jit] combine reduce: unsupported combine recipe %d\n", static_cast<int>(recipe));
         return ncclInvalidArgument;
     }
+    const bool pdl = param.push_done != nullptr;
+    // A column range is one of a split's two reduces, each with its own push's words (see below).
+    const bool column_range = param.col_begin_int4 != 0 || param.col_end_int4 != hidden_int4;
+    assert(!column_range || (pdl && param.retained_slots == nullptr && !flat));
 
     const std::string variant_name = [&] {
         std::ostringstream name;
         name << "combine_reduce_h" << hidden_int4 << ::nccl_ep::jit::token_dtype_name_tag(token_dtype)
              << ::nccl_ep::jit::combine_recipe_name_tag(recipe)
-             << (backward ? "_bwd" : "") << (param.retained_slots ? "_drop" : "");
+             << (backward ? "_bwd" : "") << (param.retained_slots ? "_drop" : "")
+             << (column_range ? "_cols" : "") << (pdl ? "_pdl" : "");
         if (flat) {
             name << "_flat_k" << param.num_topk << "_e" << param.experts_per_rank
                  << "_n" << param.lsa_team_size;
         }
         return name.str();
     }();
+    // With push_done the reduce starts before its push completes: every block counts the call and lets the next launch
+    // in, the grid's last block (it takes no tokens, combine_reduce's kWaitBlocks) only waits for the push's grid so
+    // the reduce completes after it, and the token blocks wait on the push's done word. A split's head reduce waits on
+    // the done word of the push of its columns, and its wait block on the push of the last chunk.
+    assert(!pdl || !flat);
     const std::string source = [&] {
         std::ostringstream src;
         src << "#include \"device/ht_ep.cuh\"\n"
@@ -731,10 +768,19 @@ inline ncclResult_t launch_combine_reduce_stage(
             << "extern \"C\" __launch_bounds__(" << block_dim << ", 1)\n"
             << "__global__ void " << kCombineReduceJitEntryName << "(\n"
             << "    const __grid_constant__ ::ht_ep::combine_reduce_param_t p) {\n"
+            << (pdl ? "  const uint32_t target = ::ht_ep::combine_reduce_count_call(p);\n"
+                      "  ::nccl_ep::launch_dependents();\n"
+                      "  if (blockIdx.x == gridDim.x - 1) {\n"
+                      "    ::nccl_ep::grid_dependency_wait();\n"
+                      "    return;\n"
+                      "  }\n"
+                      "  ::ht_ep::combine_reduce_wait_push(p, target);\n"
+                    : "")
             << "  ::ht_ep::combine_reduce<" << hidden_int4 << ", " << token_dtype_literal << ", "
             << recipe_literal << ", " << backward_literal << ", "
             << ::nccl_ep::jit::bool_literal(param.retained_slots != nullptr)
-            << ", " << ::nccl_ep::jit::bool_literal(flat) << ">(\n"
+            << ", " << ::nccl_ep::jit::bool_literal(flat)
+            << ", " << (pdl ? 1 : 0) << ", " << ::nccl_ep::jit::bool_literal(column_range) << ">(\n"
             << "      reinterpret_cast<uint8_t*>(p.attn_output),\n"
             << "      reinterpret_cast<const uint8_t*>(p.staging),\n"
             << "      p.topk_idx,\n"
@@ -745,7 +791,7 @@ inline ncclResult_t launch_combine_reduce_stage(
             << "      " << (flat ? std::to_string(param.lsa_team_size) : "p.lsa_team_size") << ",\n"
             << "      p.row_bytes,\n"
             << "      p.combined_topk_weights,\n"
-            << "      p.top_k, p.retained_slots);\n"
+            << "      p.top_k, p.retained_slots, p.col_begin_int4, p.col_end_int4);\n"
             << "}\n";
         return src.str();
     }();
@@ -758,6 +804,7 @@ inline ncclResult_t launch_combine_reduce_stage(
     variant.identity = &variant_identity;
     variant.runtime_key = (static_cast<std::uint64_t>(backward) << 63) |
         (static_cast<std::uint64_t>(param.retained_slots != nullptr) << 62) |
+        (static_cast<std::uint64_t>(pdl) << 60) | (static_cast<std::uint64_t>(column_range) << 59) |
         (static_cast<std::uint64_t>(recipe) << 56) |
         (static_cast<std::uint64_t>(token_dtype) << 48) | static_cast<std::uint64_t>(hidden_int4);
     // Keep EM dimensions runtime-configurable; specialize only flat rank decoding.
@@ -768,9 +815,10 @@ inline ncclResult_t launch_combine_reduce_stage(
             variant.runtime_key = ::nccl_ep::jit::runtime_key_mix(variant.runtime_key, value);
         }
     }
-    variant.num_blocks = num_blocks;
+    variant.num_blocks = num_blocks + (pdl ? 1 : 0);  // the wait block
     variant.block_dim = block_dim;
     variant.dynamic_smem_bytes = 0;
+    variant.programmatic = pdl;
 
     std::string error;
     const ::nccl_ep::jit::JitKernelStatus status =

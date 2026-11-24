@@ -294,6 +294,13 @@ OVERFLOW_DROP_PULL_COUNT_FILTER="HtOverflowDropTest.DispatchCombineContinueOnOve
         "LifecycleTest.ImportsRelocatedPreparedHandleMem:LifecycleTest.ImportedHandleSelectsDispatchChunkFromNumTokens"
 [[ -z "${TEST_SUITE}" || "${TEST_SUITE}" == "test_ht_overflow_drop" ]] && \
     run_suite "test_ht_overflow_drop" "EP HT Overflow Drop Tests (Pull-Count)" 4 "${OVERFLOW_DROP_PULL_COUNT_FILTER}"
+# The signal tests skip outside fused pull-push sync, so they run only here and in the scan rerun, plus their
+# multiple-LSA-team rejection with two teams (needs a GIN-capable network).
+if [[ -z "${TEST_SUITE}" || "${TEST_SUITE}" == "test_ht_signal" ]]; then
+    run_suite "test_ht_signal" "EP HT Signal Tests (Pull-Push)"
+    NCCL_EP_HT_PULL_PUSH=0 NCCL_LSA_TEAM_SIZE=2 \
+        run_suite "test_ht_signal" "EP HT Signal Tests (Two LSA Teams)" 4 "SignalLsaTeamTest.*"
+fi
 export NCCL_EP_HT_PULL_PUSH=0
 unset NCCL_LSA_TEAM_SIZE
 
@@ -311,6 +318,8 @@ done
 [[ -z "${TEST_SUITE}" || "${TEST_SUITE}" == "test_ht_overflow_drop" ]] && \
     run_suite "test_ht_overflow_drop" "EP HT Flat Overflow Drop (Pull-Push, Scan)" 4 \
         "HtOverflowDropTest.DispatchCombineContinueOnOverflow"
+[[ -z "${TEST_SUITE}" || "${TEST_SUITE}" == "test_ht_signal" ]] && \
+    run_suite "test_ht_signal" "EP HT Signal Tests (Pull-Push, Scan)"
 export NCCL_EP_HT_PULL_PUSH=0
 unset NCCL_EP_HT_AG_SCAN_MODE
 unset NCCL_LSA_TEAM_SIZE

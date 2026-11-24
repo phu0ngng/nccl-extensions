@@ -54,6 +54,10 @@ struct JitKernelVariant {
     int cluster_dim_x = 1;
     int cluster_dim_y = 1;
     int cluster_dim_z = 1;
+    // Launch as the programmatic dependent (PDL) of the kernel before it on the stream.
+    bool programmatic = false;
+    // Prefer the maximum L1 split of the unified L1/shared memory.
+    bool prefer_max_l1 = false;
 };
 
 // Allocation-free FNV-1a folding used to derive JitKernelVariant::runtime_key

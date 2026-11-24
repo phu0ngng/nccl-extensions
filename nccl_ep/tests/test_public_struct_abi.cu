@@ -102,6 +102,15 @@ void ncclEpDispatchInputs_backwards_compat_test() {
     static_assert(sizeof(ncclEpDispatchInputs_t) == 32);
 }
 
+void ncclEpSignal_backwards_compat_test() {
+    static_assert(offsetof(ncclEpSignal_t, size) == 0);
+    static_assert(offsetof(ncclEpSignal_t, magic) == 4);
+    static_assert(offsetof(ncclEpSignal_t, granularity) == 8);
+    static_assert(offsetof(ncclEpSignal_t, unit) == 12);
+    static_assert(offsetof(ncclEpSignal_t, signal) == 16);
+    static_assert(sizeof(ncclEpSignal_t) == 24);
+}
+
 void ncclEpDispatchOutputs_backwards_compat_test() {
     static_assert(offsetof(ncclEpDispatchOutputs_t, size) == 0);
     static_assert(offsetof(ncclEpDispatchOutputs_t, magic) == 4);
@@ -109,7 +118,8 @@ void ncclEpDispatchOutputs_backwards_compat_test() {
     static_assert(offsetof(ncclEpDispatchOutputs_t, topk_weights) == 16);
     static_assert(offsetof(ncclEpDispatchOutputs_t, scales) == 24);
     static_assert(offsetof(ncclEpDispatchOutputs_t, topk_idx) == 32);
-    static_assert(sizeof(ncclEpDispatchOutputs_t) == 40);
+    static_assert(offsetof(ncclEpDispatchOutputs_t, dispatch_signal) == 40);
+    static_assert(sizeof(ncclEpDispatchOutputs_t) == 48);
 }
 
 void ncclEpCombineInputs_backwards_compat_test() {
@@ -118,7 +128,8 @@ void ncclEpCombineInputs_backwards_compat_test() {
     static_assert(offsetof(ncclEpCombineInputs_t, tokens) == 8);
     static_assert(offsetof(ncclEpCombineInputs_t, topk_weights) == 16);
     static_assert(offsetof(ncclEpCombineInputs_t, scales) == 24);
-    static_assert(sizeof(ncclEpCombineInputs_t) == 32);
+    static_assert(offsetof(ncclEpCombineInputs_t, combine_signal) == 32);
+    static_assert(sizeof(ncclEpCombineInputs_t) == 40);
 }
 
 void ncclEpCombineOutputs_backwards_compat_test() {
@@ -208,6 +219,7 @@ TEST(PublicStructAbiTest, InitializersPopulatePrefix) {
     ncclEpDispatchOutputs_t dispatch_outputs = NCCL_EP_DISPATCH_OUTPUTS_INIT;
     ncclEpCombineInputs_t combine_inputs = NCCL_EP_COMBINE_INPUTS_INIT;
     ncclEpCombineOutputs_t combine_outputs = NCCL_EP_COMBINE_OUTPUTS_INIT;
+    ncclEpSignal_t signal = NCCL_EP_SIGNAL_INIT;
     ncclEpHandleConfig_t handle = NCCL_EP_HANDLE_CONFIG_INIT;
     ncclEpHandleState_t handle_state = NCCL_EP_HANDLE_STATE_INIT;
     ncclEpDispatchConfig_t dispatch = NCCL_EP_DISPATCH_CONFIG_INIT;
@@ -218,6 +230,7 @@ TEST(PublicStructAbiTest, InitializersPopulatePrefix) {
         tensor_alloc, NCCL_EP_TENSOR_ALLOC_CONFIG_SIZE, NCCL_EP_MAGIC);
     expectPublicStructPrefix(group, NCCL_EP_GROUP_CONFIG_SIZE, NCCL_EP_MAGIC);
     EXPECT_EQ(group.version, NCCL_EP_API_VERSION);
+    EXPECT_GE(NCCL_EP_API_VERSION, 5) << "the readiness signals need API version 5";
     expectPublicStructPrefix(layout, NCCL_EP_LAYOUT_INFO_SIZE, NCCL_EP_MAGIC);
     EXPECT_EQ(group.dispatch_num_sms, NCCL_EP_AUTO);
     EXPECT_EQ(group.combine_num_sms, NCCL_EP_AUTO);
@@ -232,6 +245,7 @@ TEST(PublicStructAbiTest, InitializersPopulatePrefix) {
         combine_inputs, NCCL_EP_COMBINE_INPUTS_SIZE, NCCL_EP_MAGIC);
     expectPublicStructPrefix(
         combine_outputs, NCCL_EP_COMBINE_OUTPUTS_SIZE, NCCL_EP_MAGIC);
+    expectPublicStructPrefix(signal, NCCL_EP_SIGNAL_SIZE, NCCL_EP_MAGIC);
     expectPublicStructPrefix(handle, NCCL_EP_HANDLE_CONFIG_SIZE, NCCL_EP_MAGIC);
     expectPublicStructPrefix(
         handle_state, NCCL_EP_HANDLE_STATE_SIZE, NCCL_EP_MAGIC);

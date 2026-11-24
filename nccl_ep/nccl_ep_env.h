@@ -71,6 +71,10 @@ struct ncclEpEnvConfig {
     // 2048 at the read site (nccl_ep.cc), not here.
     ncclEpEnvVar ht_dispatch_dynamic_claim_min_tokens{
         "NCCL_EP_HT_DISPATCH_DYNAMIC_CLAIM_MIN_TOKENS", ncclEpEnvType::ulong};
+    // SMs of the push and of the reduce of the last chunk in a split signaled combine. Unset: the SMs of the
+    // other chunks' push (the combine budget) and reduce.
+    ncclEpEnvVar ht_combine_push_last_chunk_sms{"NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS", ncclEpEnvType::ulong};
+    ncclEpEnvVar ht_combine_reduce_last_chunk_sms{"NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS", ncclEpEnvType::ulong};
     // Count exchange is the default HT path for EM local-permute and Flat handles; set to fall
     // back to the routing-map AllGather + scan path instead. Honored only under
     // meta_exchange_policy AUTO; see

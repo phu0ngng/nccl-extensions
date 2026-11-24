@@ -459,6 +459,17 @@ run_benchmark_suite() {
       NCCL_LSA_TEAM_SIZE="${NP}" "${MPI_CMD[@]}" "${EP_BENCH}" \
       --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 \
       --experts 256 --validate --dispatch-only --mxfp8 --ht-flow pull-push
+    # Signals need one LSA team of all ranks, which holds only on one node.
+    if [[ -z "${HOSTFILE}" ]]; then
+      run_case bench-ht-dispatch-signal-backward "${CASE_TIMEOUT}" env \
+        NCCL_LSA_TEAM_SIZE="${NP}" "${MPI_CMD[@]}" "${EP_BENCH}" \
+        --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 \
+        --experts 256 --validate --ht-flow pull-push --expert-major-alignment 256 --dispatch-signal 256 --backward
+      run_case bench-ht-combine-signal-backward "${CASE_TIMEOUT}" env \
+        NCCL_LSA_TEAM_SIZE="${NP}" "${MPI_CMD[@]}" "${EP_BENCH}" \
+        --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 \
+        --experts 256 --validate --ht-flow pull-push --combine-signal --backward
+    fi
     run_mpi_case bench-ht-mxfp8-combine "${CASE_TIMEOUT}" "${EP_BENCH}" \
       --algorithm high-throughput --layout em --tokens 4096 --hidden 7168 --top-k 8 --experts 256 \
       --ht-flow push-pull --validate --combine-quantization mxfp8

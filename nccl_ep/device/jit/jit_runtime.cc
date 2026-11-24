@@ -549,7 +549,7 @@ CUresult launch_function(
     // LL kernels need cooperative for cg::this_grid().sync() and use a cluster
     // dim of 2 when num_blocks is even.
     // Value-initialize attrs[] so the union/pad bytes are well-defined.
-    CUlaunchAttribute attrs[3]{};
+    CUlaunchAttribute attrs[5]{};
     unsigned int num_attrs = 0;
     if (variant.nucs) {
         if (!ensure_nucs_available()) return CUDA_ERROR_NOT_SUPPORTED;
@@ -564,6 +564,19 @@ CUresult launch_function(
         attrs[num_attrs].value.cooperative = 1;
         ++num_attrs;
     }
+    if (variant.programmatic) {
+        attrs[num_attrs].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+        attrs[num_attrs].value.programmaticStreamSerializationAllowed = 1;
+        ++num_attrs;
+    }
+#if CUDA_VERSION >= 12050
+    // The carveout preference is a hint; older toolkits have no attribute for it.
+    if (variant.prefer_max_l1) {
+        attrs[num_attrs].id = CU_LAUNCH_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT;
+        attrs[num_attrs].value.sharedMemCarveout = CU_SHAREDMEM_CARVEOUT_MAX_L1;
+        ++num_attrs;
+    }
+#endif
     if (needs_cluster) {
         attrs[num_attrs].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
         attrs[num_attrs].value.clusterDim.x = static_cast<unsigned int>(variant.cluster_dim_x);

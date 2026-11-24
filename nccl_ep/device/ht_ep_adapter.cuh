@@ -147,7 +147,8 @@ void pack_topk_idx(
 
 // Fused pull-count: pack the handle-local top-k snapshot to uint16 and accumulate its
 // send-count histogram (per-source-rank and per-expert) in one pass, feeding
-// dispatch_pull_param_t's own_row/own_topk_snapshot inputs directly.
+// dispatch_pull_param_t's own_row/own_topk_snapshot inputs directly. The kernel zeroes the count
+// row first; row_sync is the handle's [2] words, zero between launches.
 template <typename TopkIdxT>
 void pack_topk_and_count_row(
     const TopkIdxT* topk_idx,
@@ -161,7 +162,8 @@ void pack_topk_and_count_row(
     int32_t* cnt_expert,
     int num_sms,
     cudaStream_t stream,
-    int32_t* chunk_counts);
+    int32_t* chunk_counts,
+    int32_t* row_sync);
 
 // ============================================================================
 // Kernel: Convert sparse topk_weights to dense prob (for dispatch input)
@@ -521,12 +523,23 @@ ncclResult_t launch_dispatch_pull(
     int output_expert_base,
     int32_t* retained_slots,
     // Claim MAP chunks dynamically (true) or keep the static chunk assignment (false).
-    bool claim_dynamic);
+    bool claim_dynamic,
+    // Per-tile completion flags (EM only, tile_size 0: off).
+    const dispatch_signal_param_t& signal,
+    // Programmatic dependent of the kernel before it (fused sync only).
+    bool programmatic,
+    // Fused sync: source top-k weights the kernel copies to this rank's staging (count 0: none).
+    const float* stage_weights_src,
+    float* stage_weights_dst,
+    int stage_weights_count);
 
 // Minimum shared-memory bytes launch_dispatch_pull requires for a given row width
 // (int4 units): what a single pull warp needs, static and dynamic. Callers compare this
 // against the device opt-in smem cap; a row that does not fit one warp is unsupported.
 size_t dispatch_pull_smem_bytes(int hidden_int4);
+
+// Bytes of the ordered signaled pull's chunk table for lsa_team_size ranks of tokens_per_rank tokens.
+size_t dispatch_pull_chunk_table_bytes(int lsa_team_size, int tokens_per_rank);
 
 // Push-combine staging row stride (bytes) for a given token row width. The combine
 // input staging must be sized by this so the buffer matches the stride combine_push
@@ -534,6 +547,13 @@ size_t dispatch_pull_smem_bytes(int hidden_int4);
 // in the token row's trailing pad. MXFP8 rows are staged at the BF16 row width; the device
 // stride (comb_stage_push_stride_bytes) rounds the packed row up to 128 B.
 size_t comb_stage_stride_bytes(int row_bytes, bool reserve_prob);
+
+// Push tile width (bytes) of an expert-major push combine of rows of row_bytes; a signaled chunk is whole tiles.
+int combine_push_tile_bytes(int row_bytes);
+
+// Ordered-pull pool bytes per expert bucket a signaled forward dispatch that builds its maps needs, and the pool cap.
+size_t dispatch_pull_order_bucket_bytes(int lsa_team_size, int tokens_per_rank);
+size_t dispatch_pull_order_pool_cap_bytes();
 
 // Push EM combine (mirror of pull EM dispatch). The push kernel does the local
 // gather-reduce + remote push with the head/tail intra-LSA syncs fused in; the reduce
@@ -562,6 +582,13 @@ ncclResult_t launch_combine_push(
     ncclDataType_t token_dtype,
     // MXFP8 quantizes in the push and stages the packed [FP8 H | E8M0 H/32] row.
     ncclEpCombQuant_t combine_recipe,
+    // combine_signal flags (EM only, null: plain push); see combine_push_param_t.
+    const int32_t* ready,
+    // Signaled push: the chunk width in int4, whole push tiles (combine_push_tile_bytes); 0 on a plain push.
+    int chunk_int4,
+    // Signaled push: chunks [chunk_begin, chunk_end) of the row (combine_push_param_t::chunk_begin).
+    int chunk_begin,
+    int chunk_end,
     // Backward combine (sparse-direct prob scatter into the token staging pad); null/false on forward.
     const float* topk_weights_em,
     const int32_t* srcpos_map,
@@ -577,7 +604,9 @@ ncclResult_t launch_combine_push(
     // Tests: use the load ring on any device where it fits (false: ht_combine_push_ring_enabled).
     bool force_ring,
     // Optional: receives the resolved chunk width and architecture of the launch (tests).
-    ::nccl_ep::CombinePushLaunch* launch_record);
+    ::nccl_ep::CombinePushLaunch* launch_record,
+    // Signaled push whose reduce waits on this done word (combine_push_param_t::push_done); null otherwise.
+    uint32_t* push_done);
 
 ncclResult_t launch_combine_reduce_stage(
     void* attn_output,
@@ -599,7 +628,13 @@ ncclResult_t launch_combine_reduce_stage(
     int top_k,
     bool backward,
     int32_t* retained_slots,
-    bool flat);
+    bool flat,
+    // Row columns [col_begin_int4, col_end_int4) to reduce; a part of the row only in a split signaled combine.
+    int col_begin_int4,
+    int col_end_int4,
+    // The push's done and call words when the reduce waits on its push's done word, which launches one extra
+    // block; null otherwise. See combine_reduce_param_t::push_done.
+    uint32_t* push_done);
 
 // Inverse of launch_dispatch_permute: gather caller EM combine input into
 // FLAT staging by summing the top_k EM rows per FLAT recv slot. Optional

@@ -412,6 +412,10 @@ Dispatch/combine SM-budget controls (LL and HT):
     export NCCL_EP_SHUFFLE_SMS=<number_of_sms>
     export NCCL_EP_PREPROCESS_NUM_SMS=<number_of_sms>
 
+    # HT split signaled combine: the last chunk's push and reduce; unset follows the other chunks
+    export NCCL_EP_HT_COMBINE_PUSH_LAST_CHUNK_SMS=<number_of_sms>
+    export NCCL_EP_HT_COMBINE_REDUCE_LAST_CHUNK_SMS=<number_of_sms>
+
 Each operation resolves its budget independently. Precedence, highest first,
 is its operation-specific environment variable, NCCL_EP_COMM_SMS, its
 operation-specific ncclEpGroupConfig_t field, max_num_sms, then the

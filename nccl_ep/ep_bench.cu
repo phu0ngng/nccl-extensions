@@ -5374,6 +5374,76 @@ computeNonUniformTokensPerRank(unsigned int max_tokens, int nRanks, unsigned int
     return out;
 }
 
+// ep_bench side of the dispatch signal: the flags and their capacity.
+struct DispatchSignalBench {
+    ncclEpSignal_t sig = NCCL_EP_SIGNAL_INIT;
+    int32_t* d_signal = nullptr;
+    int total_tiles = 0;
+    unsigned int output_rows = 0;
+};
+
+// Allocates the flags for --dispatch-signal; ncclEpDispatch rejects a lane that cannot signal.
+static void setupDispatchSignal(DispatchSignalBench& bench, int tile, unsigned int num_recv_tokens, int rank) {
+    // Buffer capacity: ceil(worst-case rows / tile). The actual fired tile count is the
+    // padded-active total (<= capacity), derived from per-expert counts after the run.
+    bench.total_tiles = static_cast<int>((num_recv_tokens + static_cast<unsigned int>(tile) - 1) / tile);
+    bench.output_rows = num_recv_tokens;
+    NCCLCHECK(epMakeTensor(&bench.sig.signal, 1, ncclInt32, bench.total_tiles));
+    bench.d_signal = static_cast<int32_t*>(bench.sig.signal->data);
+    bench.sig.granularity = tile;
+    if (rank == 0) {
+        printf("[DispatchSignal] enabled: tile=%d rows, signal capacity=%d tiles (recv capacity=%u rows); timed "
+               "dispatches reuse the set flags\n",
+               tile, bench.total_tiles, num_recv_tokens);
+        fflush(stdout);
+    }
+}
+
+// Checks the flags against the padded per-expert counts; every tile of the padded layout carries its own id and later
+// entries stay at the reset value. Returns the all-rank verdict.
+static bool validateDispatchSignal(
+    DispatchSignalBench& bench, const char* label, unsigned int num_local_experts, bool counts_int32,
+    const void* counts_dev, int rank) {
+    std::vector<int32_t> h_signal(bench.total_tiles);
+    CUDACHECK(cudaMemcpy(h_signal.data(), bench.d_signal, bench.total_tiles * sizeof(int32_t),
+                         cudaMemcpyDeviceToHost));
+    std::vector<int64_t> h_counts(num_local_experts);
+    if (counts_int32) {
+        // Fused dispatch writes the padded counts (int32) into the dispatch layout info.
+        std::vector<int32_t> h_counts32(num_local_experts);
+        CUDACHECK(cudaMemcpy(h_counts32.data(), counts_dev, num_local_experts * sizeof(int32_t),
+                             cudaMemcpyDeviceToHost));
+        h_counts.assign(h_counts32.begin(), h_counts32.end());
+    } else {
+        CUDACHECK(cudaMemcpy(h_counts.data(), counts_dev, num_local_experts * sizeof(int64_t),
+                             cudaMemcpyDeviceToHost));
+    }
+    int64_t padded_total = 0;
+    for (unsigned int e = 0; e < num_local_experts; ++e) {
+        padded_total += h_counts[e];
+    }
+    const int tile = bench.sig.granularity;
+    // Under overflow drop the padded total is pre-drop and the output ends at the budget, possibly inside a tile.
+    const int64_t published_rows = std::min<int64_t>(padded_total, bench.output_rows);
+    const int expected_tiles = static_cast<int>((published_rows + tile - 1) / tile);
+    bool ok = expected_tiles <= bench.total_tiles;
+    int fired = 0;
+    for (int t = 0; t < bench.total_tiles; ++t) {
+        fired += h_signal[t] >= 0;
+        ok = ok && h_signal[t] == (t < expected_tiles ? t : -1);
+    }
+    int rank_ok = ok ? 1 : 0, all_ok = 0;
+    MPICHECK(MPI_Allreduce(&rank_ok, &all_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD));
+    if (rank == 0) {
+        printf("\n=== DispatchSignal validation (%s) ===\n", label);
+        printf("padded EM rows=%ld -> expect %d tiles\n", static_cast<long>(padded_total), expected_tiles);
+        printf("flagged tiles=%d, signal[t] == t over the padded layout=%s -> %s\n", fired, ok ? "valid" : "INVALID",
+               all_ok ? "PASS" : "FAIL");
+        fflush(stdout);
+    }
+    return all_ok != 0;
+}
+
 void printUsage(const char* programName, int myRank) {
     if (myRank == 0) {
         printf("Usage: %s [OPTIONS]\n", programName);
@@ -5410,6 +5480,14 @@ void printUsage(const char* programName, int myRank) {
         printf(
             "  --expert-major-alignment <N>      Per-expert zone alignment in tokens (Expert-major only, power of "
             "2)\n");
+        printf(
+            "  --dispatch-signal <N>             HT EM pull dispatch: per-tile completion signaling with N rows\n"
+            "                                    per tile (default 0 = off; N must divide --expert-major-alignment).\n"
+            "                                    Validates the per-tile flags.\n"
+            "  --combine-signal                  Forward and backward combine with chunk readiness signaling\n"
+            "                                    (HT EM pull/push); every chunk is published up front.\n"
+            "  --signal-chunk-size <N>           --combine-signal chunk width in hidden elements, a multiple of\n"
+            "                                    the push tile (default 0 = one push tile).\n");
         printf(
             "  --max-recv-token-slots-per-rank <N>  Per-rank recv-slot budget\n"
             "                             HT default: ceil(1.15*top_k*tokens), plus expert-major alignment slack.\n"
@@ -5504,6 +5582,9 @@ int main(int argc, char* argv[]) {
     bool dynamic_tokens = false;  // Enable dynamic token allocation (HT only, for random topk)
     bool run_backward = false;  // Also benchmark the HT backward dispatch/combine ops
     size_t expert_major_alignment = 0;  // 0 = no padding; >1 aligns each expert zone
+    int dispatch_signal_tile = 0;  // HT EM pull only: >0 enables per-tile completion signaling (rows/tile)
+    bool combine_signal = false;  // HT EM pull/push: chunk readiness signaling on every forward combine
+    int combine_signal_chunk_size = 0;  // --signal-chunk-size: combine signal granularity (0 = one push tile)
     unsigned int max_recv_tokens_per_rank = UINT_MAX; // HT: UINT_MAX = benchmark default, 0 = eager sizing.
     bool overflow_drop = false;  // HT only; NCCL_EP_OVERFLOW_DROP instead of the library default (trap)
     ncclEpHtFlow_t ht_flow = NCCL_EP_HT_FLOW_AUTO;  // HT only; --ht-flow
@@ -5559,6 +5640,9 @@ int main(int argc, char* argv[]) {
         {"dispatch-only", no_argument, 0, 'D'},
         {"dynamic-tokens", no_argument, 0, 'M'},
         {"expert-major-alignment", required_argument, 0, 'A'},
+        {"dispatch-signal", required_argument, 0, 0},
+        {"combine-signal", no_argument, 0, 0},
+        {"signal-chunk-size", required_argument, 0, 0},
         {"max-recv-token-slots-per-rank", required_argument, 0, 'R'},
         {"zcopy", no_argument, 0, 'z'},
         {"max-num-sms", required_argument, 0, 'S'},
@@ -5783,6 +5867,19 @@ int main(int argc, char* argv[]) {
                     g_scaleDtype = ncclUint8;
                     g_scaleDtypeExplicit = true;
                     combine_quantization = NCCL_EP_COMB_QUANT_MXFP8;
+                } else if (strcmp(name, "dispatch-signal") == 0) {
+                    dispatch_signal_tile = atoi(optarg);
+                    if (dispatch_signal_tile <= 0) {
+                        if (myRank == 0) {
+                            printf("Error: --dispatch-signal must be a positive tile size, got '%s'\n", optarg);
+                        }
+                        MPI_Finalize();
+                        return 1;
+                    }
+                } else if (strcmp(name, "combine-signal") == 0) {
+                    combine_signal = true;
+                } else if (strcmp(name, "signal-chunk-size") == 0) {
+                    combine_signal_chunk_size = atoi(optarg);
                 } else if (strcmp(name, "datatype") == 0) {
                     if (strcmp(optarg, "bf16") == 0) token_dtype = ncclBfloat16;
                     else if (strcmp(optarg, "fp16") == 0) token_dtype = ncclFloat16;
@@ -6537,7 +6634,7 @@ int main(int argc, char* argv[]) {
     int64_t* dispatch_meta_counts_host = nullptr;
     int64_t* dispatch_meta_offsets_host = nullptr;
     const bool ht_em = (algorithm == NCCL_EP_ALGO_HIGH_THROUGHPUT && layout == NCCL_EP_LAYOUT_EXPERT_MAJOR);
-    const bool need_layout_info = ht_em && validate_data;
+    const bool need_layout_info = ht_em && (validate_data || dispatch_signal_tile > 0);
 
     // Scan and native-dup dispatch cannot publish caller layout outputs.
     const bool dispatch_metadata_capable = htDispatchMetadataCapable(comm, nRanks, config, layout, num_local_experts);
@@ -6895,6 +6992,52 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ==================== DispatchSignal (per-tile completion flags) ====================
+    // Allocate the caller-owned flags; validate them after each pass.
+    DispatchSignalBench sig_bench;
+    const bool dispatch_signal_active = dispatch_signal_tile > 0;
+    // A signaled combine would start while the signaled dispatch still writes the maps it reads.
+    if (dispatch_signal_active && combine_signal) {
+        if (myRank == 0) {
+            printf("Error: --dispatch-signal and --combine-signal cannot be combined.\n");
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    if (combine_signal_chunk_size != 0 && !combine_signal) {
+        if (myRank == 0) {
+            printf("Error: --signal-chunk-size requires --combine-signal.\n");
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    if (dispatch_signal_active) {
+        setupDispatchSignal(sig_bench, dispatch_signal_tile, num_recv_tokens, myRank);
+        dispatch_outputs.dispatch_signal = &sig_bench.sig;
+    }
+
+    // ==================== CombineSignal (combine readiness) ====================
+    // Publish up front (ready[s] = s), one flag per combine chunk.
+    ncclEpSignal_t combine_sig = NCCL_EP_SIGNAL_INIT;
+    if (combine_signal) {
+        const int hidden_elems = static_cast<int>(combine_inputs.tokens->sizes[1]);
+        const int elem_bytes = static_cast<int>(epDtypeBytes(combine_inputs.tokens->datatype));
+        // One push tile: min(ceil(row bytes / 512), 4) * 512 bytes (api_reference, "Combine readiness signaling").
+        const int row_bytes = hidden_elems * elem_bytes;
+        const int tile_elems = std::min((row_bytes + 511) / 512, 4) * 512 / elem_bytes;
+        combine_sig.granularity = combine_signal_chunk_size > 0 ? combine_signal_chunk_size : tile_elems;
+        const int num_chunks = (hidden_elems + combine_sig.granularity - 1) / combine_sig.granularity;
+        std::vector<int32_t> published(num_chunks);
+        std::iota(published.begin(), published.end(), 0);
+        NCCLCHECK(epMakeTensor(&combine_sig.signal, 1, ncclInt32, num_chunks));
+        CUDACHECK(cudaMemcpy(combine_sig.signal->data, published.data(), num_chunks * sizeof(int32_t),
+                             cudaMemcpyHostToDevice));
+        combine_inputs.combine_signal = &combine_sig;
+        if (myRank == 0) {
+            printf("[CombineSignal] enabled: granularity=%d\n", combine_sig.granularity);
+        }
+    }
+
     // Synchronize before benchmarking
     MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
     CUDACHECK(cudaStreamSynchronize(stream));
@@ -6973,6 +7116,7 @@ int main(int argc, char* argv[]) {
         dispatch_outputs.topk_idx = bwd ? nullptr : fwd_disp_out_idx;
         dispatch_config.pass_direction = dir;
         combine_inputs.topk_weights = bwd ? bwd_combine_in_tw : nullptr;
+        combine_inputs.combine_signal = combine_signal ? &combine_sig : nullptr;
         combine_config.pass_direction = dir;
     };
 
@@ -7109,7 +7253,28 @@ int main(int argc, char* argv[]) {
             use_cuda_graph);
     };
 
+    // ==================== DispatchSignal validation ====================
+    // Check the per-tile flags against the padded layout after each pass. The timed dispatches leave the flags set;
+    // one more paired pass, outside the timed loop, runs on reset flags.
+    auto validate_dispatch_signal = [&](const char* label) {
+        if (!dispatch_signal_active) {
+            return;
+        }
+        CUDACHECK(cudaMemsetAsync(sig_bench.d_signal, 0xFF, sig_bench.total_tiles * sizeof(int32_t), stream));
+        dispatch_fn();
+        CUDACHECK(cudaStreamSynchronize(stream));
+        benchmark_combine_fn();
+        CUDACHECK(cudaStreamSynchronize(stream));
+        MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
+        const void* counts_dev = defer_metadata ? dispatch_layout_info.expert_counters->data
+                                                : recv_expert_counter_tensor->data;
+        if (!validateDispatchSignal(sig_bench, label, num_local_experts, defer_metadata, counts_dev, myRank)) {
+            validation_passed = false;
+        }
+    };
     PairedBenchResult paired_result = run_paired_pass(ktimer, update_fn);
+
+    validate_dispatch_signal("forward");
 
     // Post-combine GPU memory snapshot. By this point the EP group has been
     // created, the handle has been initialized (and the rdma_buffer grown to
@@ -7403,7 +7568,7 @@ int main(int argc, char* argv[]) {
 
         MPICHECK(MPI_Allreduce(&local_dispatch_pass, &global_dispatch_pass, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD));
         MPICHECK(MPI_Allreduce(&local_combine_pass, &global_combine_pass, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD));
-        validation_passed = global_dispatch_pass && (dispatch_only || global_combine_pass);
+        validation_passed = validation_passed && global_dispatch_pass && (dispatch_only || global_combine_pass);
 
         if (myRank == 0) {
             if (dispatch_only) {
@@ -7462,6 +7627,7 @@ int main(int argc, char* argv[]) {
             KernelTimer ktimer_bwd;
             // No update_fn here: backward reuses the forward pass's routing state as-is.
             PairedBenchResult bwd_result = run_paired_pass(ktimer_bwd, [] {});
+            validate_dispatch_signal("backward");
 
             // Backward moves the same token rows as forward but swaps which leg carries the
             // routing weights, so its byte totals are recomputed for this direction rather than
@@ -7769,6 +7935,15 @@ int main(int argc, char* argv[]) {
             printf("=== Active-Mask Test Complete ===\n");
             fflush(stdout);
         }
+    }
+
+    if (dispatch_signal_active) {
+        dispatch_outputs.dispatch_signal = nullptr;
+        epFreeTensor(&sig_bench.sig.signal);
+    }
+    if (combine_signal) {
+        combine_inputs.combine_signal = nullptr;
+        epFreeTensor(&combine_sig.signal);
     }
 
     NCCLCHECK(ncclEpHandleDestroy(ep_handle));

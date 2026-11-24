@@ -101,3 +101,5 @@ void ncclEpHandle_test_getSmBudgets(
     ncclEpHandle_t handle, ncclEpPassDir_t pass_direction, unsigned int* dispatch_num_sms,
     unsigned int* combine_num_sms);
 int ncclEpHandle_test_getCombineTokensPerChunk(ncclEpHandle_t handle);
+// The signaled combine's done and call words (combine_push_done): the unsplit pair, then a split's head pair.
+ncclResult_t ncclEpGroup_test_getCombinePushDone(ncclEpGroup_t group, uint32_t words[4]);

@@ -65,6 +65,10 @@ __device__ __forceinline__ int atomic_add_relaxed_global(int* ptr, int value) {
     return atomicAdd(ptr, value);
 }
 
+__device__ __forceinline__ uint32_t atomic_add_relaxed_global(uint32_t* ptr, uint32_t value) {
+    return atomicAdd(ptr, value);
+}
+
 __device__ __forceinline__ unsigned long long atomic_or_relaxed_shared(
     unsigned long long* ptr, unsigned long long value) {
     return atomicOr(ptr, value);
@@ -226,6 +230,16 @@ __device__ __forceinline__ void trap() {
     asm("trap;");
 }
 
+// PDL: let this grid's programmatic dependent start before this grid exits.
+__device__ __forceinline__ void launch_dependents() {
+    cudaTriggerProgrammaticLaunchCompletion();
+}
+
+// PDL: wait until the preceding grid has completed and its writes are visible; no-op without PDL.
+__device__ __forceinline__ void grid_dependency_wait() {
+    cudaGridDependencySynchronize();
+}
+
 __forceinline__ __device__ int get_lane_id() {
     int lane_id;
     asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
@@ -335,6 +349,11 @@ __device__ __forceinline__ void memory_fence_acquire_sys() {
 
 __device__ __forceinline__ void memory_fence_gpu() {
     asm volatile("fence.acq_rel.gpu;" ::: "memory");
+}
+
+// Release-only GPU-scope fence: orders this thread's preceding writes before its later stores.
+__device__ __forceinline__ void memory_fence_release_gpu() {
+    asm volatile("fence.release.gpu;" ::: "memory");
 }
 
 // Acquire-only GPU-scope fence: a strong read (e.g. the read half of an
@@ -597,6 +616,14 @@ __device__ __forceinline__ void st_relaxed_sys_global(const uint64_t* ptr, uint6
 
 __device__ __forceinline__ void st_relaxed_gpu_global(uint64_t* ptr, uint64_t val) {
     asm volatile("st.relaxed.gpu.global.b64 [%0], %1;" : : "l"(__cvta_generic_to_global(ptr)), "l"(val) : "memory");
+}
+
+__device__ __forceinline__ void st_relaxed_gpu_global(int32_t* ptr, int32_t val) {
+    asm volatile("st.relaxed.gpu.global.s32 [%0], %1;" : : "l"(__cvta_generic_to_global(ptr)), "r"(val) : "memory");
+}
+
+__device__ __forceinline__ void st_relaxed_gpu_global(int64_t* ptr, int64_t val) {
+    asm volatile("st.relaxed.gpu.global.s64 [%0], %1;" : : "l"(__cvta_generic_to_global(ptr)), "l"(val) : "memory");
 }
 
 __device__ __forceinline__ void st_na_relaxed(const uint8_t* ptr, uint8_t val) {

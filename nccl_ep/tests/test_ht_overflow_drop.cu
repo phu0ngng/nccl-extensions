@@ -25,8 +25,10 @@
 
 #include "test_common.h"
 #include "../nccl_ep_test_internal.h"
+#include "nccl_ep/common.hpp"
 
 #include <cmath>
+#include <numeric>
 #include <set>
 
 // Recv budget for the drop group. Must be >= max_dispatch_tokens_per_rank
@@ -974,10 +976,31 @@ TEST_F(HtOverflowDropTest, EmLocalPermuteDeepFlatOverflowPhantomRowsZeroed) {
     d_out.tokens = t_recv;
     d_out.topk_weights = t_recv_w;
     ncclEpDispatchConfig_t dcfg = NCCL_EP_DISPATCH_CONFIG_INIT;
+    int32_t* d_signal = nullptr;
+    ncclEpSignal_t signal = NCCL_EP_SIGNAL_INIT;
+    // Pull dispatch only, with scan or fused maps; the fused path counts the dropped rows in its last block.
+    const int capacity = nccl_ep::ceil_div<int>(static_cast<int>(kCap + kDeclSlack), kAlign);
+    if (ht_pull_push_active()) {
+        CUDA_ASSERT(cudaMalloc(&d_signal, capacity * sizeof(int32_t)));
+        CUDA_ASSERT(cudaMemset(d_signal, 0xFF, capacity * sizeof(int32_t)));
+        signal.granularity = kAlign;
+        NCCL_ASSERT(epTensorCreate(&signal.signal, 1, ncclInt32, d_signal, capacity));
+        d_out.dispatch_signal = &signal;
+    }
     EXPECT_EQ(ncclEpDispatch(h, &d_in, &d_out, nullptr, &dcfg, g_stream), ncclSuccess);
     EXPECT_EQ(ncclEpComplete(h, nullptr, g_stream), ncclSuccess);
     ASSERT_EQ(cudaStreamSynchronize(g_stream), cudaSuccess)
         << "Rank " << g_rank << ": deep-FLAT-overflow dispatch must not fault";
+
+    if (d_signal) {
+        const int tiles = g_rank == 0 ? kCap / kAlign : 0;
+        std::vector<int32_t> flags(capacity), expected(capacity, -1);
+        CUDA_ASSERT(cudaMemcpy(flags.data(), d_signal, capacity * sizeof(int32_t), cudaMemcpyDeviceToHost));
+        std::iota(expected.begin(), expected.begin() + tiles, 0);
+        EXPECT_EQ(flags, expected) << "phantom rows must also complete their tiles; later flags stay -1";
+        ncclEpTensorDestroy(signal.signal);
+        cudaFree(d_signal);
+    }
 
     {
         std::vector<nv_bfloat16> h_recv(recv_rows_alloc * kHidden);

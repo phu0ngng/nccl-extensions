@@ -323,6 +323,26 @@ tests:
           NCCL_LSA_TEAM_SIZE: "4"
           NCCL_EP_HT_UNFUSED_SYNC: "1"
 
+  - name: test_ht_signal
+    binary: "@bash"
+    args: >-
+      "${CI_PROJECT_DIR}/nccl_ep/ci/run_unit_test.sh"
+      "${NCCL_HOME}/test/nccl_ep/test_ht_signal"
+    matrix:
+      - name_suffix: pull_push
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+      - name_suffix: pull_push_scan
+        env:
+          NCCL_EP_HT_PULL_PUSH: "1"
+          NCCL_LSA_TEAM_SIZE: "4"
+          NCCL_EP_HT_AG_SCAN_MODE: "1"
+      - name_suffix: two_lsa_teams
+        args_append: "--gtest_filter=SignalLsaTeamTest.*"
+        env:
+          NCCL_LSA_TEAM_SIZE: "2"
+
   - name: test_tensor_create
     binary: "@bash"
     args: >-

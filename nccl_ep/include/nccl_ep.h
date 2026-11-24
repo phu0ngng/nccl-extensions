@@ -510,6 +510,39 @@ typedef struct {
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpDispatchInputs_t, NCCL_EP_DISPATCH_INPUTS);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchInputs_t, NCCL_EP_DISPATCH_INPUTS, 1);
 
+// The unit that ncclEpSignal_t::granularity counts. AUTO selects the op's natural unit; an explicit unit the op
+// does not support is rejected.
+typedef enum {
+    NCCL_EP_SIGNAL_UNIT_AUTO = 0,     // dispatch: ROWS; combine: COLUMNS
+    NCCL_EP_SIGNAL_UNIT_ROWS = 1,     // dispatch only: granularity counts output token rows per flag
+    NCCL_EP_SIGNAL_UNIT_COLUMNS = 2,  // combine only: granularity counts hidden elements (any dtype) per flag
+} ncclEpSignalUnit_t;
+
+// Per-tile int32 readiness flags of an HT expert-major pull-push op, reset to -1 before it: flag[i] == i once tile or
+// chunk i is complete. See "Dispatch tile completion" and "Combine readiness signaling" in api_reference.md.
+typedef struct {
+    unsigned int size;  // = sizeof(this struct); first field, never moves
+    unsigned int magic; // = NCCL_EP_MAGIC; second field, never moves
+    int granularity;          // each flag spans this many units. Dispatch: EM rows per tile, a power of two <= 32768
+                              // dividing the handle's per-expert alignment. Combine: hidden elements per chunk, a
+                              // positive multiple of the push tile
+    ncclEpSignalUnit_t unit;  // what granularity counts; AUTO (default) = the op's natural unit
+    ncclEpTensor_t* signal;   // 1D ncclInt32 [>= number of flags], reset to -1; the producer sets signal[i] = i
+} ncclEpSignal_t;
+
+#define NCCL_EP_SIGNAL_INIT \
+    NCCL_EP_STRUCT_INIT(ncclEpSignal_t, NCCL_EP_MAGIC)
+
+#define NCCL_EP_SIGNAL_SIZE ((unsigned int)sizeof(ncclEpSignal_t))
+
+#define NCCL_EP_SIGNAL_V1_LAST_FIELD signal
+#define NCCL_EP_SIGNAL_V1_SIZE 24u
+
+#define NCCL_EP_SIGNAL_CURRENT_VERSION 1
+
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpSignal_t, NCCL_EP_SIGNAL);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpSignal_t, NCCL_EP_SIGNAL, 1);
+
 // Output tensors for ncclEpDispatch.
 // All fields except tokens are optional (NULL = not provided). Each field is a
 // pointer to a caller-owned descriptor.
@@ -528,6 +561,9 @@ typedef struct {
   // source top-k order, paired with their weights; unused columns are -1/zero.
   // Set NCCL_EP_HT_RECV_TOPK_ORDER=expert-ascend before group creation to retain ascending
   // expert order. Dense fallback and pull-push retain their existing behavior.
+    ncclEpSignal_t* dispatch_signal; // optional; per-tile completion flags (NULL = off); see ncclEpSignal_t
+  // A forward that builds its maps needs ceil(lsa_team_size * ceil(T / 32) / 32) * 4 <= 16384
+  // (T = max_dispatch_tokens_per_rank), else ncclInvalidArgument.
 } ncclEpDispatchOutputs_t;
 
 #define NCCL_EP_DISPATCH_OUTPUTS_INIT \
@@ -537,11 +573,14 @@ typedef struct {
 
 #define NCCL_EP_DISPATCH_OUTPUTS_V1_LAST_FIELD topk_idx
 #define NCCL_EP_DISPATCH_OUTPUTS_V1_SIZE 40u
+#define NCCL_EP_DISPATCH_OUTPUTS_V2_LAST_FIELD dispatch_signal
+#define NCCL_EP_DISPATCH_OUTPUTS_V2_SIZE 48u
 
-#define NCCL_EP_DISPATCH_OUTPUTS_CURRENT_VERSION 1
+#define NCCL_EP_DISPATCH_OUTPUTS_CURRENT_VERSION 2
 
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpDispatchOutputs_t, NCCL_EP_DISPATCH_OUTPUTS);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchOutputs_t, NCCL_EP_DISPATCH_OUTPUTS, 1);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpDispatchOutputs_t, NCCL_EP_DISPATCH_OUTPUTS, 2);
 
 // Input tensors for ncclEpCombine.
 // All fields except tokens are optional (NULL = not provided). Each field is a
@@ -557,6 +596,7 @@ typedef struct {
     //   must be NULL. MXFP8 generates E8M0 block scales internally; NVFP4 derives its
     //   per-row global scales internally.
     ncclEpTensor_t* scales;
+    ncclEpSignal_t* combine_signal; // optional; per-chunk readiness flags of tokens (NULL = off)
 } ncclEpCombineInputs_t;
 
 #define NCCL_EP_COMBINE_INPUTS_INIT \
@@ -568,12 +608,15 @@ typedef struct {
 #define NCCL_EP_COMBINE_INPUTS_V1_SIZE 24u
 #define NCCL_EP_COMBINE_INPUTS_V2_LAST_FIELD scales
 #define NCCL_EP_COMBINE_INPUTS_V2_SIZE 32u
+#define NCCL_EP_COMBINE_INPUTS_V3_LAST_FIELD combine_signal
+#define NCCL_EP_COMBINE_INPUTS_V3_SIZE 40u
 
-#define NCCL_EP_COMBINE_INPUTS_CURRENT_VERSION 2
+#define NCCL_EP_COMBINE_INPUTS_CURRENT_VERSION 3
 
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS, 1);
 NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS, 2);
+NCCL_EP_STATIC_ASSERT_STRUCT_ABI_BOUNDARY(ncclEpCombineInputs_t, NCCL_EP_COMBINE_INPUTS, 3);
 
 // Output tensors for ncclEpCombine.
 // All fields except tokens are optional (NULL = not provided). Each field is a
