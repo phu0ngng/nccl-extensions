@@ -231,7 +231,9 @@ Per warp (one claimed recv slot per iteration, n <= top_k valid EM copies)
 **Chunking.** The chunk width is set with `NCCL_EP_HT_COMBINE_PUSH_CHUNK_SIZE`,
 in hidden elements. Unset uses the auto default: one tile (128 int4, 2KB, i.e.
 1024 BF16 elements, once a row has at least 97 int4) for EP < 16, and the whole
-row for EP >= 16 (see the EP sweep below); `0` forces the whole row as one chunk.
+row for EP >= 16 (see the EP sweep below); on Rubin (SM107) it is one tile at
+every EP size. An explicit value overrides the default on every GPU, and `0`
+forces the whole row; flat and MXFP8 combines ignore it and push the whole row.
 Other values are rounded up to whole tiles and clamped to the row,
 and the chunk count is `ceil(hidden / chunk_size)`. A one-tile chunk gives a
 2KB per-warp buffer, so the block keeps all `kCombinePushMaxSlots = 24` warps
@@ -265,6 +267,9 @@ wash at EP 16, and neutral-to-slower and run-to-run unstable at EP 32 (DSv3 up t
 +37%) -- from EP 16 up the combine already runs at the NVLink bandwidth plateau
 with no gather latency left to hide. The auto default therefore chunks one tile
 for EP < 16 and pushes the whole row for EP >= 16.
+
+The sweep above is GB300. On Rubin (SM107) the one-tile chunk was also faster at
+EP 16 and 32, so there the auto default chunks one tile at every EP size.
 
 **Row claiming.** Rows with several valid EM copies cost more than single-copy
 rows, and peer NVLink links differ in speed, so static per-warp row ranges
