@@ -6996,9 +6996,10 @@ ncclResult_t ncclEpDispatch(
         // Fused-meta-dispatch path: build the rank-major s2d inside the dispatch kernel from the
         // histogram-published per-rank count rows (FWD only; BWD reuses the FWD-populated s2d).
         // No host collective or kernel runs between the histogram and dispatch.
-        if (count_mode && !forward_dispatch && !handle->ht.dispatch_push_count.fwd_maps_built) {
+        if ((count_mode || pull_count_dispatch) && !forward_dispatch &&
+            !handle->ht.dispatch_push_count.fwd_maps_built) {
             fprintf(stderr,
-                    "ncclEpDispatch: count mode builds the recv maps in the forward dispatch; "
+                    "ncclEpDispatch: fused metadata builds the recv maps in the forward dispatch; "
                     "a backward dispatch needs one after ncclEpUpdateHandle\n");
             return ncclInvalidUsage;
         }
@@ -7769,10 +7770,10 @@ ncclResult_t ncclEpDispatch(
             }
         }
 
-        // Count mode: the recv maps BWD dispatch and combine read are finished by the
+        // Fused metadata: the recv maps BWD dispatch and combine read are finished by the
         // epilogues above (lerm_flat_copy for Flat, dispatch_permute for EM), so only
         // mark them built once every step has been enqueued without an early return.
-        if (count_mode_dispatch || (flat_deferred && forward_dispatch)) {
+        if (count_mode_dispatch || pull_count_rebuild || (flat_deferred && forward_dispatch)) {
             handle->ht.dispatch_push_count.fwd_maps_built = true;
         }
     }
@@ -8327,9 +8328,10 @@ ncclResult_t ncclEpCombine(
         // local_expert_routing_map are built by the forward dispatch, so a combine
         // issued straight after ncclEpUpdateHandle would read unbuilt maps. Checked after
         // the argument validation above so an invalid call is still reported as such.
-        if (dispatch_push_count_active(group, handle) && !handle->ht.dispatch_push_count.fwd_maps_built) {
+        if ((dispatch_push_count_active(group, handle) || dispatch_pull_count_active(group, handle)) &&
+            !handle->ht.dispatch_push_count.fwd_maps_built) {
             fprintf(stderr,
-                    "ncclEpCombine: count mode builds the recv maps in the forward dispatch; "
+                    "ncclEpCombine: fused metadata builds the recv maps in the forward dispatch; "
                     "combine needs one after ncclEpUpdateHandle\n");
             return ncclInvalidUsage;
         }

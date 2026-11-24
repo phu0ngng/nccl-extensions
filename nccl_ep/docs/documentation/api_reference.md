@@ -276,6 +276,17 @@ snapshot.
 // Local only: no device-state copy, CUDA launch, or metadata scan. Dispatch
 // and Combine can use the returned handle without another UpdateHandle.
 //
+// For forward dispatch: handle_mem may be snapshotted any time after
+// ncclEpUpdateHandle completes on the source stream.
+//
+// For backward dispatch or combine under fused metadata (push-count: expert-major
+// local-permute and Flat; pull-count: the pull/push flow; see
+// ncclEpDispatch's layout_info notes): handle_mem must be snapshotted after the
+// matching forward ncclEpDispatch has completed, with the copy ordered after that
+// work. ncclEpUpdateHandle alone does not write the per-token maps that backward
+// dispatch and combine read. Otherwise the per-token maps are complete after
+// ncclEpUpdateHandle.
+//
 // Arguments:
 //   handle     - [OUT] Newly imported handle
 //   ep_group   - [IN]  The EP group used to prepare handle_mem
@@ -438,8 +449,8 @@ Perform EP combine: gather expert outputs and return in original token order.
 //                               LL expert-major: 3D [num_local_experts, N(r), data_size].
 //                               LL rank-major:   3D [num_ranks, max_dispatch_tokens_per_rank, data_size].
 //                               HT:              2D [N(r), data_size].
-//                               Backward combine: also set `inputs->topk_weights`
-//                               [N(r), top_k] (HT only).
+//                               Backward combine: also set `inputs->topk_weights` (HT only):
+//                               expert-major 1D [N(r)], FLAT 2D [N(r), top_k].
 //   outputs          - [IN,OUT] Named preallocated output tensors. `outputs->tokens` is required;
 //                               2D [num_tokens, data_size] in original token order.
 //                               LL expert-major: `outputs->topk_weights` [num_tokens, top_k]

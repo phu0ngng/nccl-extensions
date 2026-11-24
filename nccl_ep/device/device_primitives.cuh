@@ -355,6 +355,11 @@ __device__ __forceinline__ void fence_proxy_async() {
     asm volatile("fence.proxy.async;" ::: "memory");
 }
 
+// Orders generic-proxy and async-proxy accesses to global memory, in both directions.
+__device__ __forceinline__ void fence_proxy_async_global() {
+    asm volatile("fence.proxy.async.global;" ::: "memory");
+}
+
 //==============================================================================
 // Load Operations - Volatile
 //==============================================================================

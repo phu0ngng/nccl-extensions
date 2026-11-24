@@ -571,6 +571,44 @@ TEST_F(HtCompactProbTest, FlatFusedMapsRequireMatchingForward) {
     }
 }
 
+TEST_F(HtCompactProbTest, ExpertMajorPullMapsRequireMatchingForward) {
+    if (!fused_count_mode()) {
+        GTEST_SKIP() << "fused metadata only";
+    }
+    constexpr int topk = 8, experts = 256;
+    const int capacity = (g_nranks * kTokens * topk + (experts / g_nranks) * (kAlignment - 1) + 127) & ~63;
+    ASSERT_NO_FATAL_FAILURE(create_group(experts, topk, capacity, false, kTokens, &group_));
+    if (ncclEpGroup_test_getHtFlow(group_) != NCCL_EP_HT_FLOW_PULL_PUSH) {
+        GTEST_SKIP() << "pull-push flow only";
+    }
+    State s;
+    ASSERT_NO_FATAL_FAILURE(s.initialize(group_, true, false, topk, experts, capacity));
+    if (ncclEpHandle_test_getNRanksPerNode(s.handle) != g_nranks) {
+        GTEST_SKIP() << "single LSA team only";
+    }
+    ncclEpDispatchInputs_t dispatch_input = NCCL_EP_DISPATCH_INPUTS_INIT;
+    ncclEpDispatchOutputs_t dispatch_output = NCCL_EP_DISPATCH_OUTPUTS_INIT;
+    ncclEpDispatchConfig_t dispatch_config = NCCL_EP_DISPATCH_CONFIG_INIT;
+    dispatch_input.tokens = s.x;
+    dispatch_output.tokens = s.rx;
+    dispatch_config.pass_direction = NCCL_EP_BWD_PASS;
+    ncclEpCombineInputs_t combine_input = NCCL_EP_COMBINE_INPUTS_INIT;
+    ncclEpCombineOutputs_t combine_output = NCCL_EP_COMBINE_OUTPUTS_INIT;
+    ncclEpCombineConfig_t combine_config = NCCL_EP_COMBINE_CONFIG_INIT;
+    combine_input.tokens = s.rx;
+    combine_output.tokens = s.cx;
+    for (int generation : {0, 1}) {
+        ASSERT_NO_FATAL_FAILURE(s.update(kTokens, generation, false));
+        ASSERT_TRUE(ht_count_mode_active(s.handle));
+        EXPECT_EQ(ncclEpDispatch(s.handle, &dispatch_input, &dispatch_output, nullptr,
+                                 &dispatch_config, g_stream), ncclInvalidUsage);
+        EXPECT_EQ(ncclEpCombine(s.handle, &combine_input, &combine_output,
+                                &combine_config, g_stream), ncclInvalidUsage);
+        ASSERT_NO_FATAL_FAILURE(s.dispatch(0, false));
+        ASSERT_NO_FATAL_FAILURE(s.backward());
+    }
+}
+
 TEST_F(HtCompactProbTest, FlatPullCounterWindowAndIgnoredOffsets) {
     if (!ht_pull_push_active() || !fused_count_mode()) {
         GTEST_SKIP() << "fused flat pull metadata only";

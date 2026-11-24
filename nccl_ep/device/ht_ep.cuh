@@ -6949,6 +6949,8 @@ __device__ __forceinline__ void local_permute_dup(
             const int32_t delivered = em_permute_cursors[e];
             const int32_t true_active = delivered < active ? delivered : active;
             if (true_active >= active) continue;
+            // Every lane has read active before lane 0 overwrites it.
+            __syncwarp();
             // Correct the handle-scoped field in place (see allow_overflow_drop above).
             if (lane == 0) per_expert_counts_active[e] = true_active;
             const int64_t zone_start = expert_token_offsets[e];
@@ -7883,6 +7885,10 @@ __device__ __forceinline__ void dispatch_pull(
     } else if (!unfused_sync) {
         lsa_grid_head_gate(dcomm, head_sync_flag);
     }
+    // Peer rows are read through the async proxy after the gate's generic acquire.
+    if (!is_pad && !is_map && lane == 0) {
+        nccl_ep::fence_proxy_async_global();
+    }
 
     if constexpr (kFusedMap) {
         if (is_map) {
@@ -7983,6 +7989,8 @@ __device__ __forceinline__ void dispatch_pull(
                 const int32_t delivered = expert_cursor[e];
                 const int32_t true_active = delivered < active ? delivered : active;
                 if (true_active >= active) continue;
+                // Every lane has read active before lane 0 overwrites it.
+                __syncwarp();
                 if (lane == 0) per_expert_counts_active[e] = true_active;
                 const int64_t zone_start = expert_token_offsets[e];
                 for (int64_t slot = zone_start + true_active; slot < zone_start + active; slot++) {
@@ -9704,6 +9712,10 @@ __device__ __forceinline__ void dispatch_pull_flat(const dispatch_pull_param_t& 
     }
     TokenStage::block_init_fence();
     flat_dispatch_head<FusedMap>(p);
+    // Peer rows are read through the async proxy after the gate's generic acquire.
+    if (!is_map && lane == 0) {
+        nccl_ep::fence_proxy_async_global();
+    }
 
     constexpr size_t kPayloadBytes = kPayloadWarps * (TokenStage::smem_bytes_per_warp +
         (kScaleTma ? ScaleStage::smem_bytes_per_warp : 0));

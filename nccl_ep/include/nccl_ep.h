@@ -550,8 +550,8 @@ typedef struct {
     unsigned int size; // = sizeof(this struct); first field, never moves
     unsigned int magic; // = NCCL_EP_MAGIC; second field, never moves
     ncclEpTensor_t* tokens; // required post-expert activations; omitted on AFD attention ranks
-    ncclEpTensor_t* topk_weights; // optional; HT backward combine only:
-  //   2D [num_recv_tokens, top_k], ncclFloat32
+    ncclEpTensor_t* topk_weights; // optional; HT backward combine only, ncclFloat32:
+  //   expert-major 1D [N(r)] (one weight per received row), FLAT 2D [N(r), top_k]
     // Optional; recipe-dependent:
     // - NCCL_EP_COMB_QUANT_NONE / NCCL_EP_COMB_QUANT_MXFP8 / NCCL_EP_COMB_QUANT_NVFP4:
     //   must be NULL. MXFP8 generates E8M0 block scales internally; NVFP4 derives its
@@ -728,12 +728,13 @@ ncclResult_t ncclEpInitHandle(
 // For forward dispatch: handle_mem may be snapshotted any time after
 // ncclEpUpdateHandle completes on the source stream.
 //
-// For backward dispatch or combine in count mode (expert-major local-permute
-// and Flat; see ncclEpDispatch's layout_info notes): handle_mem must be
-// snapshotted after the matching forward ncclEpDispatch has completed, with
-// the copy ordered after that work. ncclEpUpdateHandle alone does not write
-// the per-token maps that backward dispatch and combine read. Outside count
-// mode the per-token maps are complete after ncclEpUpdateHandle.
+// For backward dispatch or combine under fused metadata (push-count: expert-major
+// local-permute and Flat; pull-count: the pull/push flow; see
+// ncclEpDispatch's layout_info notes): handle_mem must be snapshotted after the
+// matching forward ncclEpDispatch has completed, with the copy ordered after that
+// work. ncclEpUpdateHandle alone does not write the per-token maps that backward
+// dispatch and combine read. Otherwise the per-token maps are complete after
+// ncclEpUpdateHandle.
 //
 // Arguments:
 //   handle     - [OUT] Newly imported handle
